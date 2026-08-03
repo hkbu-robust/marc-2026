@@ -29,10 +29,11 @@ services:
       #   2) hardcode them by editing the defaults after ':-' below.
       # For the private-repo submission use (2) so the organizer just runs `docker compose up`.
       # The team ID and token are issued by the organizers (not defaulted or derived locally).
-      MARC_TEAM_ID:  "${MARC_TEAM_ID:-u1}"                     # <- your assigned team ID
+      MARC_TEAM_ID:  "${MARC_TEAM_ID:-robust}"                     # <- your assigned team ID
       MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"    # <- your assigned token
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"                     # same value as the platform machine
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
+      PYTHONPATH: "/agent"
     # GPU for VLA inference (uses the participant machine's GPU). If no GPU is needed, the deploy block can be removed.
     # Requires: nvidia-container-toolkit installed on the participant machine.
     deploy:

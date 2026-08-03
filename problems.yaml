@@ -1,18 +1,5 @@
-# MARC 2026 - Problem selection template (practice platform)
-# ---------------------------------------------------------------------------
-# Choose which challenge problems the practice platform poses. Only entries with
-# enabled: true are used; Stage 2 (retrieval) uses the first enabled entry.
-#
-# This file is used AUTOMATICALLY when present (no env var needed). Delete it to
-# pose ALL problems instead. (All stage1 enabled below = the default "all".)
-#
-# Regenerate interactively for a scenario with the checklist TUI:
-#   bash simulation-platform/marc.sh select marc2026_chungmu   # or marc2026_demo
-#
-# NOTE: the ids below match marc2026_chungmu. Selection is per-scenario — if you
-# switch scenarios, regenerate. A file whose `scenario` differs from the one you
-# run is ignored with a warning (falls back to all problems).
-# ---------------------------------------------------------------------------
+# MARC 2026 problem selection - created/edited by tools/select_problems.py
+# Use: start the platform with MARC_PROBLEM_SELECTION=/metacom2026/problems.yaml to pose only the enabled items
 scenario: marc2026_chungmu
 stage1:
 - id: lf01_mug_table

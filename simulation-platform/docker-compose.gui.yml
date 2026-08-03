@@ -9,7 +9,7 @@
 #   xhost +local:root
 # Run:
 #   HEADLESS=false docker compose \
-#     -f docker-compose.yml -f docker-compose.gui.yml --profile platform up
+#    -f docker-compose.yml -f docker-compose.gui.yml --profile platform up
 # (To view dataset-gen via GUI too, use the same pattern + --profile dataset-gen)
 # ===========================================================================
 services:

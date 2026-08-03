@@ -15,14 +15,20 @@ Replace this class with a real VLA model that returns a ``GroundingResult`` from
 images to build an actual competition agent.
 """
 
+from http import client
 import logging
 import os
+
 
 import yaml
 
 from marc_sdk import GroundingResult
+from marc_sdk import MARCClient
+
+
 
 log = logging.getLogger("participant_app")
+
 
 
 def _default_data_path() -> str:
@@ -41,6 +47,11 @@ class MockVLAGrounding:
     def __init__(self, data_path: str = None):
         path = data_path or os.environ.get("MOCKUP_DEMO_DATA") or _default_data_path()
         data = {}
+            
+        client = MARCClient.from_env()
+        ok = client.connect()
+        print("Connected to MARC server:", ok)
+
         if os.path.exists(path):
             with open(path) as f:
                 data = yaml.safe_load(f) or {}

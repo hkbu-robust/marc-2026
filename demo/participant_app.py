@@ -76,6 +76,7 @@ class DemoParticipant:
     def __init__(self):
         self.client = MARCClient.from_env()
         self.vla = MockVLAGrounding()
+        #logging.info("Connected to MARC server: %s", self.client.connect())
         # Stage 2 pickup goal -- filled from the approximate location hint in the reveal (msg 411).
         # If not received, fall back to the Stage 2 answer target (_stage2_target_xy).
         self._collect_xy = None
