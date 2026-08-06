@@ -105,9 +105,7 @@ class EpisodeRecorder:
         with h5py.File(h5_path, "w") as f:
             n = len(self.steps)
             g = f.create_group("steps")
-            # images may vary size slightly — stack if same shape else store as vlen is hard;
-            # assume constant resolution within episode.
-            ig0 = self.steps[0]["image_gripper"]
+            # Assume constant image resolution within an episode.
             g.create_dataset(
                 "image_gripper",
                 data=np.stack([s["image_gripper"] for s in self.steps], axis=0),

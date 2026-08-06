@@ -20,7 +20,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # for the closed-loop arm IK pick (Pinocchio-based, pip-installable on Python 3.10).
 # The network is used at build time only -- the judging runtime environment has no internet (no runtime dependency).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3-numpy python3-yaml python3-pip \
+        python3-numpy python3-yaml python3-pip python3-h5py \
     && pip3 install --no-cache-dir placo \
     && rm -rf /var/lib/apt/lists/*
 

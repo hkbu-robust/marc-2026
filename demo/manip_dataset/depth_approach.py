@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
+
 from .images import depth_roi_median, image_to_depth
 
 
@@ -75,7 +77,7 @@ class DepthApproachController:
         if not samples:
             self.d0 = None
             return None
-        self.d0 = float(np_median(samples))
+        self.d0 = float(np.median(np.asarray(samples, dtype=np.float64)))
         self._hit_count = 0
         self._last_median = self.d0
         return self.d0
@@ -125,8 +127,3 @@ class DepthApproachController:
     def settle(self):
         self._client.send_cmd_vel(0.0, 0.0)
         time.sleep(self.cfg.settle_s)
-
-
-def np_median(xs):
-    import numpy as np
-    return float(np.median(np.asarray(xs, dtype=np.float64)))

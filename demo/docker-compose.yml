@@ -55,6 +55,8 @@ services:
     image: marc-agent:local
     network_mode: host
     working_dir: /agent/demo
+    stdin_open: true
+    tty: true
     environment:
       MARC_TEAM_ID:  "${MARC_TEAM_ID:-u1}"
       MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
@@ -62,8 +64,16 @@ services:
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       # Match manip-trainer: UDP-only Fast DDS (no SHM) so host-network DDS discovery works
       FASTRTPS_DEFAULT_PROFILES_FILE: "/agent/demo/fastdds.xml"
-      PYTHONPATH: "/agent"
+      PYTHONPATH: "/agent:/agent/demo"
       PYTHONUNBUFFERED: "1"
+      MARC_DATASET_ROOT: "/agent/demo/datasets/marc_pnp"
+      MARC_APPROACH_TAU: "${MARC_APPROACH_TAU:-0.15}"
+      MARC_APPROACH_D_NEAR: "${MARC_APPROACH_D_NEAR:-0.55}"
+      MARC_APPROACH_CRAWL: "${MARC_APPROACH_CRAWL:-0.05}"
+      MARC_BASE_LIN: "${MARC_BASE_LIN:-0.08}"
+      MARC_BASE_ANG: "${MARC_BASE_ANG:-0.25}"
+    volumes:
+      - ./datasets:/agent/demo/datasets
     command: ["python3", "/agent/demo/handshake_manip_trainer_client.py"]
     deploy:
       resources:

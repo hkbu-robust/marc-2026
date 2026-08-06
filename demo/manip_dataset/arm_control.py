@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
 
 import numpy as np
-from sensor_msgs.msg import JointState
 
 import arm_kin
 from arm_pick import (
@@ -208,9 +207,8 @@ class ArmTeleop:
         grasping = self._client.is_grasping()
         if self._closed_since_last_open and grasping is True:
             self._saw_grasp_after_close = True
-        t_sim = None
         try:
-            t_sim = float(self._client.now())
+            t_sim = float(self._client.now_s())
         except Exception:
             t_sim = time.time()
         return {
