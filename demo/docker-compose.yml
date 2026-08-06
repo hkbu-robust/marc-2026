@@ -47,3 +47,28 @@ services:
     #   add  MARC_SCENARIO_FILE: "/agent/my_scenario.yaml"  to environment
     # volumes:
     #   - ./my_scenario.yaml:/agent/my_scenario.yaml:ro
+
+  agent-manip-probe:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+    image: marc-agent:local
+    network_mode: host
+    working_dir: /agent/demo
+    environment:
+      MARC_TEAM_ID:  "${MARC_TEAM_ID:-u1}"
+      MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
+      # Match manip-trainer: UDP-only Fast DDS (no SHM) so host-network DDS discovery works
+      FASTRTPS_DEFAULT_PROFILES_FILE: "/agent/demo/fastdds.xml"
+      PYTHONPATH: "/agent"
+      PYTHONUNBUFFERED: "1"
+    command: ["python3", "/agent/demo/handshake_manip_trainer_client.py"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
