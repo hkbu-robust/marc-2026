@@ -208,9 +208,11 @@ class CollectorApp:
     def _place_in_basket(self):
         if self.client.is_grasping() is False:
             print("[place] not holding anything — grasp with v first (running anyway)")
-        n = self.arm.place_in_basket(on_step=self._on_step)
+        # Scripted place is hard-coded and must not enter the training set — the
+        # dataset is approach + grasp only. Basket occupancy is still checked at E.
+        self.arm.place_in_basket(on_step=None)
         basket = self._wait_basket_occupied()
-        print(f"[place] recorded steps+={n}  basket={basket}"
+        print(f"[place] done (not recorded)  basket={basket}"
               f"{'  — press E to keep' if basket is True else '  — drop missed, retry or N'}")
 
     def _wait_basket_occupied(self, timeout_s: float = 2.0):

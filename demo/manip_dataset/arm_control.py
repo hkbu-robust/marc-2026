@@ -817,7 +817,10 @@ class ArmTeleop:
         return q_lift, q_over, q_drop
 
     def place_in_basket(self, on_step: Optional[Callable[[dict, np.ndarray], None]] = None) -> int:
-        """Squeeze, lift, rotate to the basket, drop, rotate back. Recorded steps.
+        """Squeeze, lift, rotate to the basket, drop, rotate back.
+
+        Dataset collection passes `on_step=None`: place is hard-coded, so its ticks must
+        not enter the training set. Pass a callback only when you want those steps logged.
 
         Every move is a joint-space interpolation between two poses that differ only
         modestly, and the trip around the robot is a pure joint-1 rotation at carry

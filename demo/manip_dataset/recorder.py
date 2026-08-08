@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import struct
 import time
-import uuid
-from typing import Any, Dict, List, Optional
+import zlib
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -36,6 +38,60 @@ DEPTH_KEYS = ("depth_base", "depth_gripper")
 # episode. Beyond it the view is dropped instead of being mostly fabricated.
 MAX_FILL_FRAC = 0.10
 
+# Folder name for fine-tuning corpora: Episode 001, Episode 002, …
+EPISODE_DIR_RE = re.compile(r"^Episode\s+(\d+)$")
+EPISODE_DIR_FMT = "Episode {:03d}"
+
+
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + tag
+        + data
+        + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+    )
+
+
+def write_png(path: str, image: np.ndarray) -> None:
+    """Write a uint8 HxW or HxWx3 array as a PNG (stdlib only — no Pillow in the image)."""
+    arr = np.asarray(image)
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    if arr.ndim == 2:
+        h, w = arr.shape
+        color_type = 0  # greyscale
+        row = arr
+    elif arr.ndim == 3 and arr.shape[2] == 3:
+        h, w, _ = arr.shape
+        color_type = 2  # RGB
+        row = arr.reshape(h, w * 3)
+    elif arr.ndim == 3 and arr.shape[2] == 1:
+        return write_png(path, arr[:, :, 0])
+    else:
+        raise ValueError(f"unsupported image shape for PNG: {arr.shape}")
+    raw = b"".join(b"\x00" + row[i].tobytes() for i in range(h))
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, color_type, 0, 0, 0)
+    data = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(raw, 6))
+        + _png_chunk(b"IEND", b"")
+    )
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+def _next_episode_dir(parent: str) -> Tuple[str, str]:
+    """Return (folder_name, absolute_path) for the next Episode NNN under parent."""
+    os.makedirs(parent, exist_ok=True)
+    highest = 0
+    for name in os.listdir(parent):
+        m = EPISODE_DIR_RE.match(name)
+        if m and os.path.isdir(os.path.join(parent, name)):
+            highest = max(highest, int(m.group(1)))
+    eid = EPISODE_DIR_FMT.format(highest + 1)
+    return eid, os.path.join(parent, eid)
+
 
 class EpisodeRecorder:
     def __init__(self, root_dir: str, team_id: str, primary_camera: str = "base_left"):
@@ -56,14 +112,16 @@ class EpisodeRecorder:
         self.steps = []
         self.recording = True
         self._episode_idx += 1
-        eid = f"{time.strftime('%Y%m%d_%H%M%S')}_{self._episode_idx:04d}_{uuid.uuid4().hex[:8]}"
+        # Folder name is assigned at write time (Episode NNN). Keep a transient id
+        # here so logs still have something before keep/discard.
         lang = LANGUAGE_PARAPHRASES[(self._episode_idx - 1) % len(LANGUAGE_PARAPHRASES)]
         self.meta = {
-            "episode_id": eid,
+            "episode_id": f"pending_{self._episode_idx:04d}",
             "team_id": self.team_id,
             "language_instruction": lang,
             "action_convention": "ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip",
             "primary_camera": self.primary_camera,
+            "includes_place": False,
             "success": False,
             "started_at": time.time(),
         }
@@ -180,6 +238,27 @@ class EpisodeRecorder:
                   f"(locked {keep_shape[1]}x{keep_shape[0]})")
         return filled
 
+    def _write_pngs(self, out_dir: str, written_rgb: List[str]) -> Dict[str, int]:
+        """Dump every kept RGB frame as PNG next to the HDF5 for inspection / tooling."""
+        images_root = os.path.join(out_dir, "images")
+        counts: Dict[str, int] = {}
+        for key in written_rgb:
+            cam = key.replace("image_", "", 1)
+            cam_dir = os.path.join(images_root, cam)
+            os.makedirs(cam_dir, exist_ok=True)
+            n_ok = 0
+            for i, s in enumerate(self.steps):
+                frame = s.get(key)
+                if frame is None:
+                    continue
+                write_png(os.path.join(cam_dir, f"{i:06d}.png"), frame)
+                n_ok += 1
+            counts[cam] = n_ok
+        total = sum(counts.values())
+        cams = ", ".join(f"{c}={n}" for c, n in counts.items())
+        print(f"[record] wrote {total} PNG(s) under images/ ({cams})")
+        return counts
+
     def _write(self, parent: str) -> str:
         if h5py is None:
             raise RuntimeError("h5py is required to write episodes (pip/apt install h5py)")
@@ -189,11 +268,12 @@ class EpisodeRecorder:
         if not self.steps:
             raise RuntimeError("no steps to write")
         filled = self._consolidate_views()
+        eid, out_dir = _next_episode_dir(parent)
+        os.makedirs(out_dir, exist_ok=True)
+        self.meta["episode_id"] = eid
         self.meta["num_steps"] = len(self.steps)
         self.meta["filled_frames"] = filled
-        eid = self.meta["episode_id"]
-        out_dir = os.path.join(parent, eid)
-        os.makedirs(out_dir, exist_ok=True)
+        self.meta["includes_place"] = False
         h5_path = os.path.join(out_dir, "episode.hdf5")
         meta_path = os.path.join(out_dir, "meta.json")
 
@@ -268,6 +348,10 @@ class EpisodeRecorder:
             f.attrs["num_steps"] = n
             f.attrs["episode_id"] = eid
             f.attrs["primary_camera"] = self.primary_camera
+
+        png_counts = self._write_pngs(out_dir, written)
+        self.meta["png_counts"] = png_counts
+        self.meta["images_dir"] = "images"
 
         with open(meta_path, "w") as fp:
             json.dump(self.meta, fp, indent=2)

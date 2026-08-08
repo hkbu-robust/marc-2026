@@ -31,8 +31,10 @@ Requires an interactive TTY (`stdin_open` / `tty` on `agent-manip-probe`). Press
    log prints the value it actually settled at. Because that value can land *below* half
    of `grip_close`, "is the gripper closed" tracks the commanded intent (`grip_target`),
    not the published number, or an early stop would silently unlatch the grasp.
-5. **`P`** — scripted **place in the rear basket**, recorded as EE-delta steps like manual clicks.
-   Hand nudges cannot do this: the basket is *behind* the arm (`place_fwd` is negative in `pnp_params.json`).
+5. **`P`** — scripted **place in the rear basket**. Hard-coded, so its ticks are **not written
+   into the dataset** (no images / actions / joints). The training episode is approach + grasp
+   only; `P` exists so `basket/occupied` can go true for the `E` keep filter. Hand nudges
+   cannot place: the basket is *behind* the arm (`place_fwd` is negative in `pnp_params.json`).
 
    The motion is **pure joint space** — eight interpolations between poses, no Cartesian tracking:
 
@@ -47,22 +49,28 @@ Requires an interactive TTY (`stdin_open` / `tty` on `agent-manip-probe`). Press
    neighbouring pose, and **refused if it moves any joint more than `MARC_PLACE_IK_GUARD` rad
    from that seed** — a branch jump shows up as a deviation of radians, a real move as tenths.
    If either solve is refused, `P` aborts *before moving* and keeps holding, so you can `N`.
-
-   Long moves are decimated to every `MARC_PLACE_REC_EVERY`-th tick (the 180° rotation is ~6 s
-   of ticks and would otherwise be most of the episode, burying the approach and grasp a policy
-   actually has to learn). The release dwell is never decimated.
 6. **`E`** — sensor-only keep if grasp was seen after close **and** `basket/occupied` is true; else discard to `datasets/marc_pnp_failed/`.
 
 So a keepable episode is: `A` → grasp with `v` → **`P`** → `E`. Without `P` the basket is never
-filled, so `E` always evaluates `basket=False` and discards.
+filled, so `E` always evaluates `basket=False` and discards. Kept episodes contain only the
+teleop pick steps collected before `P`.
 
 ## Layout
 
 ```
-datasets/marc_pnp/<episode_id>/
+datasets/marc_pnp/Episode 001/
   episode.hdf5
   meta.json
+  images/
+    base_left/000000.png …
+    base_right/…
+    gripper_left/…
+    gripper_right/…
 ```
+
+Episode folders are named `Episode 001`, `Episode 002`, … (zero-padded, sequential under that
+parent). That matches common OpenVLA / OXE-style corpora better than opaque hashes;
+`to_rlds.py` still emits `episode_XXXX.npz` from whatever source folder name it finds.
 
 HDF5 `steps/` datasets: `image_base_left`, `image_base_right`, `image_gripper_left`,
 `image_gripper_right`, `depth_base`, `depth_gripper`, `q_arm`, `q_grip`, `q_inner`,
@@ -189,7 +197,7 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_PLACE_YAW` | `3.1416` | Joint-1 rotation from front to basket. Trim if the drop lands off-centre |
 | `MARC_PLACE_SPEED` | `pnp_params.carry_speed`, `.env` sets `0.5` | Joint rate (rad/s) for `P`. Joint 1's URDF limit is `1.396` |
 | `MARC_PLACE_IK_GUARD` | `1.2` | Max rad any joint may move from its IK seed before the solution is rejected as a branch jump (which is what folds the arm into itself) |
-| `MARC_PLACE_REC_EVERY` | `3` | Record every Nth tick during scripted joint moves, so the 180° rotation does not dominate the episode |
+| `MARC_PLACE_REC_EVERY` | `3` | Unused for the dataset (`P` is not recorded); kept only if you pass a custom `on_step` to `place_in_basket` |
 | `MARC_READY_J1`…`J6` | `DEFAULT_ARM_Q` = `0, 0.262, -2.094, 0, -0.785, 1.571` | **Joint-space ready start** (rad). Unset = default pose; set any subset to override those joints only. Interpolated once; no Cartesian IK during ready |
 | `MARC_READY_MOVE_S` | `2.0` | Seconds to interpolate into the ready joint pose |
 | `MARC_READY_OPEN_GRIP` | `0` | `1` releases the gripper when moving to ready. Default `0` keeps a grasped object held through `E`/`N`; press `b` in MANUAL_BASE to release |
