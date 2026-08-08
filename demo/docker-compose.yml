@@ -71,12 +71,16 @@ services:
       PYTHONPATH: "/agent:/agent/demo"
       PYTHONUNBUFFERED: "1"
       MARC_DATASET_ROOT: "/agent/demo/datasets/marc_pnp"
-      # Tunables (MARC_APPROACH_*, MARC_BASE_*, MARC_READY_*) live in demo/.env,
+      # Tunables (MARC_APPROACH_*, MARC_BASE_*, MARC_READY_*, MARC_PRIMARY_CAM) live in demo/.env,
       # loaded via env_file above. Do not list them here: the environment block
       # takes precedence over env_file, so a ${VAR:-default} entry would pin the
       # default and silently ignore demo/.env.
     volumes:
       - ./datasets:/agent/demo/datasets
+      # Dev-only live mount for this probe service: the Dockerfile COPYs demo/ into
+      # the image, so without this a code edit needs `--build` to take effect.
+      # The graded `agent` service has no such mount and stays self-contained.
+      - ./manip_dataset:/agent/demo/manip_dataset
     command: ["python3", "/agent/demo/handshake_manip_trainer_client.py"]
     deploy:
       resources:

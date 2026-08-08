@@ -24,15 +24,33 @@ LANGUAGE_PARAPHRASES = [
 ]
 
 
+RGB_KEYS = (
+    "image_base_left",
+    "image_base_right",
+    "image_gripper_left",
+    "image_gripper_right",
+)
+DEPTH_KEYS = ("depth_base", "depth_gripper")
+
+# Secondary views may borrow a neighbouring frame for at most this fraction of an
+# episode. Beyond it the view is dropped instead of being mostly fabricated.
+MAX_FILL_FRAC = 0.10
+
+
 class EpisodeRecorder:
-    def __init__(self, root_dir: str, team_id: str):
+    def __init__(self, root_dir: str, team_id: str, primary_camera: str = "base_left"):
         self.root_dir = root_dir
         self.failed_dir = os.path.join(os.path.dirname(root_dir.rstrip("/")), "marc_pnp_failed")
         self.team_id = team_id
+        self.primary_camera = primary_camera
         self.steps: List[Dict[str, Any]] = []
         self.meta: Dict[str, Any] = {}
         self.recording = False
         self._episode_idx = 0
+
+    @property
+    def primary_key(self) -> str:
+        return f"image_{self.primary_camera}"
 
     def start_episode(self, extra_meta: Optional[dict] = None):
         self.steps = []
@@ -45,6 +63,7 @@ class EpisodeRecorder:
             "team_id": self.team_id,
             "language_instruction": lang,
             "action_convention": "ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip",
+            "primary_camera": self.primary_camera,
             "success": False,
             "started_at": time.time(),
         }
@@ -56,10 +75,6 @@ class EpisodeRecorder:
             return
         step = {
             "action": np.asarray(action, dtype=np.float32).reshape(7,),
-            "image_gripper": obs["image_gripper"],
-            "image_base": obs.get("image_base"),
-            "depth_gripper": obs.get("depth_gripper"),
-            "depth_base": obs.get("depth_base"),
             "q_arm": obs["q_arm"],
             "q_grip": obs["q_grip"],
             "q_inner": obs.get("q_inner", np.zeros(0, dtype=np.float32)),
@@ -69,6 +84,8 @@ class EpisodeRecorder:
             "t_sim": obs["t_sim"],
             "t_wall": obs["t_wall"],
         }
+        for key in RGB_KEYS + DEPTH_KEYS:
+            step[key] = obs.get(key)
         self.steps.append(step)
 
     def discard(self, save_failed: bool = True) -> Optional[str]:
@@ -92,22 +109,76 @@ class EpisodeRecorder:
         return path
 
     def _drop_odd_shaped_steps(self):
-        """Keep only steps whose gripper RGB matches the episode's dominant resolution.
+        """Keep only steps whose primary RGB matches the episode's dominant resolution.
 
         A single differently-sized camera frame would otherwise abort the whole write.
         Dropping the step (rather than the dataset) keeps every array aligned by index.
         """
+        key = self.primary_key
         counts: Dict[Any, int] = {}
         for s in self.steps:
-            shape = np.asarray(s["image_gripper"]).shape
+            v = s.get(key)
+            shape = None if v is None else np.asarray(v).shape
             counts[shape] = counts.get(shape, 0) + 1
         if len(counts) <= 1:
             return
         keep_shape = max(counts.items(), key=lambda kv: kv[1])[0]
-        kept = [s for s in self.steps if np.asarray(s["image_gripper"]).shape == keep_shape]
+        kept = [
+            s for s in self.steps
+            if (None if s.get(key) is None else np.asarray(s[key]).shape) == keep_shape
+        ]
+        odd = ", ".join(f"{sh}x{c}" for sh, c in counts.items() if sh != keep_shape)
         print(f"[record] dropped {len(self.steps) - len(kept)} step(s) with mismatched "
-              f"image shape (kept {keep_shape})")
+              f"{key} shape (kept {keep_shape}, dropped {odd})")
         self.steps = kept
+
+    def _consolidate_views(self) -> Dict[str, int]:
+        """Put every secondary view on one resolution, filling short gaps.
+
+        Only the primary view may drop a step, since that is the training image. A
+        secondary view that misses a few frames (lazy subscription at episode start, or
+        a publisher briefly switching resolution) used to make the whole view
+        unstackable and silently vanish from the episode. Borrowing the nearest good
+        frame keeps the view, and the fill count is written to the file so it is
+        auditable rather than invisible.
+        """
+        n = len(self.steps)
+        filled: Dict[str, int] = {}
+        for key in RGB_KEYS + DEPTH_KEYS:
+            if key == self.primary_key:
+                continue
+            counts: Dict[Any, int] = {}
+            for s in self.steps:
+                v = s.get(key)
+                if v is not None:
+                    shape = np.asarray(v).shape
+                    counts[shape] = counts.get(shape, 0) + 1
+            if not counts:
+                continue
+            keep_shape = max(counts.items(), key=lambda kv: kv[1])[0]
+            good = [
+                i for i, s in enumerate(self.steps)
+                if s.get(key) is not None and np.asarray(s[key]).shape == keep_shape
+            ]
+            bad = n - len(good)
+            if bad == 0:
+                continue
+            if bad > max(1, int(MAX_FILL_FRAC * n)):
+                for s in self.steps:
+                    s[key] = None
+                print(f"[record] {key}: dropped view — {bad}/{n} frames missing or at "
+                      f"another resolution ({dict(counts)})")
+                continue
+            for i, s in enumerate(self.steps):
+                v = s.get(key)
+                if v is not None and np.asarray(v).shape == keep_shape:
+                    continue
+                nearest = min(good, key=lambda j: abs(j - i))
+                s[key] = self.steps[nearest][key]
+            filled[key] = bad
+            print(f"[record] {key}: filled {bad}/{n} frame(s) from neighbours "
+                  f"(locked {keep_shape[1]}x{keep_shape[0]})")
+        return filled
 
     def _write(self, parent: str) -> str:
         if h5py is None:
@@ -117,7 +188,9 @@ class EpisodeRecorder:
         self._drop_odd_shaped_steps()
         if not self.steps:
             raise RuntimeError("no steps to write")
+        filled = self._consolidate_views()
         self.meta["num_steps"] = len(self.steps)
+        self.meta["filled_frames"] = filled
         eid = self.meta["episode_id"]
         out_dir = os.path.join(parent, eid)
         os.makedirs(out_dir, exist_ok=True)
@@ -127,28 +200,41 @@ class EpisodeRecorder:
         with h5py.File(h5_path, "w") as f:
             n = len(self.steps)
             g = f.create_group("steps")
-            # Assume constant image resolution within an episode.
-            g.create_dataset(
-                "image_gripper",
-                data=np.stack([s["image_gripper"] for s in self.steps], axis=0),
-                compression="gzip",
-                compression_opts=4,
-            )
-            if self.steps[0]["image_base"] is not None:
-                bases = []
-                ok = True
+            def _stack_images(key) -> bool:
+                """Write a view only if every step has it at one resolution."""
+                frames = []
                 for s in self.steps:
-                    if s["image_base"] is None or s["image_base"].shape != self.steps[0]["image_base"].shape:
-                        ok = False
-                        break
-                    bases.append(s["image_base"])
-                if ok:
-                    g.create_dataset(
-                        "image_base",
-                        data=np.stack(bases, axis=0),
-                        compression="gzip",
-                        compression_opts=4,
-                    )
+                    v = s.get(key)
+                    if v is None:
+                        return False
+                    frames.append(np.asarray(v))
+                if len({fr.shape for fr in frames}) != 1:
+                    return False
+                g.create_dataset(
+                    key,
+                    data=np.stack(frames, axis=0),
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                return True
+
+            # The primary view is the training image; the rest are kept for re-export.
+            written = []
+            if _stack_images(self.primary_key):
+                written.append(self.primary_key)
+            else:
+                print(f"[record] WARNING: primary view {self.primary_key} incomplete — "
+                      f"episode not usable for OpenVLA training")
+            for key in RGB_KEYS:
+                if key != self.primary_key and _stack_images(key):
+                    written.append(key)
+            g.attrs["primary_camera"] = self.primary_camera
+            g.attrs["rgb_views"] = ",".join(written)
+            if filled:
+                g.attrs["filled_frames"] = json.dumps(filled)
+            missing = [k for k in RGB_KEYS if k not in written]
+            print(f"[record] rgb views: {', '.join(written) or 'none'}"
+                  + (f"  (missing: {', '.join(missing)})" if missing else ""))
 
             def _stack_optional(key, dtype):
                 arrays = []
@@ -164,8 +250,8 @@ class EpisodeRecorder:
                     return
                 g.create_dataset(key, data=np.stack(arrays, axis=0), compression="gzip")
 
-            _stack_optional("depth_gripper", np.float32)
-            _stack_optional("depth_base", np.float32)
+            for key in DEPTH_KEYS:
+                _stack_optional(key, np.float32)
 
             g.create_dataset("q_arm", data=np.stack([s["q_arm"] for s in self.steps]))
             g.create_dataset("q_grip", data=np.array([s["q_grip"] for s in self.steps], dtype=np.float32))
@@ -181,6 +267,7 @@ class EpisodeRecorder:
             g.create_dataset("t_wall", data=np.array([s["t_wall"] for s in self.steps], dtype=np.float64))
             f.attrs["num_steps"] = n
             f.attrs["episode_id"] = eid
+            f.attrs["primary_camera"] = self.primary_camera
 
         with open(meta_path, "w") as fp:
             json.dump(self.meta, fp, indent=2)

@@ -51,7 +51,7 @@ DEFAULT_BASELINE_FRAMES = 20
 DEFAULT_SETTLE_S = 0.5
 DEFAULT_TICK_S = 0.05
 DEFAULT_LOG_EVERY = 1
-DEFAULT_OVERRUN_M = 0.475
+DEFAULT_OVERRUN_M = 1.75
 
 
 @dataclass
@@ -128,6 +128,7 @@ class DepthApproachController:
         self._frame_dt: Optional[float] = None
         self._last_good_t: Optional[float] = None
         self._last_fail: str = ""
+        self._lock_shape: Optional[tuple] = None
 
     def _measure(self) -> Optional[dict]:
         """Read one depth frame; returns metrics dict or None (reason in _last_fail).
@@ -138,6 +139,22 @@ class DepthApproachController:
         if msg is None:
             self._last_fail = "no depth msg"
             return None
+        depth = image_to_depth(msg)
+        if depth is None:
+            self._last_fail = f"decode failed (encoding={getattr(msg, 'encoding', '?')})"
+            return None
+        # Two publishers share this topic at different resolutions and different
+        # geometry, so their contrast values interleave. Baseline picks one; the
+        # rest are dropped here (before the rate/freshness bookkeeping, so the
+        # measured frame rate reflects the stream we actually steer on).
+        shape = tuple(depth.shape[:2])
+        if self._lock_shape is not None and shape != self._lock_shape:
+            self._last_fail = (
+                f"other stream {shape[0]}x{shape[1]} "
+                f"(locked {self._lock_shape[0]}x{self._lock_shape[1]})"
+            )
+            return None
+
         stamp = _stamp_key(msg)
         now = time.monotonic()
         is_new = stamp is None or stamp != self._last_stamp
@@ -151,10 +168,6 @@ class DepthApproachController:
             self._last_new_frame_t = now
             self._last_stamp = stamp
 
-        depth = image_to_depth(msg)
-        if depth is None:
-            self._last_fail = f"decode failed (encoding={getattr(msg, 'encoding', '?')})"
-            return None
         cs = depth_center_surround(
             depth,
             inner_frac=self.cfg.inner_frac,
@@ -172,6 +185,7 @@ class DepthApproachController:
             d_med = cs["d_ring"]
         cs["d_med"] = float(d_med)
         cs["is_new"] = bool(is_new)
+        cs["stamp"] = stamp
         self._last_good_t = now
         self._last_fail = ""
         return cs
@@ -189,21 +203,22 @@ class DepthApproachController:
         v = max(0.0, float(self.cfg.crawl_mps))
         step = max(0.005, float(self.cfg.max_step_m))
         dt = self._frame_dt if self._frame_dt else self.cfg.tick_s
-        dt = max(self.cfg.tick_s, float(dt))
+        dt = max(1e-3, float(self.cfg.tick_s), float(dt))
         return min(v, step / dt)
 
     def capture_baseline(self) -> Optional[float]:
         """Stop base; measure baseline ROI depth and center-surround contrast."""
         self._client.send_cmd_vel(0.0, 0.0)
-        d_samples = []
-        c_samples = []
+        samples = []  # (shape, d_med, raw_contrast, stamp)
         self._c_filt = None
+        self._lock_shape = None  # observe every stream, then pick one below
+        t_start = time.monotonic()
         for i in range(self.cfg.baseline_frames):
             m = self._measure()
             if m is not None:
-                c = self._smooth_contrast(m["contrast"])
-                d_samples.append(m["d_med"])
-                c_samples.append(c)
+                samples.append(
+                    (tuple(m["shape"][:2]), m["d_med"], m["contrast"], m["stamp"])
+                )
                 if self.cfg.log_every > 0:
                     print(
                         f"[approach] baseline {i+1}/{self.cfg.baseline_frames}  "
@@ -218,15 +233,35 @@ class DepthApproachController:
                     f"unusable: {self._last_fail}"
                 )
             time.sleep(self.cfg.tick_s)
-        if not d_samples or not c_samples:
+        if not samples:
             self.d0 = None
             self.c0 = None
             return None
-        self.d0 = float(np.median(np.asarray(d_samples, dtype=np.float64)))
-        self.c0 = float(np.median(np.asarray(c_samples, dtype=np.float64)))
+
+        counts: dict = {}
+        for shape, _, _, _ in samples:
+            counts[shape] = counts.get(shape, 0) + 1
+        self._lock_shape = max(counts.items(), key=lambda kv: kv[1])[0]
+        if len(counts) > 1:
+            others = ", ".join(
+                f"{s[0]}x{s[1]}({n})" for s, n in counts.items() if s != self._lock_shape
+            )
+            print(f"[approach] WARNING: base depth topic has multiple streams — "
+                  f"locking {self._lock_shape[0]}x{self._lock_shape[1]}, "
+                  f"ignoring {others}")
+        sel = [(d, c, st) for shape, d, c, st in samples if shape == self._lock_shape]
+        self.d0 = float(np.median(np.asarray([d for d, _, _ in sel], dtype=np.float64)))
+        self.c0 = float(np.median(np.asarray([c for _, c, _ in sel], dtype=np.float64)))
         self._hit_count = 0
         self._last_depth = self.d0
         self._c_filt = self.c0
+        # Rate measured across both streams overestimates the one we steer on, so
+        # re-estimate from distinct stamps of the locked stream only.
+        distinct = len({st for _, _, st in sel if st is not None})
+        elapsed = time.monotonic() - t_start
+        self._frame_dt = (elapsed / (distinct - 1)) if distinct >= 2 and elapsed > 0 else None
+        self._last_stamp = None
+        self._last_new_frame_t = None
         return self.d0
 
     def start(self) -> bool:

@@ -11,3 +11,6 @@ simulation-platform/.env
 **/__pycache__/
 *.pyc
 .pytest_cache/
+*.hdf5
+*.png
+/demo/datasets

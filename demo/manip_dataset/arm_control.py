@@ -41,6 +41,24 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+# Each rig is a stereo pair plus a depth camera (API reference: base_camera/ and
+# gripper_camera/ each expose left, right, depth), so every step stores six views.
+RGB_CAMERAS = ("base_left", "base_right", "gripper_left", "gripper_right")
+DEPTH_CAMERAS = ("base", "gripper")
+# Accept the old short names so existing .env files keep working.
+_CAMERA_ALIASES = {"base": "base_left", "gripper": "gripper_left"}
+
+
+def _env_camera(name: str, default: str) -> str:
+    raw = (os.environ.get(name) or "").strip().lower()
+    raw = _CAMERA_ALIASES.get(raw, raw)
+    if raw in RGB_CAMERAS:
+        return raw
+    if raw:
+        print(f"[arm] {name}={raw!r} invalid (want one of {RGB_CAMERAS}); using {default!r}")
+    return default
+
+
 # Single source of truth for TeleopConfig defaults (override with MARC_* env vars).
 DEFAULT_TELEOP_DX = 0.01
 DEFAULT_TELEOP_DY = 0.01
@@ -63,7 +81,29 @@ DEFAULT_SETTLE_TOL_M = 0.015
 DEFAULT_SETTLE_TOL_JOINT = 0.05
 DEFAULT_READY_MOVE_S = 2.0
 DEFAULT_MAX_TICKS_PER_CLICK = 40
+DEFAULT_GRIP_DWELL_S = 1.0  # fingers need ~1s to travel before holding can be observed
+# Closing is ramped and stopped the moment the platform reports a hold. Commanding the
+# full close and holding it there keeps squeezing after contact, and the sim resolves
+# that penetration by squirting the object out of the fingers.
+DEFAULT_GRIP_RAMP_S = 1.2    # seconds from open to the full close command
+DEFAULT_GRIP_EXTRA = 0.02    # rad of extra bite past first contact (0 = stop dead)
+DEFAULT_GRIP_STOP_ON_GRASP = True
 DEFAULT_READY_OPEN_GRIP = False  # ready pose holds whatever the gripper was commanded to
+# Basket placement. The basket sits directly behind the arm (pnp_params place_fwd is
+# negative), so the trip there is a joint-1 rotation of 180 deg at carry height with
+# every other joint frozen — no Cartesian path that IK can solve with the arm folded
+# through itself.
+DEFAULT_PLACE_YAW = np.pi
+DEFAULT_PLACE_SPEED = 0.5    # rad/s per joint; joint 1's URDF limit is 1.396
+DEFAULT_PLACE_IK_GUARD = 1.2  # rad any joint may move from its IK seed before the
+                              # solution is treated as a branch jump and refused
+# The 180 deg rotation is ~6s of ticks. Recording all of them would make the swing
+# most of the episode and bury the part a policy has to learn (approach and grasp),
+# so scripted joint moves log every Nth tick. The release dwell is never decimated.
+DEFAULT_PLACE_REC_EVERY = 3
+# OpenVLA pretrains on third-person views, and the base camera is static during
+# ARM_TELEOP (base is parked), so only the arm and object move in frame.
+DEFAULT_PRIMARY_CAM = "base_left"
 
 
 @dataclass
@@ -92,6 +132,15 @@ class TeleopConfig:
     max_ticks_per_click: int = DEFAULT_MAX_TICKS_PER_CLICK
     grip_close: float = GRIPPER_CLOSE
     ready_open_grip: bool = DEFAULT_READY_OPEN_GRIP
+    primary_camera: str = DEFAULT_PRIMARY_CAM
+    grip_dwell_s: float = DEFAULT_GRIP_DWELL_S
+    grip_ramp_s: float = DEFAULT_GRIP_RAMP_S
+    grip_extra: float = DEFAULT_GRIP_EXTRA
+    grip_stop_on_grasp: bool = DEFAULT_GRIP_STOP_ON_GRASP
+    place_yaw: float = DEFAULT_PLACE_YAW
+    place_speed: float = DEFAULT_PLACE_SPEED
+    place_ik_guard: float = DEFAULT_PLACE_IK_GUARD
+    place_rec_every: int = DEFAULT_PLACE_REC_EVERY
 
     @classmethod
     def from_env(cls) -> "TeleopConfig":
@@ -113,8 +162,32 @@ class TeleopConfig:
             ready_lat=_env_float("MARC_READY_LAT", DEFAULT_READY_LAT),
             ready_up=_env_float("MARC_READY_UP", DEFAULT_READY_UP),
             ready_move_s=_env_float("MARC_READY_MOVE_S", DEFAULT_READY_MOVE_S),
-            grip_close=float(p.get("grip_close", GRIPPER_CLOSE)),
+            # pnp_params tunes grip_close for the scripted pick's exact geometry; a
+            # hand-placed teleop grasp is off-centre and needs a firmer close, so allow
+            # an override up to the joint limit.
+            grip_close=min(
+                GRIPPER_CLOSE,
+                max(0.0, _env_float("MARC_GRIP_CLOSE",
+                                    float(p.get("grip_close", GRIPPER_CLOSE)))),
+            ),
             ready_open_grip=_env_bool("MARC_READY_OPEN_GRIP", DEFAULT_READY_OPEN_GRIP),
+            primary_camera=_env_camera("MARC_PRIMARY_CAM", DEFAULT_PRIMARY_CAM),
+            grip_dwell_s=_env_float(
+                "MARC_GRIP_DWELL", float(p.get("grip_dwell", DEFAULT_GRIP_DWELL_S))
+            ),
+            grip_ramp_s=_env_float("MARC_GRIP_RAMP", DEFAULT_GRIP_RAMP_S),
+            grip_extra=max(0.0, _env_float("MARC_GRIP_EXTRA", DEFAULT_GRIP_EXTRA)),
+            grip_stop_on_grasp=_env_bool(
+                "MARC_GRIP_STOP_ON_GRASP", DEFAULT_GRIP_STOP_ON_GRASP
+            ),
+            place_yaw=_env_float("MARC_PLACE_YAW", DEFAULT_PLACE_YAW),
+            place_speed=_env_float(
+                "MARC_PLACE_SPEED", float(p.get("carry_speed", DEFAULT_PLACE_SPEED))
+            ),
+            place_ik_guard=_env_float("MARC_PLACE_IK_GUARD", DEFAULT_PLACE_IK_GUARD),
+            place_rec_every=max(
+                1, int(_env_float("MARC_PLACE_REC_EVERY", DEFAULT_PLACE_REC_EVERY))
+            ),
         )
 
 _KIN = None
@@ -173,21 +246,42 @@ class ArmTeleop:
         self._log = log
         self.kin = _kin()
         self.grip_cmd = GRIPPER_OPEN
+        # What the gripper was *asked* to do, as opposed to what is being published.
+        # Stopping the close at first contact can leave grip_cmd below the halfway
+        # mark, and "am I holding something" must not depend on how early it gripped.
+        self.grip_target = GRIPPER_OPEN
         self.target_pos: Optional[np.ndarray] = None
         self.target_quat: Optional[np.ndarray] = None
         self._saw_grasp_after_close = False
         self._closed_since_last_open = False
+        self._place_params: dict = {}
+        self._place_quat: Optional[np.ndarray] = None
+        self._img_shape: dict = {}   # view key -> locked (h, w, ...) shape
+        self._odd_img: dict = {}     # view key -> foreign-frame count
+        self._last_view: dict = {}   # view key -> last frame at the locked shape
+        overrides = [
+            f"J{i}={os.environ[f'MARC_READY_J{i}']}"
+            for i in range(1, 7)
+            if os.environ.get(f"MARC_READY_J{i}", "").strip() != ""
+        ]
+        q_ready = self._ready_q()
+        source = "default DEFAULT_ARM_Q" if not overrides else "env " + ",".join(overrides)
         self._log(
             "[arm] TeleopConfig (joint-space ready)  "
-            f"j1={self.cfg.ready_j1:.4f} j2={self.cfg.ready_j2:.4f} "
-            f"j3={self.cfg.ready_j3:.4f} j4={self.cfg.ready_j4:.4f} "
-            f"j5={self.cfg.ready_j5:.4f} j6={self.cfg.ready_j6:.4f} "
-            f"(MARC_READY_J2={os.environ.get('MARC_READY_J2')!r} "
-            f"J3={os.environ.get('MARC_READY_J3')!r} "
-            f"J4={os.environ.get('MARC_READY_J4')!r} "
-            f"J5={os.environ.get('MARC_READY_J5')!r} "
-            f"J6={os.environ.get('MARC_READY_J6')!r})"
+            + " ".join(f"j{i+1}={q_ready[i]:.4f}" for i in range(6))
+            + f"  source={source}  primary_cam={self.cfg.primary_camera}"
         )
+        self._log(
+            f"[arm] grip_close={self.cfg.grip_close:.3f} (limit {GRIPPER_CLOSE:.3f}, "
+            f"pnp_params {float(load_params().get('grip_close', GRIPPER_CLOSE)):.3f}"
+            f"{', MARC_GRIP_CLOSE override' if os.environ.get('MARC_GRIP_CLOSE') else ''})"
+            f"  dwell={self.cfg.grip_dwell_s:.2f}s"
+        )
+
+    @property
+    def closing(self) -> bool:
+        """True when the gripper was commanded shut, whatever value it settled at."""
+        return self.grip_target >= 0.5 * self.cfg.grip_close
 
     def reset_grasp_flags(self):
         self._saw_grasp_after_close = False
@@ -208,13 +302,13 @@ class ArmTeleop:
         self._client.send_arm_command(_make_js(q, self.grip_cmd))
 
     def warm_cameras(self, seconds: float = 1.0):
-        """Touch camera topics so subscriptions fill."""
+        """Touch every camera topic so the lazy subscriptions fill before recording."""
         t0 = time.monotonic()
         while time.monotonic() - t0 < seconds:
-            self._client.get_robot_image("gripper_left")
-            self._client.get_robot_image("base_left")
-            self._client.get_robot_depth("gripper")
-            self._client.get_robot_depth("base")
+            for cam in RGB_CAMERAS:
+                self._client.get_robot_image(cam)
+            for cam in DEPTH_CAMERAS:
+                self._client.get_robot_depth(cam)
             self._sleep(0.05)
 
     def _ready_q(self) -> np.ndarray:
@@ -238,19 +332,15 @@ class ArmTeleop:
         self.target_quat = arm_kin.R_to_quat(T[:3, :3])
 
     def set_grip(self, grip: float) -> bool:
-        """Command the gripper without moving the arm or recording steps."""
-        q = read_arm_q(self._client)
-        if q is None:
+        """Command the gripper without moving the arm or recording steps.
+
+        Same ramp-and-stop-on-contact behaviour as a recorded grip click, so a grasp
+        made outside ARM_TELEOP is no more likely to crush the object out.
+        """
+        if read_arm_q(self._client) is None:
             self._log("[arm] no joint_states — grip command skipped")
             return False
-        if grip >= 0.5 * self.cfg.grip_close:
-            self._closed_since_last_open = True
-        else:
-            self._closed_since_last_open = False
-        self.grip_cmd = float(grip)
-        for _ in range(max(1, int(0.3 * self.cfg.rate_hz))):
-            self._publish(q)
-            self._sleep(1.0 / self.cfg.rate_hz)
+        self._grip_click(float(grip), None)
         return True
 
     def go_ready(self, timeout_s: float = 8.0, open_grip: Optional[bool] = None) -> bool:
@@ -266,8 +356,9 @@ class ArmTeleop:
             open_grip = bool(self.cfg.ready_open_grip)
         if open_grip:
             self.grip_cmd = GRIPPER_OPEN
+            self.grip_target = GRIPPER_OPEN
         self._saw_grasp_after_close = False
-        self._closed_since_last_open = self.grip_cmd >= 0.5 * self.cfg.grip_close
+        self._closed_since_last_open = self.closing
         self._log(f"[arm] ready keeps grip_cmd={self.grip_cmd:.3f}"
                   f"{' (opened)' if open_grip else ' (held)'}")
         q0 = read_arm_q(self._client)
@@ -321,14 +412,55 @@ class ArmTeleop:
         self._log("[arm] ready hold timeout — continuing with commanded joint pose")
         return False
 
+    def _locked_view(self, key: str, frame, allow_stale: bool = True):
+        """Keep one resolution per view, rejecting frames from a foreign publisher.
+
+        Some camera topics carry a second publisher at a different resolution and a
+        different viewpoint. Mixing them would break the episode's image tensor and
+        mislabel foreign frames as this camera. Secondary views fall back to their
+        last valid frame; the primary view returns None instead, so the step is
+        dropped rather than paired with a duplicated training image.
+        """
+        stale = self._last_view.get(key) if allow_stale else None
+        if frame is None:
+            return stale
+        shape = frame.shape
+        locked = self._img_shape.get(key)
+        if locked is None:
+            self._img_shape[key] = shape
+        elif shape != locked:
+            self._odd_img[key] = self._odd_img.get(key, 0) + 1
+            n = self._odd_img[key]
+            if n == 1 or n % 100 == 0:
+                self._log(f"[arm] {key}: ignoring foreign frames at "
+                          f"{shape[1]}x{shape[0]} (locked {locked[1]}x{locked[0]}, "
+                          f"{n} so far)")
+            return stale
+        self._last_view[key] = frame
+        return frame
+
     def snapshot_obs(self) -> Optional[dict]:
-        """Build one observation dict; None if gripper RGB missing."""
-        g_img = image_to_rgb(self._client.get_robot_image("gripper_left"))
-        if g_img is None:
+        """Build one observation dict; None if the primary-camera RGB is missing.
+
+        All six robot views (base/gripper stereo left+right and both depth cameras)
+        are stored; only the primary RGB is required, since a step without the
+        training image is unusable.
+        """
+        primary_key = f"image_{self.cfg.primary_camera}"
+        views = {}
+        for cam in RGB_CAMERAS:
+            key = f"image_{cam}"
+            views[key] = self._locked_view(
+                key,
+                image_to_rgb(self._client.get_robot_image(cam)),
+                allow_stale=(key != primary_key),
+            )
+        for cam in DEPTH_CAMERAS:
+            views[f"depth_{cam}"] = self._locked_view(
+                f"depth_{cam}", image_to_depth(self._client.get_robot_depth(cam))
+            )
+        if views[primary_key] is None:
             return None
-        b_img = image_to_rgb(self._client.get_robot_image("base_left"))
-        g_dep = image_to_depth(self._client.get_robot_depth("gripper"))
-        b_dep = image_to_depth(self._client.get_robot_depth("base"))
         q = read_arm_q(self._client)
         if q is None:
             return None
@@ -342,10 +474,7 @@ class ArmTeleop:
         except Exception:
             t_sim = time.time()
         return {
-            "image_gripper": g_img,
-            "image_base": b_img,
-            "depth_gripper": g_dep,
-            "depth_base": b_dep,
+            **views,
             "q_arm": q.astype(np.float32),
             "q_grip": np.float32(grip),
             "q_inner": np.asarray(inners, dtype=np.float32),
@@ -383,11 +512,15 @@ class ArmTeleop:
             return 0
 
         if grip is not None:
-            if grip >= 0.5 * self.cfg.grip_close:
-                self._closed_since_last_open = True
-            else:
-                self._closed_since_last_open = False
+            moving = (abs(dx) + abs(dy) + abs(dz)
+                      + abs(droll) + abs(dpitch) + abs(dyaw)) > 1e-9
+            if not moving:
+                # Grip-only click: ramp there rather than jumping, so closing can stop
+                # at first contact instead of crushing past it.
+                return self._grip_click(float(grip), on_step)
+            self.grip_target = float(grip)
             self.grip_cmd = float(grip)
+            self._closed_since_last_open = self.closing
 
         goal_pos = self.target_pos + np.array([dx, dy, dz], dtype=np.float64)
         rot = np.array([droll, dpitch, dyaw], dtype=np.float64)
@@ -401,7 +534,7 @@ class ArmTeleop:
         self.target_pos = goal_pos.copy()
 
         # Full click action label (OpenVLA-style EE delta + grip cmd normalized 0/1)
-        grip_bin = 1.0 if self.grip_cmd >= 0.5 * self.cfg.grip_close else 0.0
+        grip_bin = 1.0 if self.closing else 0.0
         full_action = np.array(
             [dx, dy, dz, droll, dpitch, dyaw, grip_bin], dtype=np.float32
         )
@@ -464,3 +597,275 @@ class ArmTeleop:
                 self._sleep(dt)
 
         return recorded
+
+    def _grip_click(self, target: float, on_step) -> int:
+        """Ramp the gripper to `target`, stopping early once the object is held.
+
+        Two reasons this is not a single command plus a wait. `is_grasping()` only
+        flips once the fingers have physically travelled (~grip_dwell), so one sample
+        right after the command always reads False and the grasp never gets latched for
+        the success filter. And driving all the way to the full close keeps squeezing
+        after contact — the sim resolves the resulting penetration by ejecting the
+        object, which looks exactly like the grasp "slipping out".
+        """
+        dt = 1.0 / self.cfg.rate_hz
+        self.grip_target = float(target)
+        start = float(self.grip_cmd)
+        ramp_ticks = max(1, int(max(0.1, self.cfg.grip_ramp_s) * self.cfg.rate_hz))
+        hold_ticks = max(2, int(max(0.2, self.cfg.grip_dwell_s) * self.cfg.rate_hz))
+        stop_early = self.closing and bool(self.cfg.grip_stop_on_grasp)
+        self._closed_since_last_open = self.closing
+        q_hold = read_arm_q(self._client)
+        recorded = 0
+        latched_at = None
+        grip_bin = 1.0 if self.closing else 0.0
+        for i in range(1, ramp_ticks + hold_ticks + 1):
+            if latched_at is None and i <= ramp_ticks:
+                frac = float(i) / float(ramp_ticks)
+                self.grip_cmd = start + (float(target) - start) * frac
+            q = read_arm_q(self._client)
+            if q is not None:
+                q_hold = q
+            if q_hold is not None:
+                self._publish(q_hold)
+            obs = self.snapshot_obs()  # also latches saw_grasp_after_close
+            if obs is not None and on_step is not None:
+                on_step(obs, np.array([0.0] * 6 + [grip_bin], dtype=np.float32))
+                recorded += 1
+            if stop_early and latched_at is None and self._client.is_grasping() is True:
+                latched_at = i
+                self.grip_cmd = min(float(target), self.grip_cmd + self.cfg.grip_extra)
+                self._saw_grasp_after_close = True
+                self._log(f"[arm] holding at grip={self.grip_cmd:.3f} after "
+                          f"{i / self.cfg.rate_hz:.2f}s — stopped closing "
+                          f"(full close would be {target:.3f})")
+            if latched_at is not None and i - latched_at >= hold_ticks:
+                break
+            self._sleep(dt)
+        if stop_early and latched_at is None:
+            self._log(f"[arm] no hold detected during close; at grip={self.grip_cmd:.3f}")
+        return recorded
+
+    def refresh_grasp(self, samples: int = 8):
+        """Re-sample hold state so a late-settling grasp still counts at episode end."""
+        closed = self.closing
+        latest = None
+        for _ in range(max(1, samples)):
+            g = self._client.is_grasping()
+            if g is not None:
+                latest = g
+            if closed and g is True:
+                self._closed_since_last_open = True
+                self._saw_grasp_after_close = True
+                return True
+            self._sleep(0.05)
+        return latest
+
+    def _record_tick(self, q, wp_pos, on_step) -> int:
+        """Label one scripted tick with the same EE-delta convention as manual clicks."""
+        if on_step is None:
+            return 0
+        obs = self.snapshot_obs()
+        if obs is None:
+            return 0
+        T = self.kin.fk(q)
+        remaining = np.asarray(wp_pos, dtype=np.float64) - T[:3, 3]
+        dist = float(np.linalg.norm(remaining))
+        step = min(self.cfg.pos_step, dist) if dist > 1e-6 else 0.0
+        dpos = (remaining / dist * step) if dist > 1e-6 else np.zeros(3)
+        # A grip-only segment can be the first thing a place does, before any move has
+        # set a target orientation; there is no rotation to label in that case.
+        if self._place_quat is None:
+            rot = np.zeros(3)
+        else:
+            rot = arm_kin.quat_error_axis_angle(
+                self._place_quat, arm_kin.R_to_quat(T[:3, :3])
+            )
+            rot_n = float(np.linalg.norm(rot))
+            if rot_n > self.cfg.d_yaw:
+                rot = rot / rot_n * self.cfg.d_yaw
+        grip_bin = 1.0 if self.closing else 0.0
+        action = np.array(
+            [dpos[0], dpos[1], dpos[2], rot[0], rot[1], rot[2], grip_bin],
+            dtype=np.float32,
+        )
+        on_step(obs, action)
+        return 1
+
+    def _grip_segment(self, label, grip: float, on_step, dwell_s: float,
+                      intent: Optional[float] = None) -> int:
+        """Hold the arm still at grip command `grip` for a dwell.
+
+        `intent` overrides what this counts as: holding a grasp that stopped early at
+        0.3 still means "closed", even though 0.3 is below the halfway mark.
+        """
+        dt = 1.0 / self.cfg.rate_hz
+        self.grip_cmd = float(grip)
+        self.grip_target = float(grip if intent is None else intent)
+        self._closed_since_last_open = self.closing
+        q_hold = read_arm_q(self._client)
+        recorded = 0
+        for _ in range(max(1, int(max(0.2, dwell_s) * self.cfg.rate_hz))):
+            q = read_arm_q(self._client)
+            if q is not None:
+                q_hold = q
+                recorded += self._record_tick(q, self.kin.fk(q)[:3, 3], on_step)
+            if q_hold is not None:
+                self._publish(q_hold)
+            self._sleep(dt)
+        self._log(f"  [place] {label} grip={grip:.3f} steps+={recorded}")
+        return recorded
+
+    def _joint_move(self, label, q_goal, on_step, speed: float,
+                    timeout_s: float = 4.0, wrap: bool = False) -> int:
+        """Constant-rate joint interpolation to q_goal — the only place primitive.
+
+        Every waypoint is a joint vector, so nothing here can flip an IK branch or
+        drive the wrist through the forearm; the arm sweeps between two poses that are
+        each known to be safe. `wrap` takes the shortest angular path per joint, which
+        is what you want coming back from an arbitrary teleop pose but *not* for the
+        deliberate 180 deg swing (a half turn wraps to the other direction).
+        """
+        dt = 1.0 / self.cfg.rate_hz
+        q0 = read_arm_q(self._client)
+        if q0 is None:
+            self._log(f"  [place] {label}: no joint_states")
+            return 0
+        q_goal = np.asarray(q_goal, dtype=np.float64)
+        T = self.kin.fk(q_goal)
+        ee_goal = T[:3, 3]
+        self._place_quat = arm_kin.R_to_quat(T[:3, :3])
+        delta = _shortest_joint_delta(q0, q_goal) if wrap else q_goal - q0
+        span = float(np.max(np.abs(delta)))
+        n_ticks = max(1, int(np.ceil(span / max(1e-4, speed / self.cfg.rate_hz))))
+        every = max(1, int(self.cfg.place_rec_every))
+        recorded = 0
+        for i in range(1, n_ticks + 1):
+            self._publish(q0 + (float(i) / float(n_ticks)) * delta)
+            if i % every == 0:
+                q = read_arm_q(self._client)
+                if q is not None:
+                    recorded += self._record_tick(q, ee_goal, on_step)
+            self._sleep(dt)
+        q_hold = q0 + delta
+        deadline = time.monotonic() + max(0.3, timeout_s)
+        i = 0
+        while time.monotonic() < deadline:
+            self._publish(q_hold)
+            i += 1
+            q = read_arm_q(self._client)
+            if q is not None:
+                if i % every == 0:
+                    recorded += self._record_tick(q, ee_goal, on_step)
+                if float(np.linalg.norm(_shortest_joint_delta(q, q_hold))) < \
+                        self.cfg.settle_tol_joint:
+                    break
+            self._sleep(dt)
+        q_end = read_arm_q(self._client)
+        ee = self.kin.fk(q_hold if q_end is None else q_end)[:3, 3]
+        self._log(f"  [place] {label}: {span:.2f} rad in {n_ticks} ticks, "
+                  f"ee=({ee[0]:.3f},{ee[1]:.3f},{ee[2]:.3f}) steps+={recorded}")
+        return recorded
+
+    def _guarded_ik(self, label, target, q_seed) -> Optional[np.ndarray]:
+        """IK for `target`, refused if the solver jumped to a different branch.
+
+        A branch jump is what wrecked the old Cartesian path: the solver happily
+        returns a pose that reaches the point with the elbow folded through the
+        forearm, and interpolating into it drives the arm through itself. Legitimate
+        moves here are local, so a large joint deviation from the seed means the
+        solution is not the one we asked for.
+        """
+        target = np.asarray(target, dtype=np.float64)
+        quat = arm_kin.R_to_quat(self.kin.fk(q_seed)[:3, :3])
+        q = arm_kin.unwrap(arm_kin.ik_solve(self.kin, target, quat, q_seed), q_seed)
+        err = float(np.linalg.norm(target - self.kin.fk(q)[:3, 3]))
+        dev = float(np.max(np.abs(q - q_seed)))
+        if err < self.cfg.settle_tol_m * 2.0 and dev <= float(self.cfg.place_ik_guard):
+            self._log(f"  [place] {label} solved: err={err:.3f}m dev={dev:.2f} rad")
+            return q
+        self._log(f"  [place] {label} REJECTED: err={err:.3f}m dev={dev:.2f} rad "
+                  f"(guard {self.cfg.place_ik_guard:.2f})")
+        return None
+
+    def _place_poses(self) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """The three joint poses the place needs: front-high, over-basket, in-basket.
+
+        Only joint 1 differs between front-high and over-basket, so the trip around the
+        robot is a single-joint sweep at `carry_up` — the same height and the same idea
+        as the arc in `arm_pick.py`, which is the one path known to clear the chassis
+        and the basket rim.
+        """
+        p = self._place_params
+        q_home = np.asarray(arm_kin.DEFAULT_ARM_Q, dtype=np.float64)
+        carry_z = float(p["carry_up"])
+        ee_home = self.kin.fk(q_home)[:3, 3]
+        q_lift = self._guarded_ik(
+            "front-high", [float(ee_home[0]), float(ee_home[1]), carry_z], q_home
+        )
+        if q_lift is None:
+            return None
+        q_over = q_lift.copy()
+        q_over[0] += float(self.cfg.place_yaw)
+        q_drop = self._guarded_ik(
+            "in-basket",
+            [float(p["place_fwd"]), float(p["place_lat"]), float(p["place_up"])],
+            q_over,
+        )
+        if q_drop is None:
+            return None
+        return q_lift, q_over, q_drop
+
+    def place_in_basket(self, on_step: Optional[Callable[[dict, np.ndarray], None]] = None) -> int:
+        """Squeeze, lift, rotate to the basket, drop, rotate back. Recorded steps.
+
+        Every move is a joint-space interpolation between two poses that differ only
+        modestly, and the trip around the robot is a pure joint-1 rotation at carry
+        height. Cartesian tracking was the problem, not the solution: a straight line
+        to a point behind the shoulder has no safe interpolation, and IK kept solving
+        it with the arm folded through itself.
+        """
+        if read_arm_q(self._client) is None:
+            self._log("[place] no joint_states")
+            return 0
+        self._place_params = load_params()
+        q_home = np.asarray(arm_kin.DEFAULT_ARM_Q, dtype=np.float64)
+        poses = self._place_poses()
+        if poses is None:
+            self._log("[place] cannot solve the basket poses — nothing moved, still "
+                      "holding (check pnp_params place_fwd/place_lat/place_up/carry_up)")
+            return 0
+        q_lift, q_over, q_drop = poses
+        speed = float(self.cfg.place_speed)
+        dwell = max(float(self.cfg.grip_dwell_s), 0.4)
+        self._log(f"[place] yaw={self.cfg.place_yaw:.3f} rad at {speed:.2f} rad/s, "
+                  f"carry z={float(self._place_params['carry_up']):.3f}")
+
+        n = 0
+        q_now = read_arm_q(self._client)
+        self._place_quat = arm_kin.R_to_quat(self.kin.fk(q_now)[:3, :3])
+        # Let the fingers settle before anything moves, but do NOT re-close to the full
+        # command: grip_cmd is already the value that achieved the hold, and squeezing
+        # past contact is what ejects the object.
+        if self.closing:
+            n += self._grip_segment("hold", self.grip_cmd, on_step, dwell,
+                                    intent=self.cfg.grip_close)
+        else:
+            self._log("[place] gripper is open — closing before the move")
+            n += self._grip_click(self.cfg.grip_close, on_step)
+        self._log(f"[place] holding={self.refresh_grasp()} at grip={self.grip_cmd:.3f}")
+        n += self._joint_move("fold to ready", q_home, on_step, speed, wrap=True)
+        n += self._joint_move("raise to carry height", q_lift, on_step, speed)
+        n += self._joint_move("rotate over basket", q_over, on_step, speed)
+        n += self._joint_move("lower into basket", q_drop, on_step, speed)
+        n += self._grip_segment("release", GRIPPER_OPEN, on_step, dwell)
+        n += self._joint_move("raise clear of basket", q_over, on_step, speed)
+        n += self._joint_move("rotate back to front", q_lift, on_step, speed)
+        n += self._joint_move("fold to ready", q_home, on_step, speed)
+
+        # Resync IK targets so later manual nudges start from where the arm actually is.
+        q_end = read_arm_q(self._client)
+        if q_end is not None:
+            self._sync_ee_targets_from_q(q_end)
+        self._log(f"[place] done  steps+={n}")
+        return n

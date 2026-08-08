@@ -48,7 +48,27 @@ def _resize_rgb(img: np.ndarray, size: int) -> np.ndarray:
     return np.ascontiguousarray(crop[yy][:, xx])
 
 
-def _load_episode(ep_dir: str) -> Tuple[dict, dict]:
+CAMERA_CHOICES = ("auto", "base_left", "base_right", "gripper_left", "gripper_right")
+# Episodes recorded before the stereo split stored the left eye under a short name.
+_LEGACY = {"image_base_left": "image_base", "image_gripper_left": "image_gripper"}
+_PREFERENCE = ("image_base_left", "image_gripper_left", "image_base_right",
+               "image_gripper_right")
+
+
+def _pick_image_key(steps, camera: str) -> str:
+    """Resolve the requested view, falling back to whichever one was recorded."""
+    preferred = str(steps.attrs.get("primary_camera", "base_left")) if camera == "auto" \
+        else camera
+    wanted = f"image_{preferred}"
+    order = [wanted, _LEGACY.get(wanted)] + [k for k in _PREFERENCE if k != wanted]
+    order += [_LEGACY[k] for k in _PREFERENCE if k in _LEGACY]
+    for key in order:
+        if key and key in steps:
+            return key
+    raise ValueError("episode has no RGB view")
+
+
+def _load_episode(ep_dir: str, camera: str = "auto") -> Tuple[dict, dict]:
     meta_path = os.path.join(ep_dir, "meta.json")
     h5_path = os.path.join(ep_dir, "episode.hdf5")
     with open(meta_path) as f:
@@ -57,8 +77,10 @@ def _load_episode(ep_dir: str) -> Tuple[dict, dict]:
         raise ValueError("not a successful episode")
     with h5py.File(h5_path, "r") as f:
         steps = f["steps"]
+        image_key = _pick_image_key(steps, camera)
         data = {
-            "image_gripper": np.asarray(steps["image_gripper"]),
+            "image_key": image_key,
+            "image": np.asarray(steps[image_key]),
             "action": np.asarray(steps["action"], dtype=np.float32),
             "q_arm": np.asarray(steps["q_arm"], dtype=np.float32),
             "q_grip": np.asarray(steps["q_grip"], dtype=np.float32),
@@ -69,7 +91,7 @@ def _load_episode(ep_dir: str) -> Tuple[dict, dict]:
     return meta, data
 
 
-def convert(in_dir: str, out_dir: str, image_size: int = 224):
+def convert(in_dir: str, out_dir: str, image_size: int = 224, camera: str = "auto"):
     os.makedirs(os.path.join(out_dir, "episodes"), exist_ok=True)
     episodes = []
     all_actions: List[np.ndarray] = []
@@ -89,13 +111,13 @@ def convert(in_dir: str, out_dir: str, image_size: int = 224):
                 meta_peek = json.load(f)
             if not meta_peek.get("success", False):
                 continue
-            meta, data = _load_episode(ep_dir)
+            meta, data = _load_episode(ep_dir, camera)
         except Exception as e:
             print(f"[skip] {name}: {e}")
             continue
 
         images = np.stack(
-            [_resize_rgb(data["image_gripper"][i], image_size) for i in range(len(data["action"]))],
+            [_resize_rgb(data["image"][i], image_size) for i in range(len(data["action"]))],
             axis=0,
         )
         # proprio state for OpenVLA-style observation.state: q_arm(6) + grip
@@ -119,9 +141,11 @@ def convert(in_dir: str, out_dir: str, image_size: int = 224):
             "path": f"episodes/episode_{idx:04d}.npz",
             "num_steps": int(data["action"].shape[0]),
             "language_instruction": meta.get("language_instruction", ""),
+            "camera": data["image_key"],
         })
         all_actions.append(data["action"])
-        print(f"[ok] {name} -> episode_{idx:04d}.npz ({data['action'].shape[0]} steps)")
+        print(f"[ok] {name} -> episode_{idx:04d}.npz "
+              f"({data['action'].shape[0]} steps, {data['image_key']})")
         idx += 1
 
     if not all_actions:
@@ -136,6 +160,7 @@ def convert(in_dir: str, out_dir: str, image_size: int = 224):
         "num_steps": int(actions.shape[0]),
         "image_size": image_size,
         "action_convention": "ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip",
+        "camera": camera,
     }
     with open(os.path.join(out_dir, "dataset_statistics.json"), "w") as f:
         json.dump(stats, f, indent=2)
@@ -151,8 +176,14 @@ def main():
     ap.add_argument("--in", dest="in_dir", required=True, help="marc_pnp success root")
     ap.add_argument("--out", dest="out_dir", required=True, help="export root")
     ap.add_argument("--image-size", type=int, default=224)
+    ap.add_argument(
+        "--camera",
+        choices=CAMERA_CHOICES,
+        default="auto",
+        help="view exported as `image` (auto = each episode's recorded primary_camera)",
+    )
     args = ap.parse_args()
-    convert(args.in_dir, args.out_dir, args.image_size)
+    convert(args.in_dir, args.out_dir, args.image_size, args.camera)
 
 
 if __name__ == "__main__":

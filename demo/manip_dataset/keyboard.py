@@ -25,6 +25,7 @@ ARM_TELEOP (after auto-approach stop):
   ,/.     EE +/- pitch
   v       grip CLOSE
   b       grip OPEN
+  P       place in rear basket (scripted carry + release, recorded)
   E       end attempt -> sensor success filter (grip stays as commanded)
 ANY:
   C       cancel auto-approach (-> MANUAL_BASE)

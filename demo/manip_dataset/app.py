@@ -10,7 +10,7 @@ import time
 from arm_pick import load_params
 
 from .arm_control import ArmTeleop, TeleopConfig
-from .client import ManipTrainerClient, wait_for_robot_topics
+from .client import ManipTrainerClient, report_camera_publishers, wait_for_robot_topics
 from .depth_approach import ApproachConfig, DepthApproachController
 from .keyboard import HELP_TEXT, Keyboard
 from .recorder import EpisodeRecorder
@@ -44,7 +44,9 @@ class CollectorApp:
         self.phase = Phase.MANUAL_BASE
         self.arm = ArmTeleop(client, TeleopConfig.from_env())
         self.approach = DepthApproachController(client, ApproachConfig.from_env())
-        self.recorder = EpisodeRecorder(_dataset_root(), team_id)
+        self.recorder = EpisodeRecorder(
+            _dataset_root(), team_id, primary_camera=self.arm.cfg.primary_camera
+        )
         self.base_lin = _env_float("MARC_BASE_LIN", 0.08)
         # Reverse magnitude for `k` (defaults to forward speed if unset).
         self.base_lin_back = _env_float("MARC_BASE_LIN_BACK", self.base_lin)
@@ -144,7 +146,8 @@ class CollectorApp:
             print("[approach] AUTO_APPROACH crawling (C to cancel)...")
         elif ch == "v":
             self.arm.set_grip(self.arm.cfg.grip_close)
-            print(f"[arm] GRIP CLOSE (no record)  grasping={self.client.is_grasping()}")
+            print(f"[arm] GRIP CLOSE (no record)  grip={self.arm.grip_cmd:.3f}"
+                  f"  grasping={self.client.is_grasping()}")
         elif ch == "b":
             self.arm.set_grip(0.0)
             print("[arm] GRIP OPEN (no record) — object released")
@@ -189,14 +192,35 @@ class CollectorApp:
             print(f"[arm] -pitch  steps+={n}")
         elif ch == "v":
             n = self.arm.apply_delta(grip=cfg.grip_close, on_step=self._on_step)
-            print(f"[arm] GRIP CLOSE  steps+={n}  grasping={self.client.is_grasping()}")
+            print(f"[arm] GRIP CLOSE  steps+={n}  grip={self.arm.grip_cmd:.3f}"
+                  f"  grasping={self.client.is_grasping()}"
+                  f"  grasp_latched={self.arm.saw_grasp_after_close}")
         elif ch == "b":
             n = self.arm.apply_delta(grip=0.0, on_step=self._on_step)
             print(f"[arm] GRIP OPEN  steps+={n}")
+        elif ch == "P":
+            self._place_in_basket()
         elif ch == "E":
             self._end_attempt()
         elif ch in "ikjl":
             print("[warn] base keys disabled in ARM_TELEOP (finish with E or N)")
+
+    def _place_in_basket(self):
+        if self.client.is_grasping() is False:
+            print("[place] not holding anything — grasp with v first (running anyway)")
+        n = self.arm.place_in_basket(on_step=self._on_step)
+        basket = self._wait_basket_occupied()
+        print(f"[place] recorded steps+={n}  basket={basket}"
+              f"{'  — press E to keep' if basket is True else '  — drop missed, retry or N'}")
+
+    def _wait_basket_occupied(self, timeout_s: float = 2.0):
+        """Poll basket occupancy; the sensor lags the physical drop by a few frames."""
+        deadline = time.monotonic() + timeout_s
+        occupied = self.client.is_basket_occupied()
+        while occupied is not True and time.monotonic() < deadline:
+            time.sleep(0.1)
+            occupied = self.client.is_basket_occupied()
+        return occupied
 
     def _abort_episode(self):
         self.client.send_cmd_vel(0.0, 0.0)
@@ -217,7 +241,8 @@ class CollectorApp:
 
     def _end_attempt(self):
         self.client.send_cmd_vel(0.0, 0.0)
-        basket = self.client.is_basket_occupied()
+        self.arm.refresh_grasp()
+        basket = self._wait_basket_occupied()
         ok = evaluate_success(
             saw_grasp_after_close=self.arm.saw_grasp_after_close,
             basket_occupied=basket,
@@ -285,6 +310,8 @@ def main():
     if not wait_for_robot_topics(client, team_id):
         client.shutdown()
         sys.exit(1)
+
+    report_camera_publishers(client, team_id)
 
     app = CollectorApp(client, team_id)
     try:

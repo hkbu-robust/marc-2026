@@ -36,6 +36,40 @@ class ManipTrainerClient(MARCClient):
         return True
 
 
+CAMERA_TOPIC_SUFFIXES = (
+    "base_camera/left/image",
+    "base_camera/right/image",
+    "base_camera/depth/image",
+    "gripper_camera/left/image",
+    "gripper_camera/right/image",
+    "gripper_camera/depth/image",
+)
+
+
+def report_camera_publishers(client: MARCClient, team_id: str):
+    """Print how many nodes publish each camera topic.
+
+    Frames at two different resolutions arriving on one topic means two publishers
+    are bound to it; this names them so the extra one can be traced.
+    """
+    print("[probe] camera publishers:")
+    for suffix in CAMERA_TOPIC_SUFFIXES:
+        topic = f"/marc/{team_id}/robot/{suffix}"
+        try:
+            eps = client._node.get_publishers_info_by_topic(topic)
+        except Exception as e:
+            print(f"[probe]   {suffix}: publisher info unavailable ({e})")
+            continue
+        if not eps:
+            print(f"[probe]   {suffix}: no publisher")
+            continue
+        who = ", ".join(
+            f"{(ep.node_namespace or '/').rstrip('/')}/{ep.node_name}" for ep in eps
+        )
+        warn = "  <-- MULTIPLE PUBLISHERS" if len(eps) > 1 else ""
+        print(f"[probe]   {suffix}: {len(eps)} publisher(s) [{who}]{warn}")
+
+
 def wait_for_robot_topics(client: MARCClient, team_id: str, timeout_sec: float = 60.0) -> bool:
     """Poll the ROS graph until trainer joint_states appear under this team namespace."""
     joint_topic = f"/marc/{team_id}/robot/arm/joint_states"
