@@ -12,7 +12,7 @@ import numpy as np
 
 try:
     import h5py
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover — ImportError or numpy ABI mismatch
     h5py = None
 
 
@@ -91,11 +91,33 @@ class EpisodeRecorder:
         self.steps = []
         return path
 
+    def _drop_odd_shaped_steps(self):
+        """Keep only steps whose gripper RGB matches the episode's dominant resolution.
+
+        A single differently-sized camera frame would otherwise abort the whole write.
+        Dropping the step (rather than the dataset) keeps every array aligned by index.
+        """
+        counts: Dict[Any, int] = {}
+        for s in self.steps:
+            shape = np.asarray(s["image_gripper"]).shape
+            counts[shape] = counts.get(shape, 0) + 1
+        if len(counts) <= 1:
+            return
+        keep_shape = max(counts.items(), key=lambda kv: kv[1])[0]
+        kept = [s for s in self.steps if np.asarray(s["image_gripper"]).shape == keep_shape]
+        print(f"[record] dropped {len(self.steps) - len(kept)} step(s) with mismatched "
+              f"image shape (kept {keep_shape})")
+        self.steps = kept
+
     def _write(self, parent: str) -> str:
         if h5py is None:
             raise RuntimeError("h5py is required to write episodes (pip/apt install h5py)")
         if not self.steps:
             raise RuntimeError("no steps to write")
+        self._drop_odd_shaped_steps()
+        if not self.steps:
+            raise RuntimeError("no steps to write")
+        self.meta["num_steps"] = len(self.steps)
         eid = self.meta["episode_id"]
         out_dir = os.path.join(parent, eid)
         os.makedirs(out_dir, exist_ok=True)

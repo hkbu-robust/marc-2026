@@ -16,6 +16,7 @@ MANUAL_BASE:
   j/l     base yaw left / right
   space   stop base
   A       start auto-approach (baseline depth now, crawl forward)
+  v/b     grip CLOSE / OPEN (not recorded — use b to release a carried object)
 ARM_TELEOP (after auto-approach stop):
   t/g     EE +/- X (fwd/back in arm_base)
   f/h     EE +/- Y
@@ -24,7 +25,7 @@ ARM_TELEOP (after auto-approach stop):
   ,/.     EE +/- pitch
   v       grip CLOSE
   b       grip OPEN
-  E       end attempt -> sensor success filter
+  E       end attempt -> sensor success filter (grip stays as commanded)
 ANY:
   C       cancel auto-approach (-> MANUAL_BASE)
   N       discard episode / abort

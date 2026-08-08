@@ -57,6 +57,10 @@ services:
     working_dir: /agent/demo
     stdin_open: true
     tty: true
+    # Loads demo/.env into the container (compose only auto-reads it for ${} interpolation,
+    # not as container env, unless listed here). Put MARC_READY_J5/J6/UP overrides in demo/.env.
+    env_file:
+      - .env
     environment:
       MARC_TEAM_ID:  "${MARC_TEAM_ID:-u1}"
       MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
@@ -67,11 +71,10 @@ services:
       PYTHONPATH: "/agent:/agent/demo"
       PYTHONUNBUFFERED: "1"
       MARC_DATASET_ROOT: "/agent/demo/datasets/marc_pnp"
-      MARC_APPROACH_TAU: "${MARC_APPROACH_TAU:-0.15}"
-      MARC_APPROACH_D_NEAR: "${MARC_APPROACH_D_NEAR:-0.55}"
-      MARC_APPROACH_CRAWL: "${MARC_APPROACH_CRAWL:-0.05}"
-      MARC_BASE_LIN: "${MARC_BASE_LIN:-0.08}"
-      MARC_BASE_ANG: "${MARC_BASE_ANG:-0.25}"
+      # Tunables (MARC_APPROACH_*, MARC_BASE_*, MARC_READY_*) live in demo/.env,
+      # loaded via env_file above. Do not list them here: the environment block
+      # takes precedence over env_file, so a ${VAR:-default} entry would pin the
+      # default and silently ignore demo/.env.
     volumes:
       - ./datasets:/agent/demo/datasets
     command: ["python3", "/agent/demo/handshake_manip_trainer_client.py"]

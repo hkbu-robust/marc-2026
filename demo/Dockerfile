@@ -19,9 +19,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Participant algorithm dependencies. numpy + pyyaml (stdlib/ROS2 for the rest), plus placo
 # for the closed-loop arm IK pick (Pinocchio-based, pip-installable on Python 3.10).
 # The network is used at build time only -- the judging runtime environment has no internet (no runtime dependency).
+# Install h5py via pip (not apt python3-h5py): placo pulls a newer numpy that is
+# ABI-incompatible with Debian's h5py ("numpy.dtype size changed").
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3-numpy python3-yaml python3-pip python3-h5py \
-    && pip3 install --no-cache-dir placo \
+        python3-numpy python3-yaml python3-pip \
+    && pip3 install --no-cache-dir placo h5py \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /agent

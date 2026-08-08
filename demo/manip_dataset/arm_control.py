@@ -25,42 +25,97 @@ from .images import image_to_depth, image_to_rgb
 
 
 def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
     try:
-        return float(os.environ.get(name, default))
+        return float(raw)
     except (TypeError, ValueError):
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Single source of truth for TeleopConfig defaults (override with MARC_* env vars).
+DEFAULT_TELEOP_DX = 0.01
+DEFAULT_TELEOP_DY = 0.01
+DEFAULT_TELEOP_DZ = 0.01
+DEFAULT_TELEOP_DYAW = 0.05
+DEFAULT_TELEOP_DPITCH = 0.05
+DEFAULT_READY_PITCH = 0.40  # unused for ready (joint-space start); kept for env compat
+DEFAULT_READY_J1 = 0.0
+DEFAULT_READY_J2 = float(arm_kin.DEFAULT_ARM_Q[1])   # typically  0.262
+DEFAULT_READY_J3 = float(arm_kin.DEFAULT_ARM_Q[2])   # typically -2.094
+DEFAULT_READY_J4 = float(arm_kin.DEFAULT_ARM_Q[3])   # typically  0.0
+DEFAULT_READY_J5 = float(arm_kin.DEFAULT_ARM_Q[4])   # typically -0.785
+DEFAULT_READY_J6 = float(arm_kin.DEFAULT_ARM_Q[5])   # typically  1.571
+DEFAULT_READY_FWD = 0.30   # unused for ready (joint-space); kept for env compat
+DEFAULT_READY_LAT = 0.0
+DEFAULT_READY_UP = 0.28
+DEFAULT_RATE_HZ = 15.0
+DEFAULT_POS_STEP = 0.008
+DEFAULT_SETTLE_TOL_M = 0.015
+DEFAULT_SETTLE_TOL_JOINT = 0.05
+DEFAULT_READY_MOVE_S = 2.0
+DEFAULT_MAX_TICKS_PER_CLICK = 40
+DEFAULT_READY_OPEN_GRIP = False  # ready pose holds whatever the gripper was commanded to
+
+
 @dataclass
 class TeleopConfig:
-    dx: float = 0.01
-    dy: float = 0.01
-    dz: float = 0.01
-    d_yaw: float = 0.05
-    d_pitch: float = 0.05
-    ready_pitch_down: float = 0.70   # rad ~40 deg about EE Y
-    ready_fwd: float = 0.30
-    ready_lat: float = 0.0
-    ready_up: float = 0.20
-    rate_hz: float = 15.0
-    pos_step: float = 0.008
-    settle_tol_m: float = 0.015
-    max_ticks_per_click: int = 40
+    dx: float = DEFAULT_TELEOP_DX
+    dy: float = DEFAULT_TELEOP_DY
+    dz: float = DEFAULT_TELEOP_DZ
+    d_yaw: float = DEFAULT_TELEOP_DYAW
+    d_pitch: float = DEFAULT_TELEOP_DPITCH
+    ready_pitch_down: float = DEFAULT_READY_PITCH
+    # Ready start pose = absolute joint angles (rad). No Cartesian IK during ready.
+    ready_j1: float = DEFAULT_READY_J1
+    ready_j2: float = DEFAULT_READY_J2
+    ready_j3: float = DEFAULT_READY_J3
+    ready_j4: float = DEFAULT_READY_J4
+    ready_j5: float = DEFAULT_READY_J5
+    ready_j6: float = DEFAULT_READY_J6
+    ready_fwd: float = DEFAULT_READY_FWD
+    ready_lat: float = DEFAULT_READY_LAT
+    ready_up: float = DEFAULT_READY_UP
+    rate_hz: float = DEFAULT_RATE_HZ
+    pos_step: float = DEFAULT_POS_STEP
+    settle_tol_m: float = DEFAULT_SETTLE_TOL_M
+    settle_tol_joint: float = DEFAULT_SETTLE_TOL_JOINT
+    ready_move_s: float = DEFAULT_READY_MOVE_S
+    max_ticks_per_click: int = DEFAULT_MAX_TICKS_PER_CLICK
     grip_close: float = GRIPPER_CLOSE
+    ready_open_grip: bool = DEFAULT_READY_OPEN_GRIP
 
     @classmethod
     def from_env(cls) -> "TeleopConfig":
         p = load_params()
         return cls(
-            dx=_env_float("MARC_TELEOP_DX", 0.01),
-            dy=_env_float("MARC_TELEOP_DY", 0.01),
-            dz=_env_float("MARC_TELEOP_DZ", 0.01),
-            d_yaw=_env_float("MARC_TELEOP_DYAW", 0.05),
-            d_pitch=_env_float("MARC_TELEOP_DPITCH", 0.05),
-            ready_pitch_down=_env_float("MARC_READY_PITCH", 0.70),
+            dx=_env_float("MARC_TELEOP_DX", DEFAULT_TELEOP_DX),
+            dy=_env_float("MARC_TELEOP_DY", DEFAULT_TELEOP_DY),
+            dz=_env_float("MARC_TELEOP_DZ", DEFAULT_TELEOP_DZ),
+            d_yaw=_env_float("MARC_TELEOP_DYAW", DEFAULT_TELEOP_DYAW),
+            d_pitch=_env_float("MARC_TELEOP_DPITCH", DEFAULT_TELEOP_DPITCH),
+            ready_pitch_down=_env_float("MARC_READY_PITCH", DEFAULT_READY_PITCH),
+            ready_j1=_env_float("MARC_READY_J1", DEFAULT_READY_J1),
+            ready_j2=_env_float("MARC_READY_J2", DEFAULT_READY_J2),
+            ready_j3=_env_float("MARC_READY_J3", DEFAULT_READY_J3),
+            ready_j4=_env_float("MARC_READY_J4", DEFAULT_READY_J4),
+            ready_j5=_env_float("MARC_READY_J5", DEFAULT_READY_J5),
+            ready_j6=_env_float("MARC_READY_J6", DEFAULT_READY_J6),
+            ready_fwd=_env_float("MARC_READY_FWD", DEFAULT_READY_FWD),
+            ready_lat=_env_float("MARC_READY_LAT", DEFAULT_READY_LAT),
+            ready_up=_env_float("MARC_READY_UP", DEFAULT_READY_UP),
+            ready_move_s=_env_float("MARC_READY_MOVE_S", DEFAULT_READY_MOVE_S),
             grip_close=float(p.get("grip_close", GRIPPER_CLOSE)),
+            ready_open_grip=_env_bool("MARC_READY_OPEN_GRIP", DEFAULT_READY_OPEN_GRIP),
         )
-
 
 _KIN = None
 
@@ -105,11 +160,10 @@ def read_grip_and_inner(client) -> Tuple[float, list]:
     return grip, inners
 
 
-def _pitch_down_quat(base_quat: np.ndarray, pitch_rad: float) -> np.ndarray:
-    """Rotate about EE local Y (pitch down)."""
-    q = arm_kin.quat_mul(base_quat, arm_kin.rotvec_to_quat(np.array([0.0, pitch_rad, 0.0])))
-    n = float(np.linalg.norm(q))
-    return q / n if n > 0 else base_quat
+def _shortest_joint_delta(q0: np.ndarray, q1: np.ndarray) -> np.ndarray:
+    """Element-wise shortest angular delta from q0 to q1 (rad)."""
+    d = np.asarray(q1, dtype=np.float64) - np.asarray(q0, dtype=np.float64)
+    return (d + np.pi) % (2.0 * np.pi) - np.pi
 
 
 class ArmTeleop:
@@ -123,6 +177,17 @@ class ArmTeleop:
         self.target_quat: Optional[np.ndarray] = None
         self._saw_grasp_after_close = False
         self._closed_since_last_open = False
+        self._log(
+            "[arm] TeleopConfig (joint-space ready)  "
+            f"j1={self.cfg.ready_j1:.4f} j2={self.cfg.ready_j2:.4f} "
+            f"j3={self.cfg.ready_j3:.4f} j4={self.cfg.ready_j4:.4f} "
+            f"j5={self.cfg.ready_j5:.4f} j6={self.cfg.ready_j6:.4f} "
+            f"(MARC_READY_J2={os.environ.get('MARC_READY_J2')!r} "
+            f"J3={os.environ.get('MARC_READY_J3')!r} "
+            f"J4={os.environ.get('MARC_READY_J4')!r} "
+            f"J5={os.environ.get('MARC_READY_J5')!r} "
+            f"J6={os.environ.get('MARC_READY_J6')!r})"
+        )
 
     def reset_grasp_flags(self):
         self._saw_grasp_after_close = False
@@ -152,43 +217,108 @@ class ArmTeleop:
             self._client.get_robot_depth("base")
             self._sleep(0.05)
 
-    def go_ready(self, timeout_s: float = 8.0) -> bool:
-        """Servo to a down-tilted ready EE pose with gripper open."""
-        self.grip_cmd = GRIPPER_OPEN
-        self.reset_grasp_flags()
+    def _ready_q(self) -> np.ndarray:
+        """Configured ready joint vector (absolute rad)."""
+        return np.array(
+            [
+                float(self.cfg.ready_j1),
+                float(self.cfg.ready_j2),
+                float(self.cfg.ready_j3),
+                float(self.cfg.ready_j4),
+                float(self.cfg.ready_j5),
+                float(self.cfg.ready_j6),
+            ],
+            dtype=np.float64,
+        )
+
+    def _sync_ee_targets_from_q(self, q: np.ndarray):
+        """Seed IK teleop targets from FK so nudges start at the ready EE pose."""
+        T = self.kin.fk(np.asarray(q, dtype=np.float64))
+        self.target_pos = T[:3, 3].copy()
+        self.target_quat = arm_kin.R_to_quat(T[:3, :3])
+
+    def set_grip(self, grip: float) -> bool:
+        """Command the gripper without moving the arm or recording steps."""
         q = read_arm_q(self._client)
         if q is None:
-            # wait briefly for joint_states
+            self._log("[arm] no joint_states — grip command skipped")
+            return False
+        if grip >= 0.5 * self.cfg.grip_close:
+            self._closed_since_last_open = True
+        else:
+            self._closed_since_last_open = False
+        self.grip_cmd = float(grip)
+        for _ in range(max(1, int(0.3 * self.cfg.rate_hz))):
+            self._publish(q)
+            self._sleep(1.0 / self.cfg.rate_hz)
+        return True
+
+    def go_ready(self, timeout_s: float = 8.0, open_grip: Optional[bool] = None) -> bool:
+        """Move to the configured joint-space ready pose (no Cartesian IK).
+
+        The gripper command is held through the motion unless `open_grip` (or
+        MARC_READY_OPEN_GRIP) asks for a release, so a grasped object survives the
+        return to ready.
+
+        After settle, EE targets are set from FK so subsequent teleop uses normal DLS IK.
+        """
+        if open_grip is None:
+            open_grip = bool(self.cfg.ready_open_grip)
+        if open_grip:
+            self.grip_cmd = GRIPPER_OPEN
+        self._saw_grasp_after_close = False
+        self._closed_since_last_open = self.grip_cmd >= 0.5 * self.cfg.grip_close
+        self._log(f"[arm] ready keeps grip_cmd={self.grip_cmd:.3f}"
+                  f"{' (opened)' if open_grip else ' (held)'}")
+        q0 = read_arm_q(self._client)
+        if q0 is None:
             t0 = time.monotonic()
-            while q is None and time.monotonic() - t0 < 3.0:
+            while q0 is None and time.monotonic() - t0 < 3.0:
                 self._sleep(0.05)
-                q = read_arm_q(self._client)
-        if q is None:
+                q0 = read_arm_q(self._client)
+        if q0 is None:
             self._log("[arm] no joint_states for ready pose")
             return False
 
-        T0 = self.kin.fk(arm_kin.DEFAULT_ARM_Q)
-        base_quat = arm_kin.R_to_quat(T0[:3, :3])
-        self.target_quat = _pitch_down_quat(base_quat, self.cfg.ready_pitch_down)
-        self.target_pos = np.array(
-            [self.cfg.ready_fwd, self.cfg.ready_lat, self.cfg.ready_up], dtype=np.float64
+        q_goal = self._ready_q()
+        self._log(
+            "[arm] joint-space ready -> "
+            + " ".join(f"j{i+1}={q_goal[i]:.3f}" for i in range(6))
         )
 
         dt = 1.0 / self.cfg.rate_hz
-        t0 = time.monotonic()
-        while time.monotonic() - t0 < timeout_s:
-            q = read_arm_q(self._client)
-            if q is None:
-                self._sleep(dt)
-                continue
-            cmd = arm_kin.dls_solve(self.kin, q, self.target_pos, self.target_quat)
+        move_s = max(0.3, float(self.cfg.ready_move_s))
+        n_steps = max(1, int(move_s * self.cfg.rate_hz))
+        delta = _shortest_joint_delta(q0, q_goal)
+
+        for i in range(1, n_steps + 1):
+            a = float(i) / float(n_steps)
+            cmd = q0 + a * delta
             self._publish(cmd)
-            ee = self.kin.fk(q)[:3, 3]
-            if float(np.linalg.norm(ee - self.target_pos)) < self.cfg.settle_tol_m:
-                self._log("[arm] ready pose reached (down-tilt)")
-                return True
             self._sleep(dt)
-        self._log("[arm] ready pose settle timeout (continuing)")
+
+        # Hold at goal until feedback catches up (or timeout).
+        t0 = time.monotonic()
+        hold_deadline = t0 + max(0.5, timeout_s - move_s)
+        while time.monotonic() < hold_deadline:
+            self._publish(q_goal)
+            q = read_arm_q(self._client)
+            if q is not None:
+                err = float(np.linalg.norm(_shortest_joint_delta(q, q_goal)))
+                if err < self.cfg.settle_tol_joint:
+                    self._sync_ee_targets_from_q(q_goal)
+                    ee = self.target_pos
+                    self._log(
+                        f"[arm] ready OK (joint-space)  "
+                        f"ee=({ee[0]:.3f},{ee[1]:.3f},{ee[2]:.3f})  "
+                        f"joint_err={err:.4f}"
+                    )
+                    return True
+            self._sleep(dt)
+
+        self._publish(q_goal)
+        self._sync_ee_targets_from_q(q_goal)
+        self._log("[arm] ready hold timeout — continuing with commanded joint pose")
         return False
 
     def snapshot_obs(self) -> Optional[dict]:

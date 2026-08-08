@@ -46,6 +46,8 @@ class CollectorApp:
         self.approach = DepthApproachController(client, ApproachConfig.from_env())
         self.recorder = EpisodeRecorder(_dataset_root(), team_id)
         self.base_lin = _env_float("MARC_BASE_LIN", 0.08)
+        # Reverse magnitude for `k` (defaults to forward speed if unset).
+        self.base_lin_back = _env_float("MARC_BASE_LIN_BACK", self.base_lin)
         self.base_ang = _env_float("MARC_BASE_ANG", 0.25)
         self._base_cmd = (0.0, 0.0)
         self._running = True
@@ -125,7 +127,7 @@ class CollectorApp:
         if ch == "i":
             self._set_base(self.base_lin, ang)
         elif ch == "k":
-            self._set_base(-self.base_lin, ang)
+            self._set_base(-self.base_lin_back, ang)
         elif ch == "j":
             self._set_base(lin, self.base_ang)
         elif ch == "l":
@@ -140,11 +142,17 @@ class CollectorApp:
                 return
             self.phase = Phase.AUTO_APPROACH
             print("[approach] AUTO_APPROACH crawling (C to cancel)...")
+        elif ch == "v":
+            self.arm.set_grip(self.arm.cfg.grip_close)
+            print(f"[arm] GRIP CLOSE (no record)  grasping={self.client.is_grasping()}")
+        elif ch == "b":
+            self.arm.set_grip(0.0)
+            print("[arm] GRIP OPEN (no record) — object released")
         elif ch == "E":
             print("[warn] end attempt only valid in ARM_TELEOP after approach")
         else:
             # allow accidental arm keys hint
-            if ch in "tgfhryuo,vb":
+            if ch in "tgfhryuo,":
                 print("[warn] arm teleop unlocked after auto-approach stop")
 
     def _keys_arm(self, ch: str):
