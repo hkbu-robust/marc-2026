@@ -72,6 +72,9 @@ Episode folders are named `Episode 001`, `Episode 002`, … (zero-padded, sequen
 parent). That matches common OpenVLA / OXE-style corpora better than opaque hashes;
 `to_rlds.py` still emits `episode_XXXX.npz` from whatever source folder name it finds.
 
+Every kept RGB frame is also dumped as a PNG under `images/<view>/`, with the per-view
+totals recorded in `meta.json` as `png_counts`.
+
 HDF5 `steps/` datasets: `image_base_left`, `image_base_right`, `image_gripper_left`,
 `image_gripper_right`, `depth_base`, `depth_gripper`, `q_arm`, `q_grip`, `q_inner`,
 `ee_pos`, `ee_quat`, `grasping`, `action` (7,), `t_sim`, `t_wall`.
@@ -168,7 +171,7 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 
 | Variable | Default (code) | Meaning |
 |---|---|---|
-| `MARC_TEAM_ID` | `u1` (required) | Must match manip-trainer namespace |
+| `MARC_TEAM_ID` | `u1` | Any value, as long as it matches the manip-trainer namespace |
 | `MARC_DATASET_ROOT` | `demo/datasets/marc_pnp` | Success output root |
 | `MARC_APPROACH_CONTRAST` | `0.015` | Primary stop: rise in (ring−center) vs baseline (m). Pitch cancels; centered objects raise this |
 | `MARC_APPROACH_TAU` | `0.08` | Secondary whole-ROI drop (`d0−d`); kept high so empty bumps rarely trip |

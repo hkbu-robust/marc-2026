@@ -44,8 +44,8 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from std_msgs.msg import String, Bool
-from sensor_msgs.msg import Image, CameraInfo, Imu, LaserScan, JointState
+from std_msgs.msg import String, Bool, Float32
+from sensor_msgs.msg import Image, CameraInfo, Imu, PointCloud2, JointState
 from geometry_msgs.msg import Twist, PoseStamped
 from nav_msgs.msg import Odometry, OccupancyGrid
 
@@ -160,6 +160,7 @@ class MARCClient:
         self._lock = threading.Lock()
         self._cctv_image = {}     # camera_id -> Image
         self._cctv_info = {}      # camera_id -> CameraInfo
+        self._cctv_ground_height = {}   # camera_id -> float (ground-plane world z, m)
         self._cctv_subs = set()   # already-subscribed camera_id
         self._robot_msgs = {}     # suffix -> latest message
         self._robot_subs = set()  # robot suffix already lazily subscribed
@@ -464,6 +465,9 @@ class MARCClient:
                     self._node.create_subscription(
                         CameraInfo, self.topics.env_cctv_info(cid),
                         lambda m, c=cid: self._cache_cctv_info(c, m), P.QOS_IMAGE)
+                    self._node.create_subscription(
+                        Float32, self.topics.env_cctv_ground_height(cid),
+                        lambda m, c=cid: self._cache_cctv_ground_height(c, m), P.QOS_TRANSIENT)
                     self._log("[SUB] CCTV %s", cid)
 
     def _cache_cctv_image(self, cid, msg):
@@ -473,6 +477,10 @@ class MARCClient:
     def _cache_cctv_info(self, cid, msg):
         with self._lock:
             self._cctv_info[cid] = msg
+
+    def _cache_cctv_ground_height(self, cid, msg):
+        with self._lock:
+            self._cctv_ground_height[cid] = float(msg.data)
 
     def _on_world_pose(self, msg: PoseStamped):
         p, q = msg.pose.position, msg.pose.orientation
@@ -593,6 +601,15 @@ class MARCClient:
         with self._lock:
             return self._cctv_info.get(camera_id)
 
+    def get_cctv_ground_height(self, camera_id: str):
+        """Ground-plane height (world z, meters) this CCTV looks down on, or None.
+
+        Use as the plane (z = ground_height) when back-projecting image pixels to
+        world coordinates. Latched, so it is available as soon as the camera is
+        discovered. Per-camera (roads and grass differ by a few cm)."""
+        with self._lock:
+            return self._cctv_ground_height.get(camera_id)
+
     def get_robot_image(self, which: str = "base_left"):
         """Robot stereo RGB (sensor_msgs/Image). which in base_left/right, gripper_left/right."""
         suffix = P.ROBOT_CAMERA_SUFFIX.get(which)
@@ -620,9 +637,14 @@ class MARCClient:
         return self._get_robot("imu")
 
     def get_lidar(self):
-        """2D lidar scan (sensor_msgs/LaserScan) or None."""
-        self._ensure_robot_sub("lidar/scan", LaserScan, P.QOS_IMAGE)
-        return self._get_robot("lidar/scan")
+        """Latest lidar sweep (sensor_msgs/PointCloud2) or None.
+
+        The robot carries a 3D lidar (Velodyne VLP-16), so the sweep is published as a
+        point cloud - a flat LaserScan is not available for it. Points are in the
+        ``Base_LiDAR`` frame. Returns None until the first message arrives.
+        """
+        self._ensure_robot_sub("lidar/points", PointCloud2, P.QOS_IMAGE)
+        return self._get_robot("lidar/points")
 
     def get_arm_state(self):
         """Robot-arm joint state (sensor_msgs/JointState) or None."""

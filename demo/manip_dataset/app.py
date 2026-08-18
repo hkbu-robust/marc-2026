@@ -292,14 +292,9 @@ class CollectorApp:
 
 
 def main():
+    # Must match MARC_TEAM_ID on the manip-trainer side, which now forwards it as the
+    # robot namespace; a mismatch surfaces as the wait_for_robot_topics timeout below.
     team_id = os.getenv("MARC_TEAM_ID", "u1").strip() or "u1"
-    if team_id != "u1":
-        print(
-            f"ERROR: manip-trainer publishes under /marc/u1/...; "
-            f"refusing MARC_TEAM_ID={team_id}. Export MARC_TEAM_ID=u1.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
 
     client = ManipTrainerClient(team_id=team_id, token=os.getenv("MARC_TOKEN", "dummy-token"))
     print(f"[probe] team_id={team_id} namespace=/marc/{team_id}")
