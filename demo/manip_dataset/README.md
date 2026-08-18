@@ -21,7 +21,7 @@ Requires an interactive TTY (`stdin_open` / `tty` on `agent-manip-probe`). Press
 
 1. Arm moves to a **joint-space ready** pose (`MARC_READY_J1…J6`), then teleop uses EE-delta IK.
 2. **MANUAL_BASE** — `i/k/j/l` place and aim the chassis; `A` starts auto-approach.
-3. **AUTO_APPROACH** — baselines base depth, then **stop-turn-go**: it turns in place with zero linear velocity until the nearest object sits in the base-camera center (`ALIGN`), drives straight for a short burst (`DRIVE`), and re-aligns whenever the object drifts or the burst ends. It stops on **center−surround contrast** (object in the inner patch) then a short overrun (`C` cancels).
+3. **AUTO_APPROACH** — baselines base depth, then **stop-turn-go**: it turns in place with zero linear velocity until the nearest object sits in the base-camera center (`ALIGN`), drives straight for a short burst (`DRIVE`), and re-aligns whenever the object drifts. **ALIGN is skipped** when the object is already centered, the inner patch is already nearer than `MARC_APPROACH_ALREADY_NEAR`, the lower image band has dropped vs baseline (object at the robot's feet), or a previously seen object has left the centering band. It stops on **center−surround contrast**, on inner-patch depth (`MARC_APPROACH_INNER_STOP`) once aimed, or immediately if already too near (`C` cancels).
    Each tick logs the phase plus `err` (image error), `obj` (object columns found) and `flr` (measured floor depth). `obj=0` means there is nothing to center on, so it will not yaw — see `MARC_APPROACH_LAT_*`.
    The sim publishes **two streams at different resolutions on one depth topic** (e.g. 480×640 and 360×640, with different geometry). The baseline counts the resolutions it sees, locks the majority one, and ignores the rest; without that the two streams interleave and `c0` lands between them, leaving a ±0.014 false swing on empty floor that swamps `MARC_APPROACH_CONTRAST`.
 4. **ARM_TELEOP** — EE nudges + grip; steps are recorded with live images.
@@ -186,12 +186,12 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_APPROACH_PERCENTILE` | `30` | Percentile inside center/ring |
 | `MARC_APPROACH_MIN_VALID` | `4` | Min valid pixels per region; below this the frame is unusable |
 | `MARC_APPROACH_EMA` | `0.50` | EMA on contrast |
-| `MARC_APPROACH_OVERRUN_M` | `0.20` | Extra forward creep after detect (m) |
+| `MARC_APPROACH_OVERRUN_M` | `0.285` | Extra forward creep after detect (m) |
 | `MARC_APPROACH_YAW_GAIN` | `1.2` | P-gain on image-right error → `angular_z` (negated). Flip the sign if it turns the wrong way |
 | `MARC_APPROACH_YAW_MAX` | `0.35` | Clamp on yaw rate (rad/s) |
 | `MARC_APPROACH_YAW_MIN` | `0.10` | Floor on yaw rate (rad/s) while aligning, so a small error still turns the chassis |
-| `MARC_APPROACH_CENTER_TOL` | `0.06` | \|image error\| counted as centered (half-width units); ends `ALIGN` |
-| `MARC_APPROACH_REALIGN` | `0.14` | \|image error\| that stops `DRIVE` and returns to `ALIGN` |
+| `MARC_APPROACH_CENTER_TOL` | `0.05` | \|image error\| counted as centered (half-width units); ends `ALIGN`. Lower = tighter centering, but it can hunt or time out |
+| `MARC_APPROACH_REALIGN` | `0.12` | \|image error\| that stops `DRIVE` and returns to `ALIGN` |
 | `MARC_APPROACH_ALIGN_HOLD` | `2` | New depth frames within `CENTER_TOL` required before driving |
 | `MARC_APPROACH_ALIGN_SETTLE` | `0.15` | Stand-still time (s) on entering `ALIGN` so depth catches up with the pose |
 | `MARC_APPROACH_ALIGN_TIMEOUT` | `4.0` | Give up aligning after this long (s) and drive anyway |
@@ -199,6 +199,8 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_APPROACH_LAT_MIN_M` | `0.05` | Ignore depths nearer than this when centering. Raise above the arm distance if the log shows `obj=0` with a close `flr` |
 | `MARC_APPROACH_LAT_MAX_M` | `20.0` | Ignore depths beyond this when centering |
 | `MARC_APPROACH_LAT_CLOSER_M` | `0.04` | How much closer than the floor a column must be to count as object |
+| `MARC_APPROACH_INNER_STOP` | `0.65` | When already centered, stop driving once inner-patch depth is below this (m). Stops the ALIGN loop if `A` is pressed with the object already in the inner patch |
+| `MARC_APPROACH_ALREADY_NEAR` | `0.50` | Inner-patch depth (m) counted as pick range: no yaw, no overrun, stop immediately |
 | `MARC_APPROACH_LOG_EVERY` | `1` | Print each N ticks (`0` = off) |
 | `MARC_BASE_LIN` | `0.08` | Manual base forward (`i`) speed (m/s) |
 | `MARC_BASE_LIN_BACK` | same as `MARC_BASE_LIN` | Manual base reverse (`k`) speed (m/s) |

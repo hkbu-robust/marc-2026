@@ -144,9 +144,36 @@ def depth_center_surround(
     return out
 
 
-def depth_roi_median(depth: np.ndarray, frac: float = 0.4) -> Optional[float]:
-    """Median of valid depths in the central ROI (compat wrapper)."""
-    return depth_roi_stat(depth, frac=frac, percentile=50.0)
+def depth_lower_stat(
+    depth: np.ndarray,
+    y0_frac: float = 0.70,
+    y1_frac: float = 1.00,
+    percentile: float = 30.0,
+    min_m: float = 0.05,
+    max_m: float = 20.0,
+    min_valid: int = 8,
+) -> Optional[float]:
+    """Near-biased depth in a bottom image band (meters).
+
+    A downward-tilted base camera puts a close object in the lower rows once it
+    has left the center patch. Uses a low percentile so a small object still
+    registers against floor and self-parts in the same band.
+    """
+    if depth is None or depth.size == 0:
+        return None
+    h, w = depth.shape[:2]
+    if h < 2 or w < 2:
+        return None
+    y0 = int(np.clip(min(y0_frac, y1_frac), 0.0, 1.0) * h)
+    y1 = int(np.clip(max(y0_frac, y1_frac), 0.0, 1.0) * h)
+    if y1 <= y0:
+        y0, y1 = int(0.70 * h), h
+    band = depth[y0:y1, :]
+    valid = band[np.isfinite(band) & (band > float(min_m)) & (band < float(max_m))]
+    if valid.size < max(1, int(min_valid)):
+        return None
+    p = float(np.clip(percentile, 0.0, 100.0))
+    return float(np.percentile(valid, p))
 
 
 def depth_lateral_error(
