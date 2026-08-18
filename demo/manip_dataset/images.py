@@ -147,3 +147,78 @@ def depth_center_surround(
 def depth_roi_median(depth: np.ndarray, frac: float = 0.4) -> Optional[float]:
     """Median of valid depths in the central ROI (compat wrapper)."""
     return depth_roi_stat(depth, frac=frac, percentile=50.0)
+
+
+def depth_lateral_error(
+    depth: np.ndarray,
+    y0_frac: float = 0.30,
+    y1_frac: float = 0.85,
+    percentile: float = 30.0,
+    min_valid: int = 4,
+    closer_m: float = 0.04,
+    min_m: float = 0.05,
+    max_m: float = 20.0,
+) -> Optional[dict]:
+    """Signed lateral error of the nearest object vs image center.
+
+    Restricts to a mid-height band, takes a near percentile per column, treats the
+    median of those columns as floor, and centroids columns that are closer than
+    floor by ``closer_m``. Only depths inside ``[min_m, max_m]`` count, which keeps
+    self-parts (arm in view) from being measured as the floor.
+
+    Returns ``error`` in roughly ``[-1, 1]`` (image-right positive), plus extras,
+    or ``None`` if the band has no usable columns. ``error`` is 0.0 when a floor
+    is measured but no object-like columns exist (caller should not yaw).
+    """
+    if depth is None or depth.size == 0:
+        return None
+    h, w = depth.shape[:2]
+    if w < 2 or h < 2:
+        return None
+    y0 = int(np.clip(min(y0_frac, y1_frac), 0.0, 1.0) * h)
+    y1 = int(np.clip(max(y0_frac, y1_frac), 0.0, 1.0) * h)
+    if y1 <= y0:
+        y0, y1 = 0, h
+    band = depth[y0:y1, :]
+    p = float(np.clip(percentile, 0.0, 100.0))
+    min_valid = max(1, int(min_valid))
+    col_d = np.full(w, np.nan, dtype=np.float64)
+    for x in range(w):
+        col = band[:, x]
+        valid = col[np.isfinite(col) & (col > min_m) & (col < max_m)]
+        if valid.size >= min_valid:
+            col_d[x] = float(np.percentile(valid, p))
+    usable = np.isfinite(col_d)
+    if not np.any(usable):
+        return None
+    floor = float(np.median(col_d[usable]))
+    closer = usable & (col_d < (floor - closer_m))
+    if not np.any(closer):
+        return {
+            "error": 0.0,
+            "col": None,
+            "floor": floor,
+            "n_obj": 0,
+            "n_cols": int(np.count_nonzero(usable)),
+        }
+    xs = np.arange(w, dtype=np.float64)
+    weight = floor - col_d
+    weight = np.where(closer, np.clip(weight, 0.0, None), 0.0)
+    wsum = float(weight.sum())
+    if wsum <= 0.0:
+        return {
+            "error": 0.0,
+            "col": None,
+            "floor": floor,
+            "n_obj": 0,
+            "n_cols": int(np.count_nonzero(usable)),
+        }
+    centroid = float((xs * weight).sum() / wsum)
+    error = (centroid - 0.5 * (w - 1)) / (0.5 * (w - 1))
+    return {
+        "error": float(np.clip(error, -1.0, 1.0)),
+        "col": centroid,
+        "floor": floor,
+        "n_obj": int(np.count_nonzero(closer)),
+        "n_cols": int(np.count_nonzero(usable)),
+    }

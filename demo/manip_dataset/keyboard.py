@@ -15,7 +15,7 @@ MANUAL_BASE:
   i/k     base forward / back
   j/l     base yaw left / right
   space   stop base
-  A       start auto-approach (baseline depth now, crawl forward)
+  A       start auto-approach (turn in place to center object, drive, repeat)
   v/b     grip CLOSE / OPEN (not recorded — use b to release a carried object)
 ARM_TELEOP (after auto-approach stop):
   t/g     EE +/- X (fwd/back in arm_base)

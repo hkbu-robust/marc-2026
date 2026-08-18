@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ from typing import Optional
 
 import numpy as np
 
-from .images import depth_center_surround, depth_roi_stat, image_to_depth
+from .images import depth_center_surround, depth_lateral_error, depth_roi_stat, image_to_depth
 
 
 def _env_float(name: str, default: float) -> float:
@@ -51,7 +52,19 @@ DEFAULT_BASELINE_FRAMES = 20
 DEFAULT_SETTLE_S = 0.5
 DEFAULT_TICK_S = 0.05
 DEFAULT_LOG_EVERY = 1
-DEFAULT_OVERRUN_M = 1.75
+DEFAULT_OVERRUN_M = 0.20
+DEFAULT_YAW_GAIN = 1.2
+DEFAULT_YAW_MAX = 0.35
+DEFAULT_YAW_MIN = 0.10
+DEFAULT_CENTER_TOL = 0.06
+DEFAULT_REALIGN = 0.14
+DEFAULT_ALIGN_HOLD = 2
+DEFAULT_ALIGN_SETTLE_S = 0.15
+DEFAULT_ALIGN_TIMEOUT_S = 4.0
+DEFAULT_BURST_M = 0.15
+DEFAULT_LAT_MIN_M = 0.05
+DEFAULT_LAT_MAX_M = 20.0
+DEFAULT_LAT_CLOSER_M = 0.04
 
 
 @dataclass
@@ -73,6 +86,18 @@ class ApproachConfig:
     tick_s: float = DEFAULT_TICK_S
     log_every: int = DEFAULT_LOG_EVERY
     overrun_m: float = DEFAULT_OVERRUN_M
+    yaw_gain: float = DEFAULT_YAW_GAIN
+    yaw_max: float = DEFAULT_YAW_MAX
+    yaw_min: float = DEFAULT_YAW_MIN
+    center_tol: float = DEFAULT_CENTER_TOL
+    realign: float = DEFAULT_REALIGN
+    align_hold: int = DEFAULT_ALIGN_HOLD
+    align_settle_s: float = DEFAULT_ALIGN_SETTLE_S
+    align_timeout_s: float = DEFAULT_ALIGN_TIMEOUT_S
+    burst_m: float = DEFAULT_BURST_M
+    lat_min_m: float = DEFAULT_LAT_MIN_M
+    lat_max_m: float = DEFAULT_LAT_MAX_M
+    lat_closer_m: float = DEFAULT_LAT_CLOSER_M
 
     @classmethod
     def from_env(cls) -> "ApproachConfig":
@@ -93,6 +118,18 @@ class ApproachConfig:
             settle_s=_env_float("MARC_APPROACH_SETTLE", DEFAULT_SETTLE_S),
             log_every=_env_int("MARC_APPROACH_LOG_EVERY", DEFAULT_LOG_EVERY),
             overrun_m=_env_float("MARC_APPROACH_OVERRUN_M", DEFAULT_OVERRUN_M),
+            yaw_gain=_env_float("MARC_APPROACH_YAW_GAIN", DEFAULT_YAW_GAIN),
+            yaw_max=_env_float("MARC_APPROACH_YAW_MAX", DEFAULT_YAW_MAX),
+            yaw_min=_env_float("MARC_APPROACH_YAW_MIN", DEFAULT_YAW_MIN),
+            center_tol=_env_float("MARC_APPROACH_CENTER_TOL", DEFAULT_CENTER_TOL),
+            realign=_env_float("MARC_APPROACH_REALIGN", DEFAULT_REALIGN),
+            align_hold=_env_int("MARC_APPROACH_ALIGN_HOLD", DEFAULT_ALIGN_HOLD),
+            align_settle_s=_env_float("MARC_APPROACH_ALIGN_SETTLE", DEFAULT_ALIGN_SETTLE_S),
+            align_timeout_s=_env_float("MARC_APPROACH_ALIGN_TIMEOUT", DEFAULT_ALIGN_TIMEOUT_S),
+            burst_m=_env_float("MARC_APPROACH_BURST_M", DEFAULT_BURST_M),
+            lat_min_m=_env_float("MARC_APPROACH_LAT_MIN_M", DEFAULT_LAT_MIN_M),
+            lat_max_m=_env_float("MARC_APPROACH_LAT_MAX_M", DEFAULT_LAT_MAX_M),
+            lat_closer_m=_env_float("MARC_APPROACH_LAT_CLOSER_M", DEFAULT_LAT_CLOSER_M),
         )
 
 
@@ -105,7 +142,12 @@ def _stamp_key(msg) -> Optional[tuple]:
 
 
 class DepthApproachController:
-    """Crawl forward until center-surround depth contrast detects an object."""
+    """Approach an object by alternating turn-in-place centering with straight crawls.
+
+    Linear and angular velocity are never commanded together: the base either
+    yaws (ALIGN) or drives (DRIVE), so the object stays centered in the base
+    camera instead of being walked past.
+    """
 
     def __init__(self, client, cfg: Optional[ApproachConfig] = None):
         self._client = client
@@ -129,6 +171,14 @@ class DepthApproachController:
         self._last_good_t: Optional[float] = None
         self._last_fail: str = ""
         self._lock_shape: Optional[tuple] = None
+        self._lat_err: Optional[float] = None
+        # Stop-turn-go phase: "align" yaws in place, "drive" goes straight.
+        self._phase: str = "align"
+        self._phase_t0: Optional[float] = None
+        self._phase_why: str = "start"
+        self._align_ok = 0
+        self._drive_m = 0.0
+        self._seen_obj = False
 
     def _measure(self) -> Optional[dict]:
         """Read one depth frame; returns metrics dict or None (reason in _last_fail).
@@ -186,6 +236,17 @@ class DepthApproachController:
         cs["d_med"] = float(d_med)
         cs["is_new"] = bool(is_new)
         cs["stamp"] = stamp
+        lat = depth_lateral_error(
+            depth,
+            percentile=self.cfg.percentile,
+            min_valid=self.cfg.min_valid,
+            closer_m=self.cfg.lat_closer_m,
+            min_m=self.cfg.lat_min_m,
+            max_m=self.cfg.lat_max_m,
+        )
+        cs["lat_err"] = None if lat is None else lat["error"]
+        cs["lat_n_obj"] = 0 if lat is None else lat["n_obj"]
+        cs["lat_floor"] = None if lat is None else lat["floor"]
         self._last_good_t = now
         self._last_fail = ""
         return cs
@@ -205,6 +266,82 @@ class DepthApproachController:
         dt = self._frame_dt if self._frame_dt else self.cfg.tick_s
         dt = max(1e-3, float(self.cfg.tick_s), float(dt))
         return min(v, step / dt)
+
+    def _yaw(self, err: float) -> float:
+        """Yaw rate for a signed image error (image-right positive → turn right)."""
+        ang = -float(self.cfg.yaw_gain) * float(err)
+        mag = min(abs(ang), float(self.cfg.yaw_max))
+        # A tiny command does not overcome base stiction, so it would stall the
+        # align phase until the timeout instead of centering.
+        mag = max(mag, float(self.cfg.yaw_min))
+        return math.copysign(mag, ang)
+
+    def _enter(self, phase: str, why: str):
+        self._phase = phase
+        self._phase_t0 = time.monotonic()
+        self._align_ok = 0
+        self._phase_why = why
+        if self.cfg.log_every > 0:
+            t_s = 0.0 if self._t0 is None else (time.monotonic() - self._t0)
+            print(f"[approach] t={t_s:5.2f}s  -> {phase.upper()} ({why})")
+
+    def _command(self, m: Optional[dict]) -> tuple:
+        """Alternate between turning in place and driving straight.
+
+        ALIGN yaws with zero linear velocity until the object sits within
+        ``center_tol`` of the image center; DRIVE goes straight and hands control
+        back to ALIGN as soon as the object drifts past ``realign`` or after
+        ``burst_m`` of travel, so centering is re-checked often.
+        """
+        now = time.monotonic()
+        lat = None if m is None else m.get("lat_err")
+        n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
+        is_new = bool(m is not None and m.get("is_new"))
+        # error == 0.0 with no object columns means "nothing to centre on", not "centred"
+        has_obj = lat is not None and n_obj > 0
+        if has_obj:
+            self._lat_err = float(lat)
+            self._seen_obj = True
+        err = self._lat_err
+        speed = self._speed()
+        since = now - (self._phase_t0 or now)
+
+        if self._phase == "align":
+            if since < self.cfg.align_settle_s:
+                # Stand still after braking so depth catches up with the new pose.
+                return 0.0, 0.0
+            if not has_obj or err is None:
+                # Nothing has ever been centerable (bare floor, or the object is
+                # outside the depth window): fall back to a plain straight crawl
+                # rather than stalling here every burst.
+                if not self._seen_obj:
+                    self._enter("drive", "no centering signal")
+                    return speed, 0.0
+                if since >= self.cfg.align_timeout_s:
+                    self._enter("drive", "object lost")
+                    return speed, 0.0
+                return 0.0, 0.0
+            if abs(err) <= self.cfg.center_tol:
+                if is_new:
+                    self._align_ok += 1
+                if self._align_ok >= max(1, self.cfg.align_hold):
+                    self._enter("drive", f"centered err={err:+.2f}")
+                    return speed, 0.0
+                return 0.0, 0.0
+            self._align_ok = 0
+            if since >= self.cfg.align_timeout_s:
+                self._enter("drive", f"align timeout err={err:+.2f}")
+                return speed, 0.0
+            return 0.0, self._yaw(err)
+
+        self._drive_m = since * speed
+        if has_obj and abs(err) > self.cfg.realign:
+            self._enter("align", f"off-center err={err:+.2f}")
+            return 0.0, 0.0
+        if self._seen_obj and self.cfg.burst_m > 0.0 and self._drive_m >= self.cfg.burst_m:
+            self._enter("align", f"burst {self._drive_m:.2f}m")
+            return 0.0, 0.0
+        return speed, 0.0
 
     def capture_baseline(self) -> Optional[float]:
         """Stop base; measure baseline ROI depth and center-surround contrast."""
@@ -277,6 +414,10 @@ class DepthApproachController:
         self._overrun = False
         self._overrun_t0 = None
         self._detect_reason = ""
+        self._lat_err = None
+        self._drive_m = 0.0
+        self._seen_obj = False
+        self._enter("align", "start")
         self._last_good_t = time.monotonic()
         near_s = "off" if self.cfg.d_near_m <= 0.0 else f"{self.cfg.d_near_m:.3f}"
         fps = None if not self._frame_dt else 1.0 / self._frame_dt
@@ -288,11 +429,18 @@ class DepthApproachController:
             f"{self._speed():.3f} m/s  (max_step={self.cfg.max_step_m}m, "
             f"depth≈{'?' if fps is None else f'{fps:.1f}'} Hz)  "
             f"stale_stop={self.cfg.stale_stop_s}s  "
-            f"overrun={self.cfg.overrun_m:.3f}m"
+            f"overrun={self.cfg.overrun_m:.3f}m\n"
+            f"[approach] stop-turn-go: yaw_gain={self.cfg.yaw_gain} "
+            f"yaw=[{self.cfg.yaw_min},{self.cfg.yaw_max}]  "
+            f"center_tol={self.cfg.center_tol} realign={self.cfg.realign} "
+            f"hold={self.cfg.align_hold}  burst={self.cfg.burst_m:.3f}m  "
+            f"align_timeout={self.cfg.align_timeout_s}s"
         )
         print(
             "[approach] live: rise = (ring−center) − c0. Object in the center "
-            "raises it; pitch/bumps cancel. Base HOLDS when depth goes stale."
+            "raises it; pitch/bumps cancel. The base turns in place to center the "
+            "object (ALIGN), then drives straight (DRIVE) in short bursts. "
+            "Base HOLDS when depth goes stale."
         )
         return True
 
@@ -308,6 +456,12 @@ class DepthApproachController:
         self._overrun = False
         self._overrun_t0 = None
         self._c_filt = None
+        self._lat_err = None
+        self._phase = "align"
+        self._phase_t0 = None
+        self._align_ok = 0
+        self._drive_m = 0.0
+        self._seen_obj = False
         self._client.send_cmd_vel(0.0, 0.0)
 
     def tick(self) -> bool:
@@ -337,6 +491,8 @@ class DepthApproachController:
                     f"detect={self._detect_reason}  t={t_s:.2f}s"
                 )
                 return True
+            # Already centered when detection fired; creep straight for the last
+            # few centimetres so the object cannot be yawed out of the gripper.
             self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
             return False
 
@@ -356,7 +512,8 @@ class DepthApproachController:
                         f"{self.cfg.stale_stop_s}s): {self._last_fail}"
                     )
             else:
-                self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
+                lin, ang = self._command(None)
+                self._client.send_cmd_vel(linear_x=lin, angular_z=ang)
                 if do_log:
                     print(
                         f"[approach] t={t_s:5.2f}s  no measurement "
@@ -368,6 +525,7 @@ class DepthApproachController:
         d_med = m["d_med"]
         self._last_depth = d_med
         assert self.d0 is not None and self.c0 is not None
+        lin, ang = self._command(m)
 
         c_rise = contrast - self.c0
         contrast_hit = c_rise > self.cfg.contrast_m
@@ -375,9 +533,13 @@ class DepthApproachController:
         drop_hit = drop > self.cfg.tau_m
         near = self.cfg.d_near_m > 0.0 and d_med < self.cfg.d_near_m
 
+        # Yawing in place sweeps the view across whatever is beside the object, so
+        # contrast/drop there says nothing about closing in: only detect while driving.
+        if self._phase == "align":
+            self._hit_count = 0
         # Only count persistence on genuinely new frames, so a slow depth stream
         # cannot reach K by re-reading one cached frame.
-        if contrast_hit or drop_hit or near:
+        elif contrast_hit or drop_hit or near:
             if m["is_new"]:
                 self._hit_count += 1
         else:
@@ -392,12 +554,19 @@ class DepthApproachController:
             if near:
                 flags.append("NEAR")
             fps = None if not self._frame_dt else 1.0 / self._frame_dt
+            lat = m.get("lat_err")
+            n_obj = int(m.get("lat_n_obj") or 0)
+            flr = m.get("lat_floor")
             print(
-                f"[approach] t={t_s:5.2f}s  cin={m['d_inner']:.3f} "
+                f"[approach] t={t_s:5.2f}s  {self._phase.upper():5s} "
+                f"cin={m['d_inner']:.3f} "
                 f"ring={m['d_ring']:.3f}  c={contrast:+.3f} c0={self.c0:+.3f}  "
                 f"rise={c_rise:+.3f}  drop={drop:+.3f}  "
+                f"err={'--' if lat is None else f'{lat:+.2f}'} "
+                f"obj={n_obj} flr={'--' if flr is None else f'{flr:.2f}'} "
+                f"ang={ang:+.2f}  "
                 f"hit={self._hit_count}/{self.cfg.persist_k}  "
-                f"v={self._speed():.2f} "
+                f"v={lin:.2f} "
                 f"{'' if fps is None else f'{fps:.1f}Hz '}"
                 f"{','.join(flags) if flags else '-'}"
             )
@@ -425,7 +594,7 @@ class DepthApproachController:
             self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
             return False
 
-        self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
+        self._client.send_cmd_vel(linear_x=lin, angular_z=ang)
         return False
 
     def settle(self):
