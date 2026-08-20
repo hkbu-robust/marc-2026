@@ -197,7 +197,7 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_APPROACH_K` | `3` | Persistence frames, counted only on **new** RGB frames |
 | `MARC_APPROACH_PERCENTILE` | `30` | Percentile of depth pixels inside the YOLO box |
 | `MARC_APPROACH_MIN_VALID` | `4` | Min valid depth pixels in the box; below this range is unknown |
-| `MARC_APPROACH_OVERRUN_M` | `0.35` | Extra forward after detect (m), so the ready-pose gripper sits over the object |
+| `MARC_APPROACH_OVERRUN_M` | `0.68` | Extra forward after detect (m), so the ready-pose gripper sits over the object |
 | `MARC_APPROACH_YAW_GAIN` | `1.2` | P-gain on image-right error → `angular_z` (negated). Flip the sign if it turns the wrong way |
 | `MARC_APPROACH_YAW_MAX` | `0.35` | Clamp on yaw rate (rad/s) |
 | `MARC_APPROACH_YAW_MIN` | `0.10` | Floor on yaw rate (rad/s) while aligning, so a small error still turns the chassis |
