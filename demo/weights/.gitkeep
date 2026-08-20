@@ -1,0 +1,2 @@
+# YOLO checkpoints (yolo11x.pt, or a fine-tuned best.pt) are gitignored.
+# First auto-approach run downloads yolo11x.pt here.

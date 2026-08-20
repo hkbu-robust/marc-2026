@@ -176,6 +176,49 @@ def depth_lower_stat(
     return float(np.percentile(valid, p))
 
 
+def depth_in_bbox(
+    depth: np.ndarray,
+    bbox_xyxy,
+    rgb_shape,
+    percentile: float = 30.0,
+    min_m: float = 0.05,
+    max_m: float = 20.0,
+    min_valid: int = 4,
+    inset: float = 0.10,
+) -> Optional[float]:
+    """Near-biased depth (m) inside an RGB bbox, mapped onto the depth image.
+
+    RGB and depth often differ in resolution (and may come from different
+    publishers on the same topics). The box is scaled by shape, then inset so
+    the statistic is the object rather than the floor around it.
+    """
+    if depth is None or depth.size == 0 or bbox_xyxy is None or rgb_shape is None:
+        return None
+    h_d, w_d = depth.shape[:2]
+    h_r, w_r = int(rgb_shape[0]), int(rgb_shape[1])
+    if h_d < 2 or w_d < 2 or h_r < 2 or w_r < 2:
+        return None
+    x1, y1, x2, y2 = (float(v) for v in bbox_xyxy)
+    sx = w_d / float(w_r)
+    sy = h_d / float(h_r)
+    dx1, dy1, dx2, dy2 = x1 * sx, y1 * sy, x2 * sx, y2 * sy
+    bw, bh = dx2 - dx1, dy2 - dy1
+    if bw < 2.0 or bh < 2.0:
+        return None
+    pad_x = float(np.clip(inset, 0.0, 0.45)) * bw
+    pad_y = float(np.clip(inset, 0.0, 0.45)) * bh
+    ix1 = int(np.clip(np.floor(dx1 + pad_x), 0, w_d - 1))
+    iy1 = int(np.clip(np.floor(dy1 + pad_y), 0, h_d - 1))
+    ix2 = int(np.clip(np.ceil(dx2 - pad_x), ix1 + 1, w_d))
+    iy2 = int(np.clip(np.ceil(dy2 - pad_y), iy1 + 1, h_d))
+    crop = depth[iy1:iy2, ix1:ix2]
+    valid = crop[np.isfinite(crop) & (crop > float(min_m)) & (crop < float(max_m))]
+    if valid.size < max(1, int(min_valid)):
+        return None
+    p = float(np.clip(percentile, 0.0, 100.0))
+    return float(np.percentile(valid, p))
+
+
 def depth_lateral_error(
     depth: np.ndarray,
     y0_frac: float = 0.30,

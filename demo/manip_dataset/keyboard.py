@@ -15,7 +15,7 @@ MANUAL_BASE:
   i/k     base forward / back
   j/l     base yaw left / right
   space   stop base
-  A       start auto-approach (turn in place to center object, drive, repeat)
+  A       start auto-approach (YOLO-center in place, drive, repeat)
   v/b     grip CLOSE / OPEN (not recorded — use b to release a carried object)
 ARM_TELEOP (after auto-approach stop):
   t/g     EE +/- X (fwd/back in arm_base)
@@ -28,6 +28,7 @@ ARM_TELEOP (after auto-approach stop):
   P       place in rear basket (scripted carry + release, recorded)
   E       end attempt -> sensor success filter (grip stays as commanded)
 ANY:
+  O       cycle target object (instruction label; YOLO class once fine-tuned)
   C       cancel auto-approach (-> MANUAL_BASE)
   N       discard episode / abort
   ?       help

@@ -2,7 +2,7 @@
 """Manip-trainer teleop dataset collector entry point.
 
 Connects to the manip-trainer ROS 2 instance (handshake bypassed), then runs the
-keyboard teleop collector: manual base pose -> user-triggered depth auto-approach
+keyboard teleop collector: manual base pose -> user-triggered YOLO auto-approach
 -> human arm EE teleop -> sensor-only success -> HDF5 episodes.
 
 Usage:

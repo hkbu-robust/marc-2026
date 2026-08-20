@@ -1,22 +1,18 @@
-"""User-triggered base auto-approach using base-camera depth contrast."""
+"""User-triggered base auto-approach: YOLO centering + bbox-depth stop."""
 
 from __future__ import annotations
 
 import math
 import os
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
-from .images import (
-    depth_center_surround,
-    depth_lateral_error,
-    depth_lower_stat,
-    depth_roi_stat,
-    image_to_depth,
-)
+from .images import depth_in_bbox, image_to_depth, image_to_rgb
+from .yolo_detect import YoloConfig, YoloTracker
 
 
 def _env_float(name: str, default: float) -> float:
@@ -39,26 +35,20 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Depth frames arrive far slower than the 20 Hz control tick, so speed is
+# Depth/RGB frames arrive far slower than the 20 Hz control tick, so speed is
 # clamped to max_step_m per observed frame interval and the base holds still
 # whenever the measurement goes stale.
 DEFAULT_CRAWL_MPS = 0.30
 DEFAULT_MAX_STEP_M = 0.04
 DEFAULT_STALE_STOP_S = 0.5
-DEFAULT_CONTRAST_M = 0.015
-DEFAULT_TAU_M = 0.08
-DEFAULT_D_NEAR_M = 0.0
 DEFAULT_PERSIST_K = 3
-DEFAULT_INNER_FRAC = 0.18
-DEFAULT_OUTER_FRAC = 0.40
 DEFAULT_PERCENTILE = 30.0
 DEFAULT_MIN_VALID = 4
-DEFAULT_EMA_ALPHA = 0.50
-DEFAULT_BASELINE_FRAMES = 20
+DEFAULT_LOCK_FRAMES = 12
 DEFAULT_SETTLE_S = 0.5
 DEFAULT_TICK_S = 0.05
 DEFAULT_LOG_EVERY = 1
-DEFAULT_OVERRUN_M = 0.285
+DEFAULT_OVERRUN_M = 0.10
 DEFAULT_YAW_GAIN = 1.2
 DEFAULT_YAW_MAX = 0.35
 DEFAULT_YAW_MIN = 0.10
@@ -66,17 +56,14 @@ DEFAULT_CENTER_TOL = 0.05
 DEFAULT_REALIGN = 0.12
 DEFAULT_ALIGN_HOLD = 2
 DEFAULT_ALIGN_SETTLE_S = 0.15
-DEFAULT_ALIGN_TIMEOUT_S = 4.0
+DEFAULT_ALIGN_TIMEOUT_S = 0.0  # 0 = never drive on timeout
 DEFAULT_BURST_M = 0.15
 DEFAULT_LAT_MIN_M = 0.05
 DEFAULT_LAT_MAX_M = 20.0
-DEFAULT_LAT_CLOSER_M = 0.04
-# Inner-patch depth that counts as "close enough to stop driving" when already
-# aimed at the object. Empty-floor inner is ~0.70 m on the tilted base cam;
-# contrast-detect used to fire around 0.64 m.
-DEFAULT_INNER_STOP_M = 0.65
-# Closer than this: already at pick range — stop with no overrun and do not yaw.
-DEFAULT_ALREADY_NEAR_M = 0.50
+# Stop once median depth inside the YOLO box is this close (m).
+DEFAULT_STOP_M = 0.55
+# Closer than this: already at pick range — stop with no overrun.
+DEFAULT_ALREADY_NEAR_M = 0.45
 
 
 @dataclass
@@ -84,16 +71,10 @@ class ApproachConfig:
     crawl_mps: float = DEFAULT_CRAWL_MPS
     max_step_m: float = DEFAULT_MAX_STEP_M
     stale_stop_s: float = DEFAULT_STALE_STOP_S
-    contrast_m: float = DEFAULT_CONTRAST_M
-    tau_m: float = DEFAULT_TAU_M
-    d_near_m: float = DEFAULT_D_NEAR_M
     persist_k: int = DEFAULT_PERSIST_K
-    baseline_frames: int = DEFAULT_BASELINE_FRAMES
-    inner_frac: float = DEFAULT_INNER_FRAC
-    outer_frac: float = DEFAULT_OUTER_FRAC
+    lock_frames: int = DEFAULT_LOCK_FRAMES
     percentile: float = DEFAULT_PERCENTILE
     min_valid: int = DEFAULT_MIN_VALID
-    ema_alpha: float = DEFAULT_EMA_ALPHA
     settle_s: float = DEFAULT_SETTLE_S
     tick_s: float = DEFAULT_TICK_S
     log_every: int = DEFAULT_LOG_EVERY
@@ -109,8 +90,7 @@ class ApproachConfig:
     burst_m: float = DEFAULT_BURST_M
     lat_min_m: float = DEFAULT_LAT_MIN_M
     lat_max_m: float = DEFAULT_LAT_MAX_M
-    lat_closer_m: float = DEFAULT_LAT_CLOSER_M
-    inner_stop_m: float = DEFAULT_INNER_STOP_M
+    stop_m: float = DEFAULT_STOP_M
     already_near_m: float = DEFAULT_ALREADY_NEAR_M
 
     @classmethod
@@ -119,16 +99,10 @@ class ApproachConfig:
             crawl_mps=_env_float("MARC_APPROACH_CRAWL", DEFAULT_CRAWL_MPS),
             max_step_m=_env_float("MARC_APPROACH_MAX_STEP", DEFAULT_MAX_STEP_M),
             stale_stop_s=_env_float("MARC_APPROACH_STALE_STOP", DEFAULT_STALE_STOP_S),
-            contrast_m=_env_float("MARC_APPROACH_CONTRAST", DEFAULT_CONTRAST_M),
-            tau_m=_env_float("MARC_APPROACH_TAU", DEFAULT_TAU_M),
-            d_near_m=_env_float("MARC_APPROACH_D_NEAR", DEFAULT_D_NEAR_M),
             persist_k=_env_int("MARC_APPROACH_K", DEFAULT_PERSIST_K),
-            baseline_frames=_env_int("MARC_APPROACH_BASELINE_FRAMES", DEFAULT_BASELINE_FRAMES),
-            inner_frac=_env_float("MARC_APPROACH_INNER_FRAC", DEFAULT_INNER_FRAC),
-            outer_frac=_env_float("MARC_APPROACH_OUTER_FRAC", DEFAULT_OUTER_FRAC),
+            lock_frames=_env_int("MARC_APPROACH_LOCK_FRAMES", DEFAULT_LOCK_FRAMES),
             percentile=_env_float("MARC_APPROACH_PERCENTILE", DEFAULT_PERCENTILE),
             min_valid=_env_int("MARC_APPROACH_MIN_VALID", DEFAULT_MIN_VALID),
-            ema_alpha=_env_float("MARC_APPROACH_EMA", DEFAULT_EMA_ALPHA),
             settle_s=_env_float("MARC_APPROACH_SETTLE", DEFAULT_SETTLE_S),
             log_every=_env_int("MARC_APPROACH_LOG_EVERY", DEFAULT_LOG_EVERY),
             overrun_m=_env_float("MARC_APPROACH_OVERRUN_M", DEFAULT_OVERRUN_M),
@@ -143,8 +117,7 @@ class ApproachConfig:
             burst_m=_env_float("MARC_APPROACH_BURST_M", DEFAULT_BURST_M),
             lat_min_m=_env_float("MARC_APPROACH_LAT_MIN_M", DEFAULT_LAT_MIN_M),
             lat_max_m=_env_float("MARC_APPROACH_LAT_MAX_M", DEFAULT_LAT_MAX_M),
-            lat_closer_m=_env_float("MARC_APPROACH_LAT_CLOSER_M", DEFAULT_LAT_CLOSER_M),
-            inner_stop_m=_env_float("MARC_APPROACH_INNER_STOP", DEFAULT_INNER_STOP_M),
+            stop_m=_env_float("MARC_APPROACH_STOP_M", DEFAULT_STOP_M),
             already_near_m=_env_float("MARC_APPROACH_ALREADY_NEAR", DEFAULT_ALREADY_NEAR_M),
         )
 
@@ -161,72 +134,55 @@ class DepthApproachController:
     """Approach an object by alternating turn-in-place centering with straight crawls.
 
     Linear and angular velocity are never commanded together: the base either
-    yaws (ALIGN) or drives (DRIVE), so the object stays centered in the base
-    camera instead of being walked past.
+    yaws (ALIGN) or drives (DRIVE). The object is the YOLO box on the base RGB
+    camera; range is median depth inside that box.
     """
 
-    def __init__(self, client, cfg: Optional[ApproachConfig] = None):
+    def __init__(self, client, cfg: Optional[ApproachConfig] = None,
+                 yolo_cfg: Optional[YoloConfig] = None):
         self._client = client
         self.cfg = cfg or ApproachConfig.from_env()
+        self.yolo_cfg = yolo_cfg or YoloConfig.from_env()
+        self._yolo = YoloTracker(self.yolo_cfg)
         self.active = False
-        self.d0: Optional[float] = None
-        self.c0: Optional[float] = None
-        self.dl0: Optional[float] = None
         self._hit_count = 0
-        self._last_depth: Optional[float] = None
-        self._c_filt: Optional[float] = None
         self._tick_i = 0
         self._t0: Optional[float] = None
         self._overrun = False
         self._overrun_t0: Optional[float] = None
         self._overrun_need_s = 0.0
         self._detect_reason: str = ""
-        # Frame freshness / rate tracking
-        self._last_stamp: Optional[tuple] = None
+        self._last_rgb_stamp: Optional[tuple] = None
+        self._last_depth_stamp: Optional[tuple] = None
         self._last_new_frame_t: Optional[float] = None
         self._frame_dt: Optional[float] = None
         self._last_good_t: Optional[float] = None
         self._last_fail: str = ""
-        self._lock_shape: Optional[tuple] = None
+        self._lock_rgb: Optional[tuple] = None
+        self._lock_depth: Optional[tuple] = None
         self._lat_err: Optional[float] = None
-        # Stop-turn-go phase: "align" yaws in place, "drive" goes straight.
+        self._det: Optional[dict] = None
+        self._d_obj_cached: Optional[float] = None
         self._phase: str = "align"
         self._phase_t0: Optional[float] = None
         self._phase_why: str = "start"
         self._align_ok = 0
         self._drive_m = 0.0
-        self._seen_obj = False
         self._arrive_now = False
         self._skip_overrun = False
+        self._timeout_logged = False
 
-    def _measure(self) -> Optional[dict]:
-        """Read one depth frame; returns metrics dict or None (reason in _last_fail).
+    def detector_ready(self) -> bool:
+        return self._yolo.model is not None
 
-        ``is_new`` marks frames whose header stamp changed since the last read.
-        """
-        msg = self._client.get_robot_depth("base")
-        if msg is None:
-            self._last_fail = "no depth msg"
-            return None
-        depth = image_to_depth(msg)
-        if depth is None:
-            self._last_fail = f"decode failed (encoding={getattr(msg, 'encoding', '?')})"
-            return None
-        # Two publishers share this topic at different resolutions and different
-        # geometry, so their contrast values interleave. Baseline picks one; the
-        # rest are dropped here (before the rate/freshness bookkeeping, so the
-        # measured frame rate reflects the stream we actually steer on).
-        shape = tuple(depth.shape[:2])
-        if self._lock_shape is not None and shape != self._lock_shape:
-            self._last_fail = (
-                f"other stream {shape[0]}x{shape[1]} "
-                f"(locked {self._lock_shape[0]}x{self._lock_shape[1]})"
-            )
-            return None
+    def set_target(self, name: Optional[str]):
+        self._yolo.set_target(name)
 
-        stamp = _stamp_key(msg)
-        now = time.monotonic()
-        is_new = stamp is None or stamp != self._last_stamp
+    def ensure_detector(self) -> bool:
+        return self._yolo.load()
+
+    def _note_new_frame(self, stamp, now: float):
+        is_new = stamp is None or stamp != self._last_rgb_stamp
         if is_new:
             if self._last_new_frame_t is not None:
                 dt = now - self._last_new_frame_t
@@ -235,56 +191,111 @@ class DepthApproachController:
                         0.4 * dt + 0.6 * self._frame_dt
                     )
             self._last_new_frame_t = now
-            self._last_stamp = stamp
+        return is_new
 
-        cs = depth_center_surround(
-            depth,
-            inner_frac=self.cfg.inner_frac,
-            outer_frac=self.cfg.outer_frac,
-            percentile=self.cfg.percentile,
-            min_valid=self.cfg.min_valid,
-        )
-        if cs is None or cs.get("contrast") is None:
-            self._last_fail = (
-                f"no contrast ({cs.get('reason') if cs else 'empty depth'})"
-            )
+    def _measure(self) -> Optional[dict]:
+        """Read RGB + depth; YOLO on new RGB. None if neither stream is usable."""
+        cam = self.yolo_cfg.camera
+        rgb_msg = self._client.get_robot_image(cam)
+        depth_msg = self._client.get_robot_depth("base")
+        now = time.monotonic()
+
+        rgb = None
+        rgb_shape = None
+        rgb_stamp = None
+        rgb_new = False
+        if rgb_msg is not None:
+            rgb = image_to_rgb(rgb_msg)
+            if rgb is not None:
+                rgb_shape = tuple(rgb.shape[:2])
+                if self._lock_rgb is not None and rgb_shape != self._lock_rgb:
+                    self._last_fail = (
+                        f"other rgb {rgb_shape[0]}x{rgb_shape[1]} "
+                        f"(locked {self._lock_rgb[0]}x{self._lock_rgb[1]})"
+                    )
+                    rgb = None
+                    rgb_shape = None
+                else:
+                    rgb_stamp = _stamp_key(rgb_msg)
+                    rgb_new = self._note_new_frame(rgb_stamp, now)
+                    if rgb_new:
+                        self._last_rgb_stamp = rgb_stamp
+            else:
+                self._last_fail = (
+                    f"rgb decode failed (encoding={getattr(rgb_msg, 'encoding', '?')})"
+                )
+
+        depth = None
+        depth_shape = None
+        if depth_msg is not None:
+            depth = image_to_depth(depth_msg)
+            if depth is not None:
+                depth_shape = tuple(depth.shape[:2])
+                if self._lock_depth is not None and depth_shape != self._lock_depth:
+                    self._last_fail = (
+                        f"other depth {depth_shape[0]}x{depth_shape[1]} "
+                        f"(locked {self._lock_depth[0]}x{self._lock_depth[1]})"
+                    )
+                    depth = None
+                    depth_shape = None
+                else:
+                    self._last_depth_stamp = _stamp_key(depth_msg)
+            else:
+                self._last_fail = (
+                    f"depth decode failed (encoding={getattr(depth_msg, 'encoding', '?')})"
+                )
+
+        if rgb is None and self._det is None:
+            if not self._last_fail:
+                self._last_fail = "no rgb"
             return None
-        d_med = depth_roi_stat(depth, frac=self.cfg.outer_frac, percentile=50.0)
-        if d_med is None:
-            d_med = cs["d_ring"]
-        cs["d_med"] = float(d_med)
-        cs["is_new"] = bool(is_new)
-        cs["stamp"] = stamp
-        lat = depth_lateral_error(
-            depth,
-            percentile=self.cfg.percentile,
-            min_valid=self.cfg.min_valid,
-            closer_m=self.cfg.lat_closer_m,
-            min_m=self.cfg.lat_min_m,
-            max_m=self.cfg.lat_max_m,
-        )
-        cs["lat_err"] = None if lat is None else lat["error"]
-        cs["lat_n_obj"] = 0 if lat is None else lat["n_obj"]
-        cs["lat_floor"] = None if lat is None else lat["floor"]
-        d_low = depth_lower_stat(
-            depth,
-            percentile=self.cfg.percentile,
-            min_m=self.cfg.lat_min_m,
-            max_m=self.cfg.lat_max_m,
-            min_valid=self.cfg.min_valid,
-        )
-        cs["d_lower"] = d_low
+
+        if rgb is not None and rgb_new:
+            det = self._yolo.detect(rgb)
+            self._det = det
+        else:
+            det = self._det
+
+        d_obj = None
+        if det is None:
+            self._d_obj_cached = None
+        elif depth is not None:
+            d_obj = depth_in_bbox(
+                depth,
+                det["bbox"],
+                det.get("rgb_shape") or rgb_shape,
+                percentile=self.cfg.percentile,
+                min_m=self.cfg.lat_min_m,
+                max_m=self.cfg.lat_max_m,
+                min_valid=self.cfg.min_valid,
+            )
+            if d_obj is not None:
+                self._d_obj_cached = float(d_obj)
+            else:
+                d_obj = self._d_obj_cached
+        else:
+            d_obj = self._d_obj_cached
+
+        n_obj = 0 if det is None else int(det.get("n_obj") or 0)
+        lat = None if det is None else det.get("error")
+        if n_obj > 0 and lat is not None:
+            self._lat_err = float(lat)
+
         self._last_good_t = now
         self._last_fail = ""
-        return cs
-
-    def _smooth_contrast(self, c_raw: float) -> float:
-        a = float(np.clip(self.cfg.ema_alpha, 0.05, 1.0))
-        if self._c_filt is None:
-            self._c_filt = c_raw
-        else:
-            self._c_filt = a * c_raw + (1.0 - a) * self._c_filt
-        return float(self._c_filt)
+        return {
+            "lat_err": None if det is None else lat,
+            "lat_n_obj": n_obj,
+            "d_obj": None if d_obj is None else float(d_obj),
+            "name": None if det is None else det.get("name"),
+            "conf": None if det is None else det.get("conf"),
+            "bbox": None if det is None else det.get("bbox"),
+            "area": None if det is None else det.get("area"),
+            "is_new": bool(rgb_new),
+            "rgb_shape": rgb_shape,
+            "depth_shape": depth_shape,
+            "stamp": rgb_stamp,
+        }
 
     def _speed(self) -> float:
         """Crawl speed clamped so the base moves at most max_step_m per frame."""
@@ -298,8 +309,6 @@ class DepthApproachController:
         """Yaw rate for a signed image error (image-right positive → turn right)."""
         ang = -float(self.cfg.yaw_gain) * float(err)
         mag = min(abs(ang), float(self.cfg.yaw_max))
-        # A tiny command does not overcome base stiction, so it would stall the
-        # align phase until the timeout instead of centering.
         mag = max(mag, float(self.cfg.yaw_min))
         return math.copysign(mag, ang)
 
@@ -310,76 +319,55 @@ class DepthApproachController:
         lat = m.get("lat_err")
         return n_obj > 0 and lat is not None and abs(float(lat)) <= self.cfg.center_tol
 
-    def _d_inner(self, m: Optional[dict]) -> Optional[float]:
-        if m is None or m.get("d_inner") is None:
+    def _d_obj(self, m: Optional[dict]) -> Optional[float]:
+        if m is None or m.get("d_obj") is None:
             return None
-        return float(m["d_inner"])
+        return float(m["d_obj"])
 
     def _too_near(self, m: Optional[dict]) -> bool:
-        """Already inside pick range — do not yaw or keep crawling.
-
-        The inner patch stays on the floor (~0.70 m) even when the object is at
-        the robot's feet: a tilted camera puts a close object in the *lower*
-        rows. So this also fires when the lower-band depth has dropped vs
-        baseline, or when a previously seen object has left the mid-height
-        centering band (it dropped below the camera).
-        """
+        """YOLO box is already at pick range — do not yaw or keep crawling."""
+        d = self._d_obj(m)
         lim = float(self.cfg.already_near_m)
-        d = self._d_inner(m)
-        if d is not None and lim > 0.0 and d < lim:
-            return True
-        d_low = None if m is None else m.get("d_lower")
-        if (
-            d_low is not None
-            and self.dl0 is not None
-            and (self.dl0 - float(d_low)) > self.cfg.tau_m
-        ):
-            return True
         n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
-        return bool(self._seen_obj and n_obj <= 0)
+        return n_obj > 0 and d is not None and lim > 0.0 and d < lim
 
-    def _inner_stop(self, m: Optional[dict]) -> bool:
-        """Inner patch is at the distance contrast-detect used to fire."""
-        d = self._d_inner(m)
-        lim = float(self.cfg.inner_stop_m)
-        if self.cfg.d_near_m > 0.0:
-            lim = min(lim, float(self.cfg.d_near_m)) if lim > 0.0 else float(self.cfg.d_near_m)
-        return d is not None and lim > 0.0 and d < lim
+    def _obj_stop(self, m: Optional[dict]) -> bool:
+        """Object depth inside the box is close enough to stop, and not far off-axis."""
+        d = self._d_obj(m)
+        lim = float(self.cfg.stop_m)
+        n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
+        lat = None if m is None else m.get("lat_err")
+        if n_obj <= 0 or d is None or lim <= 0.0 or lat is None:
+            return False
+        if abs(float(lat)) > float(self.cfg.realign):
+            return False
+        return d < lim
 
     def _enter(self, phase: str, why: str):
         self._phase = phase
         self._phase_t0 = time.monotonic()
         self._align_ok = 0
         self._phase_why = why
+        self._timeout_logged = False
         if self.cfg.log_every > 0:
             t_s = 0.0 if self._t0 is None else (time.monotonic() - self._t0)
             print(f"[approach] t={t_s:5.2f}s  -> {phase.upper()} ({why})")
 
     def _command(self, m: Optional[dict]) -> tuple:
-        """Alternate between turning in place and driving straight.
-
-        ALIGN yaws with zero linear velocity until the object sits within
-        ``center_tol`` of the image center; DRIVE goes straight and hands control
-        back to ALIGN as soon as the object drifts past ``realign`` or after
-        ``burst_m`` of travel, so centering is re-checked often.
-        """
+        """Alternate between turning in place and driving straight."""
         now = time.monotonic()
         lat = None if m is None else m.get("lat_err")
         n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
         is_new = bool(m is not None and m.get("is_new"))
-        # error == 0.0 with no object columns means "nothing to centre on", not "centred"
         has_obj = lat is not None and n_obj > 0
         if has_obj:
             self._lat_err = float(lat)
-            self._seen_obj = True
         err = self._lat_err
         speed = self._speed()
         since = now - (self._phase_t0 or now)
 
-        # Too close to yaw: hold still and let tick() stop the approach.
         if self._too_near(m):
             return 0.0, 0.0
-        # Already on the object: drive straight until inner-stop, never re-ALIGN.
         if self._is_centered(m):
             if self._phase != "drive":
                 self._enter("drive", f"already centered err={err:+.2f}")
@@ -387,15 +375,10 @@ class DepthApproachController:
 
         if self._phase == "align":
             if since < self.cfg.align_settle_s:
-                # Stand still after braking so depth catches up with the new pose.
                 return 0.0, 0.0
             if not has_obj or err is None:
-                # Nothing to centre on: do not sit in ALIGN. If we already had
-                # an object and it vanished, hold still (too-near / lost).
-                if self._seen_obj:
-                    return 0.0, 0.0
-                self._enter("drive", "no centering signal")
-                return speed, 0.0
+                # Wait for YOLO — never crawl without a box.
+                return 0.0, 0.0
             if abs(err) <= self.cfg.center_tol:
                 if is_new:
                     self._align_ok += 1
@@ -404,103 +387,96 @@ class DepthApproachController:
                     return speed, 0.0
                 return 0.0, 0.0
             self._align_ok = 0
-            if since >= self.cfg.align_timeout_s:
-                self._enter("drive", f"align timeout err={err:+.2f}")
-                return speed, 0.0
+            timeout = float(self.cfg.align_timeout_s)
+            if timeout > 0.0 and since >= timeout:
+                if not self._timeout_logged:
+                    print(
+                        f"[approach] ALIGN still off-center err={err:+.2f} "
+                        f"after {timeout:.1f}s — holding yaw (not driving)"
+                    )
+                    self._timeout_logged = True
             return 0.0, self._yaw(err)
 
         self._drive_m = since * speed
-        if has_obj and abs(err) > self.cfg.realign:
+        if not has_obj:
+            self._enter("align", "lost detection")
+            return 0.0, 0.0
+        if abs(err) > self.cfg.realign:
             self._enter("align", f"off-center err={err:+.2f}")
             return 0.0, 0.0
-        if (
-            has_obj
-            and self.cfg.burst_m > 0.0
-            and self._drive_m >= self.cfg.burst_m
-        ):
+        if self.cfg.burst_m > 0.0 and self._drive_m >= self.cfg.burst_m:
             self._enter("align", f"burst {self._drive_m:.2f}m")
             return 0.0, 0.0
         return speed, 0.0
 
-    def capture_baseline(self) -> Optional[float]:
-        """Stop base; measure baseline ROI depth and center-surround contrast."""
+    def _lock_streams(self) -> bool:
+        """Stop, sample a few frames, lock the majority RGB and depth resolutions."""
         self._client.send_cmd_vel(0.0, 0.0)
-        samples = []  # (shape, d_med, raw_contrast, stamp, d_lower)
-        self._c_filt = None
-        self._lock_shape = None  # observe every stream, then pick one below
+        self._lock_rgb = None
+        self._lock_depth = None
+        rgb_shapes = []
+        depth_shapes = []
         t_start = time.monotonic()
-        for i in range(self.cfg.baseline_frames):
-            m = self._measure()
-            if m is not None:
-                samples.append(
-                    (
-                        tuple(m["shape"][:2]),
-                        m["d_med"],
-                        m["contrast"],
-                        m["stamp"],
-                        m.get("d_lower"),
-                    )
-                )
-                if self.cfg.log_every > 0:
-                    print(
-                        f"[approach] baseline {i+1}/{self.cfg.baseline_frames}  "
-                        f"d={m['d_med']:.3f}  cin={m['d_inner']:.3f} "
-                        f"ring={m['d_ring']:.3f}  contrast={m['contrast']:+.3f}  "
-                        f"px(in/ring)={m['n_inner']}/{m['n_ring']}  "
-                        f"img={m['shape'][0]}x{m['shape'][1]}"
-                    )
-            elif self.cfg.log_every > 0:
-                print(
-                    f"[approach] baseline {i+1}/{self.cfg.baseline_frames}  "
-                    f"unusable: {self._last_fail}"
-                )
+        n = max(4, int(self.cfg.lock_frames))
+        for i in range(n):
+            cam = self.yolo_cfg.camera
+            rgb_msg = self._client.get_robot_image(cam)
+            depth_msg = self._client.get_robot_depth("base")
+            rgb = image_to_rgb(rgb_msg) if rgb_msg is not None else None
+            depth = image_to_depth(depth_msg) if depth_msg is not None else None
+            if rgb is not None:
+                rgb_shapes.append(tuple(rgb.shape[:2]))
+            if depth is not None:
+                depth_shapes.append(tuple(depth.shape[:2]))
+            if self.cfg.log_every > 0:
+                rs = "--" if rgb is None else f"{rgb.shape[0]}x{rgb.shape[1]}"
+                ds = "--" if depth is None else f"{depth.shape[0]}x{depth.shape[1]}"
+                print(f"[approach] lock {i+1}/{n}  rgb={rs}  depth={ds}")
             time.sleep(self.cfg.tick_s)
-        if not samples:
-            self.d0 = None
-            self.c0 = None
-            self.dl0 = None
-            return None
-
-        counts: dict = {}
-        for shape, _, _, _, _ in samples:
-            counts[shape] = counts.get(shape, 0) + 1
-        self._lock_shape = max(counts.items(), key=lambda kv: kv[1])[0]
-        if len(counts) > 1:
+        if not rgb_shapes:
+            self._last_fail = "no rgb during lock"
+            return False
+        if not depth_shapes:
+            self._last_fail = "no depth during lock"
+            return False
+        self._lock_rgb = Counter(rgb_shapes).most_common(1)[0][0]
+        self._lock_depth = Counter(depth_shapes).most_common(1)[0][0]
+        rgb_set = set(rgb_shapes)
+        dep_set = set(depth_shapes)
+        if len(rgb_set) > 1:
             others = ", ".join(
-                f"{s[0]}x{s[1]}({n})" for s, n in counts.items() if s != self._lock_shape
+                f"{s[0]}x{s[1]}({c})" for s, c in Counter(rgb_shapes).items()
+                if s != self._lock_rgb
             )
-            print(f"[approach] WARNING: base depth topic has multiple streams — "
-                  f"locking {self._lock_shape[0]}x{self._lock_shape[1]}, "
-                  f"ignoring {others}")
-        sel = [
-            (d, c, st, dl)
-            for shape, d, c, st, dl in samples
-            if shape == self._lock_shape
-        ]
-        self.d0 = float(np.median(np.asarray([d for d, _, _, _ in sel], dtype=np.float64)))
-        self.c0 = float(np.median(np.asarray([c for _, c, _, _ in sel], dtype=np.float64)))
-        lows = [dl for _, _, _, dl in sel if dl is not None]
-        self.dl0 = (
-            float(np.median(np.asarray(lows, dtype=np.float64))) if lows else None
-        )
-        self._hit_count = 0
-        self._last_depth = self.d0
-        self._c_filt = self.c0
-        # Rate measured across both streams overestimates the one we steer on, so
-        # re-estimate from distinct stamps of the locked stream only.
-        distinct = len({st for _, _, st, _ in sel if st is not None})
+            print(
+                f"[approach] WARNING: rgb has multiple streams — "
+                f"locking {self._lock_rgb[0]}x{self._lock_rgb[1]}, ignoring {others}"
+            )
+        if len(dep_set) > 1:
+            others = ", ".join(
+                f"{s[0]}x{s[1]}({c})" for s, c in Counter(depth_shapes).items()
+                if s != self._lock_depth
+            )
+            print(
+                f"[approach] WARNING: depth has multiple streams — "
+                f"locking {self._lock_depth[0]}x{self._lock_depth[1]}, ignoring {others}"
+            )
         elapsed = time.monotonic() - t_start
-        self._frame_dt = (elapsed / (distinct - 1)) if distinct >= 2 and elapsed > 0 else None
-        self._last_stamp = None
+        self._frame_dt = (elapsed / max(1, n - 1)) if elapsed > 0 else None
+        self._last_rgb_stamp = None
+        self._last_depth_stamp = None
         self._last_new_frame_t = None
-        return self.d0
+        return True
 
     def start(self) -> bool:
-        """Activate auto-approach. Returns False if baseline could not be measured."""
-        d0 = self.capture_baseline()
-        if d0 is None or self.c0 is None:
+        """Activate auto-approach. Returns False if YOLO or cameras are unavailable."""
+        if not self._yolo.load():
             self.active = False
-            print(f"[approach] baseline FAILED: {self._last_fail}")
+            print(f"[approach] YOLO FAILED: {self._yolo._last_fail}")
+            return False
+        if not self._lock_streams():
+            self.active = False
+            print(f"[approach] lock FAILED: {self._last_fail}")
             return False
         self.active = True
         self._tick_i = 0
@@ -509,50 +485,48 @@ class DepthApproachController:
         self._overrun_t0 = None
         self._detect_reason = ""
         self._lat_err = None
+        self._det = None
+        self._d_obj_cached = None
         self._drive_m = 0.0
-        self._seen_obj = False
         self._arrive_now = False
         self._skip_overrun = False
+        self._hit_count = 0
+        self._timeout_logged = False
         m0 = self._measure()
         if self._too_near(m0):
             self._enter("drive", "already near")
             self._arrive_now = True
             self._skip_overrun = True
             self._detect_reason = "already near"
-        elif self._is_centered(m0) and self._inner_stop(m0):
-            self._enter("drive", "already centered")
+        elif self._obj_stop(m0) and self._is_centered(m0):
+            self._enter("drive", "already in range")
             self._arrive_now = True
-            self._detect_reason = "already centered"
+            self._detect_reason = "already in range"
         elif self._is_centered(m0):
             self._enter("drive", "already centered")
         else:
             self._enter("align", "start")
         self._last_good_t = time.monotonic()
-        near_s = "off" if self.cfg.d_near_m <= 0.0 else f"{self.cfg.d_near_m:.3f}"
         fps = None if not self._frame_dt else 1.0 / self._frame_dt
         print(
-            f"[approach] baseline d0={d0:.3f} c0={self.c0:+.3f}  "
-            f"dl0={'--' if self.dl0 is None else f'{self.dl0:.3f}'}  "
-            f"contrast_tau={self.cfg.contrast_m}  drop_tau={self.cfg.tau_m}  "
-            f"d_near={near_s}  K={self.cfg.persist_k}\n"
+            f"[approach] YOLO {self.yolo_cfg.weights}  cam={self.yolo_cfg.camera}  "
+            f"rgb={self._lock_rgb[0]}x{self._lock_rgb[1]}  "
+            f"depth={self._lock_depth[0]}x{self._lock_depth[1]}\n"
             f"[approach] crawl={self.cfg.crawl_mps} clamped to "
             f"{self._speed():.3f} m/s  (max_step={self.cfg.max_step_m}m, "
-            f"depth≈{'?' if fps is None else f'{fps:.1f}'} Hz)  "
+            f"frame≈{'?' if fps is None else f'{fps:.1f}'} Hz)  "
             f"stale_stop={self.cfg.stale_stop_s}s  "
             f"overrun={self.cfg.overrun_m:.3f}m\n"
             f"[approach] stop-turn-go: yaw_gain={self.cfg.yaw_gain} "
             f"yaw=[{self.cfg.yaw_min},{self.cfg.yaw_max}]  "
             f"center_tol={self.cfg.center_tol} realign={self.cfg.realign} "
             f"hold={self.cfg.align_hold}  burst={self.cfg.burst_m:.3f}m  "
-            f"align_timeout={self.cfg.align_timeout_s}s  "
-            f"inner_stop={self.cfg.inner_stop_m:.2f}m  "
-            f"already_near={self.cfg.already_near_m:.2f}m"
+            f"stop={self.cfg.stop_m:.2f}m  already_near={self.cfg.already_near_m:.2f}m"
         )
         print(
-            "[approach] live: rise = (ring−center) − c0. Object in the center "
-            "raises it; pitch/bumps cancel. ALIGN is skipped when the object is "
-            "already centered or too near; then it drives or stops. "
-            "Base HOLDS when depth goes stale."
+            "[approach] live: err from YOLO box vs image center; "
+            "d=depth inside that box. ALIGN waits for a detection "
+            "(does not drive blind). Lost box → re-ALIGN, not stop."
         )
         return True
 
@@ -567,13 +541,13 @@ class DepthApproachController:
         self._hit_count = 0
         self._overrun = False
         self._overrun_t0 = None
-        self._c_filt = None
         self._lat_err = None
+        self._det = None
+        self._d_obj_cached = None
         self._phase = "align"
         self._phase_t0 = None
         self._align_ok = 0
         self._drive_m = 0.0
-        self._seen_obj = False
         self._arrive_now = False
         self._skip_overrun = False
         self._client.send_cmd_vel(0.0, 0.0)
@@ -623,8 +597,6 @@ class DepthApproachController:
                     f"detect={self._detect_reason}  t={t_s:.2f}s"
                 )
                 return True
-            # Already centered when detection fired; creep straight for the last
-            # few centimetres so the object cannot be yawed out of the gripper.
             self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
             return False
 
@@ -636,11 +608,10 @@ class DepthApproachController:
                 else time.monotonic() - self._last_good_t
             )
             if age > self.cfg.stale_stop_s:
-                # Never drive blind: hold position until depth comes back.
                 self._client.send_cmd_vel(0.0, 0.0)
                 if do_log:
                     print(
-                        f"[approach] t={t_s:5.2f}s  HOLD (depth stale {age:.2f}s > "
+                        f"[approach] t={t_s:5.2f}s  HOLD (stale {age:.2f}s > "
                         f"{self.cfg.stale_stop_s}s): {self._last_fail}"
                     )
             else:
@@ -653,55 +624,31 @@ class DepthApproachController:
                     )
             return False
 
-        contrast = self._smooth_contrast(m["contrast"])
-        d_med = m["d_med"]
-        self._last_depth = d_med
-        assert self.d0 is not None and self.c0 is not None
         lin, ang = self._command(m)
-
-        c_rise = contrast - self.c0
-        contrast_hit = c_rise > self.cfg.contrast_m
-        drop = self.d0 - d_med
-        drop_hit = drop > self.cfg.tau_m
-        near = (
-            (self.cfg.d_near_m > 0.0 and d_med < self.cfg.d_near_m)
-            or self._too_near(m)
-            or (self._is_centered(m) and self._inner_stop(m))
-        )
-
-        # Yawing in place sweeps the view across whatever is beside the object, so
-        # contrast/drop there says nothing about closing in: only detect while driving.
-        # Exception: already-near / lost-object must still count, or ALIGN would
-        # hold forever with hit=0.
-        if self._phase == "align" and not near:
-            self._hit_count = 0
-        elif contrast_hit or drop_hit or near:
-            if m["is_new"]:
-                self._hit_count += 1
-        else:
+        near = self._obj_stop(m) or self._too_near(m)
+        if near and m.get("is_new"):
+            self._hit_count += 1
+        elif not near:
             self._hit_count = 0
 
         if do_log:
             flags = []
-            if contrast_hit:
-                flags.append("CTR")
-            if drop_hit:
-                flags.append("DROP")
-            if near:
+            if self._too_near(m):
                 flags.append("NEAR")
+            if self._obj_stop(m):
+                flags.append("STOPD")
             fps = None if not self._frame_dt else 1.0 / self._frame_dt
             lat = m.get("lat_err")
             n_obj = int(m.get("lat_n_obj") or 0)
-            flr = m.get("lat_floor")
-            d_low = m.get("d_lower")
+            d_obj = m.get("d_obj")
+            name = m.get("name") or "-"
+            conf = m.get("conf")
             print(
                 f"[approach] t={t_s:5.2f}s  {self._phase.upper():5s} "
-                f"cin={m['d_inner']:.3f} "
-                f"ring={m['d_ring']:.3f}  c={contrast:+.3f} c0={self.c0:+.3f}  "
-                f"rise={c_rise:+.3f}  drop={drop:+.3f}  "
                 f"err={'--' if lat is None else f'{lat:+.2f}'} "
-                f"obj={n_obj} flr={'--' if flr is None else f'{flr:.2f}'} "
-                f"low={'--' if d_low is None else f'{float(d_low):.2f}'} "
+                f"obj={n_obj} {name}"
+                f"{'' if conf is None else f' {conf:.2f}'}  "
+                f"d={'--' if d_obj is None else f'{float(d_obj):.2f}'}  "
                 f"ang={ang:+.2f}  "
                 f"hit={self._hit_count}/{self.cfg.persist_k}  "
                 f"v={lin:.2f} "
@@ -711,18 +658,10 @@ class DepthApproachController:
 
         if self._hit_count >= self.cfg.persist_k:
             if self._too_near(m):
-                n_now = int(m.get("lat_n_obj") or 0)
-                reason = (
-                    "object lost (too near)"
-                    if self._seen_obj and n_now <= 0
-                    else "already near"
-                )
-            elif near:
-                reason = "near"
-            elif contrast_hit:
-                reason = f"contrast_rise={c_rise:.3f}"
+                reason = "already near"
             else:
-                reason = f"drop={drop:.3f}"
+                d = self._d_obj(m)
+                reason = f"bbox_depth={d:.3f}" if d is not None else "in range"
             self._detect_reason = reason
             skip_overrun = self._too_near(m)
             self._overrun_need_s = 0.0 if skip_overrun else self._overrun_duration_s()

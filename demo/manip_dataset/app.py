@@ -23,6 +23,20 @@ class Phase(enum.Enum):
     ARM_TELEOP = "ARM_TELEOP"
 
 
+TARGET_OBJECTS = [
+    "tumbler",
+    "cracker_box",
+    "cola_can",
+    "disposable_cup",
+    "umbrella",
+    "juice",
+    "tissue",
+    "mug",
+    "sunblock",
+    "pencilcase",
+]
+
+
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, default))
@@ -47,6 +61,10 @@ class CollectorApp:
         self.recorder = EpisodeRecorder(
             _dataset_root(), team_id, primary_camera=self.arm.cfg.primary_camera
         )
+        default_obj = os.environ.get("MARC_TARGET_OBJECT", TARGET_OBJECTS[0])
+        self._obj_idx = TARGET_OBJECTS.index(default_obj) if default_obj in TARGET_OBJECTS else 0
+        self.target_object = TARGET_OBJECTS[self._obj_idx]
+        self.approach.set_target(self.target_object)
         self.base_lin = _env_float("MARC_BASE_LIN", 0.08)
         # Reverse magnitude for `k` (defaults to forward speed if unset).
         self.base_lin_back = _env_float("MARC_BASE_LIN_BACK", self.base_lin)
@@ -57,7 +75,7 @@ class CollectorApp:
 
     def print_help(self):
         print(HELP_TEXT)
-        print(f"[state] phase={self.phase.value}  steps={len(self.recorder.steps)}")
+        print(f"[state] phase={self.phase.value}  steps={len(self.recorder.steps)}  target={self.target_object}")
 
     def begin_episode_cycle(self):
         """Ready pose + enter MANUAL_BASE; recording not started until arm teleop."""
@@ -67,11 +85,15 @@ class CollectorApp:
         print("[episode] moving arm to down-tilt ready pose...")
         self.arm.warm_cameras(1.0)
         self.arm.go_ready()
+        if not self.approach.detector_ready():
+            print("[yolo] loading detector (once)...")
+            if not self.approach.ensure_detector():
+                print("[yolo] detector not ready — press A after fixing weights / rebuild")
         pose = self.client.get_world_pose()
         self.recorder.start_episode({
             "pnp_params": load_params(),
             "spawn_world_pose": list(pose) if pose else None,
-        })
+        }, object_name=self.target_object)
         # Do not record until ARM_TELEOP actions — clear buffer start marker
         self.recorder.steps = []
         self.recorder.recording = False
@@ -84,7 +106,7 @@ class CollectorApp:
         if not self.recorder.recording and self._episode_armed:
             pose = self.client.get_world_pose()
             if not self.recorder.meta:
-                self.recorder.start_episode({"pnp_params": load_params()})
+                self.recorder.start_episode({"pnp_params": load_params()}, object_name=self.target_object)
             self.recorder.meta["approach_world_pose"] = list(pose) if pose else None
             self.recorder.recording = True
             print(f"[record] started episode {self.recorder.meta.get('episode_id')}")
@@ -105,6 +127,12 @@ class CollectorApp:
             return
         if ch in ("\x03", "\x04"):  # Ctrl-C / Ctrl-D
             self._running = False
+            return
+        if ch == "O":
+            self._obj_idx = (self._obj_idx + 1) % len(TARGET_OBJECTS)
+            self.target_object = TARGET_OBJECTS[self._obj_idx]
+            self.approach.set_target(self.target_object)
+            print(f"[target] object → {self.target_object}")
             return
         if ch == "N":
             self._abort_episode()
@@ -138,9 +166,9 @@ class CollectorApp:
             self._set_base(0.0, 0.0)
         elif ch == "A":
             self._set_base(0.0, 0.0)
-            print("[approach] capturing depth baseline...")
+            print("[approach] locking cameras + YOLO...")
             if not self.approach.start():
-                print("[approach] FAILED — no base depth; stay in MANUAL_BASE")
+                print("[approach] FAILED — YOLO or cameras unavailable; stay in MANUAL_BASE")
                 return
             self.phase = Phase.AUTO_APPROACH
             print("[approach] AUTO_APPROACH crawling (C to cancel)...")

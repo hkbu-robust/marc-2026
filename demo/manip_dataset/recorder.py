@@ -18,12 +18,14 @@ except Exception:  # pragma: no cover — ImportError or numpy ABI mismatch
     h5py = None
 
 
-LANGUAGE_PARAPHRASES = [
-    "pick up the tumbler and place it in the basket",
-    "grasp the cup and put it into the rear basket",
-    "pick the tumbler object and drop it in the basket",
-    "grab the tumbler and place it in the robot basket",
+INSTRUCTION_TEMPLATES = [
+    "pick up the {obj} and place it in the basket",
+    "grasp the {obj} and put it into the rear basket",
+    "pick the {obj} and drop it in the basket",
+    "grab the {obj} and place it in the robot basket",
 ]
+
+DEFAULT_OBJECT = "tumbler"
 
 
 RGB_KEYS = (
@@ -108,17 +110,18 @@ class EpisodeRecorder:
     def primary_key(self) -> str:
         return f"image_{self.primary_camera}"
 
-    def start_episode(self, extra_meta: Optional[dict] = None):
+    def start_episode(self, extra_meta: Optional[dict] = None, object_name: Optional[str] = None):
         self.steps = []
         self.recording = True
         self._episode_idx += 1
-        # Folder name is assigned at write time (Episode NNN). Keep a transient id
-        # here so logs still have something before keep/discard.
-        lang = LANGUAGE_PARAPHRASES[(self._episode_idx - 1) % len(LANGUAGE_PARAPHRASES)]
+        obj = object_name or os.environ.get("MARC_TARGET_OBJECT", DEFAULT_OBJECT)
+        obj_display = obj.replace("_", " ")
+        lang = INSTRUCTION_TEMPLATES[(self._episode_idx - 1) % len(INSTRUCTION_TEMPLATES)].format(obj=obj_display)
         self.meta = {
             "episode_id": f"pending_{self._episode_idx:04d}",
             "team_id": self.team_id,
             "language_instruction": lang,
+            "object_name": obj,
             "action_convention": "ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip",
             "primary_camera": self.primary_camera,
             "includes_place": False,
@@ -348,6 +351,8 @@ class EpisodeRecorder:
             f.attrs["num_steps"] = n
             f.attrs["episode_id"] = eid
             f.attrs["primary_camera"] = self.primary_camera
+            f.attrs["language_instruction"] = self.meta["language_instruction"]
+            f.attrs["object_name"] = self.meta.get("object_name", DEFAULT_OBJECT)
 
         png_counts = self._write_pngs(out_dir, written)
         self.meta["png_counts"] = png_counts

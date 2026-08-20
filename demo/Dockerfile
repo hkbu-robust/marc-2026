@@ -12,7 +12,7 @@
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Ubuntu 22.04 + ROS2 Humble + Python 3.10 (provides rclpy / *_msgs, default RMW=FastDDS)
-FROM ros:humble-ros-base
+FROM ros:humble-ros-base AS agent
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -41,3 +41,17 @@ WORKDIR /agent/demo
 # The ros:humble ENTRYPOINT (/ros_entrypoint.sh) sources /opt/ros/humble/setup.bash
 # and then runs the CMD below. team_id/token are injected via the compose env (from_env).
 CMD ["python3", "participant_app.py"]
+
+# Probe-only extra: YOLO11x for auto-approach. Do not use this stage for the
+# graded `agent` service (keeps the submission image free of torch).
+FROM agent AS manip-probe
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --no-cache-dir --upgrade pip \
+    && python3 -m pip install --no-cache-dir \
+        torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
+    && python3 -m pip install --no-cache-dir ultralytics \
+    && python3 -c "import placo, h5py, numpy; print('probe deps ok', numpy.__version__)"
+ENV YOLO_CONFIG_DIR=/agent/demo/weights
+RUN mkdir -p /agent/demo/weights

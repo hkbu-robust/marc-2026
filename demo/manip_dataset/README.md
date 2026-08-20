@@ -11,9 +11,17 @@ bash simulation-platform/marc.sh manip-trainer
 
 # terminal 2
 cd demo
-mkdir -p datasets
+mkdir -p datasets weights
 MARC_TEAM_ID=u1 docker compose up --build agent-manip-probe
 ```
+
+The probe image is a separate Dockerfile target (`manip-probe`) with torch +
+ultralytics. First `--build` is large (CUDA torch). Weights download into
+`demo/weights/yolo11x.pt` on first run; swap that file (or `MARC_YOLO_WEIGHTS`)
+for a fine-tuned checkpoint later.
+
+Isaac Sim already uses the GPU. If YOLO11x hitch-steps the sim, set
+`MARC_YOLO_WEIGHTS` to `yolo11s.pt` or `MARC_YOLO_DEVICE=cpu`.
 
 Requires an interactive TTY (`stdin_open` / `tty` on `agent-manip-probe`). Press `?` for the key map.
 
@@ -21,9 +29,9 @@ Requires an interactive TTY (`stdin_open` / `tty` on `agent-manip-probe`). Press
 
 1. Arm moves to a **joint-space ready** pose (`MARC_READY_J1…J6`), then teleop uses EE-delta IK.
 2. **MANUAL_BASE** — `i/k/j/l` place and aim the chassis; `A` starts auto-approach.
-3. **AUTO_APPROACH** — baselines base depth, then **stop-turn-go**: it turns in place with zero linear velocity until the nearest object sits in the base-camera center (`ALIGN`), drives straight for a short burst (`DRIVE`), and re-aligns whenever the object drifts. **ALIGN is skipped** when the object is already centered, the inner patch is already nearer than `MARC_APPROACH_ALREADY_NEAR`, the lower image band has dropped vs baseline (object at the robot's feet), or a previously seen object has left the centering band. It stops on **center−surround contrast**, on inner-patch depth (`MARC_APPROACH_INNER_STOP`) once aimed, or immediately if already too near (`C` cancels).
-   Each tick logs the phase plus `err` (image error), `obj` (object columns found) and `flr` (measured floor depth). `obj=0` means there is nothing to center on, so it will not yaw — see `MARC_APPROACH_LAT_*`.
-   The sim publishes **two streams at different resolutions on one depth topic** (e.g. 480×640 and 360×640, with different geometry). The baseline counts the resolutions it sees, locks the majority one, and ignores the rest; without that the two streams interleave and `c0` lands between them, leaving a ±0.014 false swing on empty floor that swamps `MARC_APPROACH_CONTRAST`.
+3. **AUTO_APPROACH** — locks the majority RGB/depth resolutions (the sim publishes two streams per topic), then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **median depth inside the YOLO box** (`MARC_APPROACH_STOP_M`), with no overrun if already closer than `MARC_APPROACH_ALREADY_NEAR` (`C` cancels).
+   Each tick logs `err` (box vs image center), `obj`/`name`/`conf`, and `d` (bbox depth). `obj=0` means YOLO saw nothing — it holds and waits.
+   Pretrained **YOLO11x** (COCO) is the default. It will not know MARC class names (`tumbler`, …); it uses a floor-object COCO allowlist. After you fine-tune, point `MARC_YOLO_WEIGHTS` at `best.pt` and `O` / `MARC_TARGET_OBJECT` will filter to that class.
 4. **ARM_TELEOP** — EE nudges + grip; steps are recorded with live images.
    Closing (`v`) **ramps** over `MARC_GRIP_RAMP` and stops the instant `gripper/holding`
    goes true, plus `MARC_GRIP_EXTRA` rad of bite. `MARC_GRIP_CLOSE` is only the ceiling:
@@ -150,17 +158,17 @@ Produces `episodes/episode_XXXX.npz`, `manifest.json`, and `dataset_statistics.j
 
 ## Code changes need a rebuild
 
-The Dockerfile `COPY`s `demo/` into `marc-agent:local`, so an edit is invisible until the
-image is rebuilt:
+The Dockerfile `COPY`s `demo/` into the image, so an edit is invisible until the
+image is rebuilt — except `manip_dataset/`, which is bind-mounted on
+`agent-manip-probe`. YOLO/torch live in the `manip-probe` image target
+(`marc-agent-manip-probe:local`); adding ultralytics or changing the Dockerfile
+needs `--build`. If the key map printed at startup is missing keys you expect,
+you are running a stale image.
 
 ```bash
 cd demo
 MARC_TEAM_ID=u1 docker compose run --rm -it --build agent-manip-probe
 ```
-
-`agent-manip-probe` also bind-mounts `./manip_dataset`, so edits inside that package are
-live without a rebuild; changes to other `demo/*.py` files still need `--build`. If the key
-map printed at startup is missing keys you expect, you are running a stale image.
 
 ## Env tunables
 
@@ -174,33 +182,32 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 |---|---|---|
 | `MARC_TEAM_ID` | `u1` | Any value, as long as it matches the manip-trainer namespace |
 | `MARC_DATASET_ROOT` | `demo/datasets/marc_pnp` | Success output root |
-| `MARC_APPROACH_CONTRAST` | `0.015` | Primary stop: rise in (ring−center) vs baseline (m). Pitch cancels; centered objects raise this |
-| `MARC_APPROACH_TAU` | `0.08` | Secondary whole-ROI drop (`d0−d`); kept high so empty bumps rarely trip |
-| `MARC_APPROACH_D_NEAR` | `0` | Absolute near stop (m); `≤0` disables |
+| `MARC_YOLO_WEIGHTS` | `demo/weights/yolo11x.pt` | Ultralytics `.pt`. Default downloads YOLO11x; replace with a fine-tuned checkpoint |
+| `MARC_YOLO_CONF` | `0.25` | Detection confidence floor |
+| `MARC_YOLO_IMGSZ` | `640` | YOLO inference size |
+| `MARC_YOLO_DEVICE` | `0` | CUDA index, or `cpu` |
+| `MARC_YOLO_CAM` | `base_left` | RGB camera for centering (`base_left`/`base_right`) |
+| `MARC_TARGET_OBJECT` | `tumbler` | Name cycled by `O`. Filters YOLO only after the weights include that class |
+| `MARC_APPROACH_STOP_M` | `0.55` | Stop when median depth inside the YOLO box is below this (m) |
+| `MARC_APPROACH_ALREADY_NEAR` | `0.45` | Bbox depth (m) counted as pick range: no yaw, no overrun |
 | `MARC_APPROACH_CRAWL` | `0.30` | Requested approach speed (m/s); clamped by `MAX_STEP` |
-| `MARC_APPROACH_MAX_STEP` | `0.04` | Max distance travelled per depth frame (m). Caps effective speed to the sensor rate |
-| `MARC_APPROACH_STALE_STOP` | `0.5` | Hold still if no usable depth for this long (s), instead of driving blind |
-| `MARC_APPROACH_K` | `3` | Persistence frames, counted only on **new** depth frames |
-| `MARC_APPROACH_INNER_FRAC` | `0.18` | Center patch size for contrast |
-| `MARC_APPROACH_OUTER_FRAC` | `0.40` | Outer patch; ring = outer − inner |
-| `MARC_APPROACH_PERCENTILE` | `30` | Percentile inside center/ring |
-| `MARC_APPROACH_MIN_VALID` | `4` | Min valid pixels per region; below this the frame is unusable |
-| `MARC_APPROACH_EMA` | `0.50` | EMA on contrast |
-| `MARC_APPROACH_OVERRUN_M` | `0.285` | Extra forward creep after detect (m) |
+| `MARC_APPROACH_MAX_STEP` | `0.04` | Max distance travelled per camera frame (m). Caps effective speed to the sensor rate |
+| `MARC_APPROACH_STALE_STOP` | `0.5` | Hold still if no usable RGB/depth for this long (s), instead of driving blind |
+| `MARC_APPROACH_K` | `3` | Persistence frames, counted only on **new** RGB frames |
+| `MARC_APPROACH_PERCENTILE` | `30` | Percentile of depth pixels inside the YOLO box |
+| `MARC_APPROACH_MIN_VALID` | `4` | Min valid depth pixels in the box; below this range is unknown |
+| `MARC_APPROACH_OVERRUN_M` | `0.10` | Extra forward creep after detect (m) |
 | `MARC_APPROACH_YAW_GAIN` | `1.2` | P-gain on image-right error → `angular_z` (negated). Flip the sign if it turns the wrong way |
 | `MARC_APPROACH_YAW_MAX` | `0.35` | Clamp on yaw rate (rad/s) |
 | `MARC_APPROACH_YAW_MIN` | `0.10` | Floor on yaw rate (rad/s) while aligning, so a small error still turns the chassis |
-| `MARC_APPROACH_CENTER_TOL` | `0.05` | \|image error\| counted as centered (half-width units); ends `ALIGN`. Lower = tighter centering, but it can hunt or time out |
-| `MARC_APPROACH_REALIGN` | `0.12` | \|image error\| that stops `DRIVE` and returns to `ALIGN` |
-| `MARC_APPROACH_ALIGN_HOLD` | `2` | New depth frames within `CENTER_TOL` required before driving |
-| `MARC_APPROACH_ALIGN_SETTLE` | `0.15` | Stand-still time (s) on entering `ALIGN` so depth catches up with the pose |
-| `MARC_APPROACH_ALIGN_TIMEOUT` | `4.0` | Give up aligning after this long (s) and drive anyway |
+| `MARC_APPROACH_CENTER_TOL` | `0.05` | \|image error\| counted as centered (half-width units); ends `ALIGN` |
+| `MARC_APPROACH_REALIGN` | `0.12` | \|image error\| that stops `DRIVE` and returns to `ALIGN`. Also the max off-axis error allowed to stop |
+| `MARC_APPROACH_ALIGN_HOLD` | `2` | New RGB frames within `CENTER_TOL` required before driving |
+| `MARC_APPROACH_ALIGN_SETTLE` | `0.15` | Stand-still time (s) on entering `ALIGN` so cameras catch up with the pose |
+| `MARC_APPROACH_ALIGN_TIMEOUT` | `0` | If `>0`, log when ALIGN has taken this long — **does not drive anyway** |
 | `MARC_APPROACH_BURST_M` | `0.15` | Straight-line travel (m) per `DRIVE` burst before re-checking centering; `0` disables re-checks |
-| `MARC_APPROACH_LAT_MIN_M` | `0.05` | Ignore depths nearer than this when centering. Raise above the arm distance if the log shows `obj=0` with a close `flr` |
-| `MARC_APPROACH_LAT_MAX_M` | `20.0` | Ignore depths beyond this when centering |
-| `MARC_APPROACH_LAT_CLOSER_M` | `0.04` | How much closer than the floor a column must be to count as object |
-| `MARC_APPROACH_INNER_STOP` | `0.65` | When already centered, stop driving once inner-patch depth is below this (m). Stops the ALIGN loop if `A` is pressed with the object already in the inner patch |
-| `MARC_APPROACH_ALREADY_NEAR` | `0.50` | Inner-patch depth (m) counted as pick range: no yaw, no overrun, stop immediately |
+| `MARC_APPROACH_LAT_MIN_M` | `0.05` | Ignore depths nearer than this inside the YOLO box |
+| `MARC_APPROACH_LAT_MAX_M` | `20.0` | Ignore depths beyond this inside the YOLO box |
 | `MARC_APPROACH_LOG_EVERY` | `1` | Print each N ticks (`0` = off) |
 | `MARC_BASE_LIN` | `0.08` | Manual base forward (`i`) speed (m/s) |
 | `MARC_BASE_LIN_BACK` | same as `MARC_BASE_LIN` | Manual base reverse (`k`) speed (m/s) |

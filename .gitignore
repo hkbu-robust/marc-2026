@@ -14,3 +14,5 @@ simulation-platform/.env
 *.hdf5
 *.png
 /demo/datasets
+/demo/weights/*.pt
+/demo/weights/*.onnx
