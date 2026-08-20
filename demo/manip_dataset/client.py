@@ -8,12 +8,60 @@ import time
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
+from sensor_msgs.msg import Image
 
 from marc_sdk.client import MARCClient, _ParticipantNode
+from marc_sdk import protocol as P
 
 
 class ManipTrainerClient(MARCClient):
     """MARCClient subclass that skips the platform SESSION_ACK handshake."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # suffix+HxW -> latest Image, so a second publisher on the same topic
+        # cannot erase the majority camera between control ticks.
+        self._robot_msgs_by_shape = {}
+
+    def _cache_robot(self, suffix, msg):
+        with self._lock:
+            self._robot_msgs[suffix] = msg
+            h = int(getattr(msg, "height", 0) or 0)
+            w = int(getattr(msg, "width", 0) or 0)
+            if h > 0 and w > 0:
+                self._robot_msgs_by_shape[(suffix, h, w)] = msg
+
+    def get_robot_image_hw(self, which: str, shape):
+        """Latest RGB frame matching ``(height, width)``, or None."""
+        cam = P.ROBOT_CAMERA_SUFFIX.get(which)
+        if cam is None:
+            raise ValueError(f"Unknown camera '{which}'.")
+        suffix = f"{cam}/image"
+        self._ensure_robot_sub(suffix, Image, P.QOS_IMAGE)
+        h, w = int(shape[0]), int(shape[1])
+        with self._lock:
+            return self._robot_msgs_by_shape.get((suffix, h, w))
+
+    def get_robot_depth_hw(self, which: str, shape):
+        """Latest depth frame matching ``(height, width)``, or None."""
+        cam = P.ROBOT_DEPTH_SUFFIX.get(which)
+        if cam is None:
+            raise ValueError(f"Unknown depth '{which}'.")
+        suffix = f"{cam}/image"
+        self._ensure_robot_sub(suffix, Image, P.QOS_IMAGE)
+        h, w = int(shape[0]), int(shape[1])
+        with self._lock:
+            return self._robot_msgs_by_shape.get((suffix, h, w))
+
+    def list_robot_image_shapes(self, which: str):
+        cam = P.ROBOT_CAMERA_SUFFIX.get(which)
+        if cam is None:
+            return []
+        suffix = f"{cam}/image"
+        with self._lock:
+            return sorted(
+                (h, w) for (s, h, w) in self._robot_msgs_by_shape if s == suffix
+            )
 
     def connect(self, timeout: float = 1.0, register_period: float = 0.2) -> bool:
         if not rclpy.ok():

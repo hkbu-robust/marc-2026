@@ -48,7 +48,7 @@ DEFAULT_LOCK_FRAMES = 12
 DEFAULT_SETTLE_S = 0.5
 DEFAULT_TICK_S = 0.05
 DEFAULT_LOG_EVERY = 1
-DEFAULT_OVERRUN_M = 0.10
+DEFAULT_OVERRUN_M = 0.35
 DEFAULT_YAW_GAIN = 1.2
 DEFAULT_YAW_MAX = 0.35
 DEFAULT_YAW_MIN = 0.10
@@ -122,6 +122,28 @@ class ApproachConfig:
         )
 
 
+def _debug_dir() -> str:
+    return os.environ.get(
+        "MARC_YOLO_DEBUG_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     "datasets", "yolo_debug"),
+    )
+
+
+def _dump_rgb(rgb: np.ndarray, tag: str, extra: str = ""):
+    try:
+        from .recorder import write_png
+
+        root = _debug_dir()
+        os.makedirs(root, exist_ok=True)
+        h, w = rgb.shape[:2]
+        path = os.path.join(root, f"{tag}_{h}x{w}.png")
+        write_png(path, rgb)
+        print(f"[approach] dumped {path}{extra}")
+    except Exception as e:
+        print(f"[approach] dump failed ({tag}): {e}")
+
+
 def _stamp_key(msg) -> Optional[tuple]:
     try:
         st = msg.header.stamp
@@ -160,6 +182,7 @@ class DepthApproachController:
         self._last_fail: str = ""
         self._lock_rgb: Optional[tuple] = None
         self._lock_depth: Optional[tuple] = None
+        self._rgb_swap = False
         self._lat_err: Optional[float] = None
         self._det: Optional[dict] = None
         self._d_obj_cached: Optional[float] = None
@@ -193,19 +216,40 @@ class DepthApproachController:
             self._last_new_frame_t = now
         return is_new
 
+    def _rgb_msg(self, shape=None):
+        cam = self.yolo_cfg.camera
+        if shape is not None:
+            getter = getattr(self._client, "get_robot_image_hw", None)
+            if getter is not None:
+                return getter(cam, shape)
+        return self._client.get_robot_image(cam)
+
+    def _depth_msg(self, shape=None):
+        if shape is not None:
+            getter = getattr(self._client, "get_robot_depth_hw", None)
+            if getter is not None:
+                return getter("base", shape)
+        return self._client.get_robot_depth("base")
+
+    def _prep_rgb(self, rgb: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        if rgb is None:
+            return None
+        if self._rgb_swap:
+            return np.ascontiguousarray(rgb[:, :, ::-1])
+        return rgb
+
     def _measure(self) -> Optional[dict]:
         """Read RGB + depth; YOLO on new RGB. None if neither stream is usable."""
-        cam = self.yolo_cfg.camera
-        rgb_msg = self._client.get_robot_image(cam)
-        depth_msg = self._client.get_robot_depth("base")
         now = time.monotonic()
+        rgb_msg = self._rgb_msg(self._lock_rgb)
+        depth_msg = self._depth_msg(self._lock_depth)
 
         rgb = None
         rgb_shape = None
         rgb_stamp = None
         rgb_new = False
         if rgb_msg is not None:
-            rgb = image_to_rgb(rgb_msg)
+            rgb = self._prep_rgb(image_to_rgb(rgb_msg))
             if rgb is not None:
                 rgb_shape = tuple(rgb.shape[:2])
                 if self._lock_rgb is not None and rgb_shape != self._lock_rgb:
@@ -224,6 +268,15 @@ class DepthApproachController:
                 self._last_fail = (
                     f"rgb decode failed (encoding={getattr(rgb_msg, 'encoding', '?')})"
                 )
+        elif self._lock_rgb is not None:
+            have = []
+            lister = getattr(self._client, "list_robot_image_shapes", None)
+            if lister is not None:
+                have = [f"{h}x{w}" for h, w in lister(self.yolo_cfg.camera)]
+            self._last_fail = (
+                f"waiting for locked rgb {self._lock_rgb[0]}x{self._lock_rgb[1]}"
+                + (f" (have {','.join(have)})" if have else "")
+            )
 
         depth = None
         depth_shape = None
@@ -245,10 +298,12 @@ class DepthApproachController:
                     f"depth decode failed (encoding={getattr(depth_msg, 'encoding', '?')})"
                 )
 
-        if rgb is None and self._det is None:
-            if not self._last_fail:
-                self._last_fail = "no rgb"
-            return None
+        if rgb is None:
+            n_keep = 0 if self._det is None else int(self._det.get("n_obj") or 0)
+            if n_keep <= 0:
+                if not self._last_fail:
+                    self._last_fail = "no rgb"
+                return None
 
         if rgb is not None and rgb_new:
             det = self._yolo.detect(rgb)
@@ -256,8 +311,12 @@ class DepthApproachController:
         else:
             det = self._det
 
+        n_obj = 0 if det is None else int(det.get("n_obj") or 0)
+        n_raw = 0 if det is None else int(det.get("n_raw") or 0)
+        lat = None if det is None or n_obj <= 0 else det.get("error")
+
         d_obj = None
-        if det is None:
+        if n_obj <= 0 or det is None or det.get("bbox") is None:
             self._d_obj_cached = None
         elif depth is not None:
             d_obj = depth_in_bbox(
@@ -276,16 +335,15 @@ class DepthApproachController:
         else:
             d_obj = self._d_obj_cached
 
-        n_obj = 0 if det is None else int(det.get("n_obj") or 0)
-        lat = None if det is None else det.get("error")
         if n_obj > 0 and lat is not None:
             self._lat_err = float(lat)
 
         self._last_good_t = now
         self._last_fail = ""
         return {
-            "lat_err": None if det is None else lat,
+            "lat_err": lat,
             "lat_n_obj": n_obj,
+            "n_raw": n_raw,
             "d_obj": None if d_obj is None else float(d_obj),
             "name": None if det is None else det.get("name"),
             "conf": None if det is None else det.get("conf"),
@@ -410,28 +468,89 @@ class DepthApproachController:
         return speed, 0.0
 
     def _lock_streams(self) -> bool:
-        """Stop, sample a few frames, lock the majority RGB and depth resolutions."""
+        """Stop, sample frames, lock the taller RGB (chassis 480x640, not 360 close-up).
+
+        Two publishers share base_left. Majority 360x640 is a gripper-like view;
+        recorded plaza/base frames are 480x640. Shape-keyed cache still serves
+        that rarer stream after lock even when 360 arrives last.
+        """
         self._client.send_cmd_vel(0.0, 0.0)
         self._lock_rgb = None
         self._lock_depth = None
+        self._rgb_swap = False
         rgb_shapes = []
         depth_shapes = []
+        best_by_shape: dict = {}  # shape -> (n_raw, rgb, enc, mean, raw, swapped)
+        dumped = set()
         t_start = time.monotonic()
         n = max(4, int(self.cfg.lock_frames))
+        low_probed = set()
         for i in range(n):
-            cam = self.yolo_cfg.camera
-            rgb_msg = self._client.get_robot_image(cam)
+            rgb_msg = self._client.get_robot_image(self.yolo_cfg.camera)
             depth_msg = self._client.get_robot_depth("base")
             rgb = image_to_rgb(rgb_msg) if rgb_msg is not None else None
             depth = image_to_depth(depth_msg) if depth_msg is not None else None
+            enc = getattr(rgb_msg, "encoding", "?") if rgb_msg is not None else "?"
+            step = int(getattr(rgb_msg, "step", 0) or 0) if rgb_msg is not None else 0
             if rgb is not None:
-                rgb_shapes.append(tuple(rgb.shape[:2]))
+                shape = tuple(rgb.shape[:2])
+                rgb_shapes.append(shape)
+                mean = float(rgb.mean())
+                det = self._yolo.detect(rgb)
+                swapped = False
+                n_raw = 0 if det is None else int(det.get("n_raw") or 0)
+                if n_raw == 0:
+                    det_b = self._yolo.detect(np.ascontiguousarray(rgb[:, :, ::-1]))
+                    n_b = 0 if det_b is None else int(det_b.get("n_raw") or 0)
+                    if n_b > n_raw:
+                        det = det_b
+                        swapped = True
+                        n_raw = n_b
+                if n_raw == 0 and shape not in low_probed:
+                    low_probed.add(shape)
+                    lo = self._yolo.detect(rgb, conf=0.05)
+                    lo_n = 0 if lo is None else int(lo.get("n_raw") or 0)
+                    if lo_n:
+                        lo_s = ",".join(
+                            f"{a}:{b:.2f}" for a, b in (lo.get("raw") or [])[:6]
+                        )
+                        print(
+                            f"[approach] {shape[0]}x{shape[1]} has low-conf boxes "
+                            f"(conf=0.05, not used): [{lo_s}]"
+                        )
+                n_obj = 0 if det is None else int(det.get("n_obj") or 0)
+                name = "-" if det is None else (det.get("name") or "-")
+                raw = [] if det is None else list(det.get("raw") or [])
+                prev = best_by_shape.get(shape)
+                if prev is None or n_raw > prev[0]:
+                    best_by_shape[shape] = (n_raw, rgb, enc, mean, raw, swapped)
+                if shape not in dumped:
+                    dumped.add(shape)
+                    extra = (
+                        f"  enc={enc} step={step} mean={mean:.1f} "
+                        f"n_raw={n_raw} swap={int(swapped)}"
+                    )
+                    _dump_rgb(rgb, f"lock_{shape[0]}x{shape[1]}", extra=extra)
+                    if swapped:
+                        _dump_rgb(
+                            np.ascontiguousarray(rgb[:, :, ::-1]),
+                            f"lock_{shape[0]}x{shape[1]}_bgr",
+                            extra="  (channel-swapped copy YOLO preferred)",
+                        )
+                if self.cfg.log_every > 0:
+                    ds = "--" if depth is None else f"{depth.shape[0]}x{depth.shape[1]}"
+                    raw_s = ",".join(f"{a}:{b:.2f}" for a, b in raw[:4]) or "-"
+                    print(
+                        f"[approach] lock {i+1}/{n}  rgb={shape[0]}x{shape[1]}  "
+                        f"enc={enc} mean={mean:.1f}  n_raw={n_raw} n_obj={n_obj} "
+                        f"{name} raw=[{raw_s}] swap={int(swapped)}  depth={ds}"
+                    )
+            elif self.cfg.log_every > 0:
+                ds = "--" if depth is None else f"{depth.shape[0]}x{depth.shape[1]}"
+                print(f"[approach] lock {i+1}/{n}  rgb=--  depth={ds}  "
+                      f"enc={enc}")
             if depth is not None:
                 depth_shapes.append(tuple(depth.shape[:2]))
-            if self.cfg.log_every > 0:
-                rs = "--" if rgb is None else f"{rgb.shape[0]}x{rgb.shape[1]}"
-                ds = "--" if depth is None else f"{depth.shape[0]}x{depth.shape[1]}"
-                print(f"[approach] lock {i+1}/{n}  rgb={rs}  depth={ds}")
             time.sleep(self.cfg.tick_s)
         if not rgb_shapes:
             self._last_fail = "no rgb during lock"
@@ -439,27 +558,36 @@ class DepthApproachController:
         if not depth_shapes:
             self._last_fail = "no depth during lock"
             return False
-        self._lock_rgb = Counter(rgb_shapes).most_common(1)[0][0]
-        self._lock_depth = Counter(depth_shapes).most_common(1)[0][0]
-        rgb_set = set(rgb_shapes)
-        dep_set = set(depth_shapes)
-        if len(rgb_set) > 1:
+        counts = Counter(rgb_shapes)
+        # Taller first (480x640 chassis), not majority 360 (gripper-like close-up).
+        self._lock_rgb = max(counts.keys(), key=lambda s: (s[0], s[1], counts[s]))
+        winner = best_by_shape.get(self._lock_rgb)
+        self._rgb_swap = bool(winner[5]) if winner is not None else False
+        if self._rgb_swap:
+            print("[approach] RGB channels swapped for YOLO (8UC3 was RGB, not BGR)")
+        dcounts = Counter(depth_shapes)
+        same_h = [s for s in dcounts if s[0] == self._lock_rgb[0]]
+        self._lock_depth = (
+            max(same_h, key=lambda s: (s[0], s[1], dcounts[s])) if same_h
+            else max(dcounts.keys(), key=lambda s: (s[0], s[1], dcounts[s]))
+        )
+        if len(counts) > 1:
             others = ", ".join(
-                f"{s[0]}x{s[1]}({c})" for s, c in Counter(rgb_shapes).items()
-                if s != self._lock_rgb
+                f"{s[0]}x{s[1]}(n={c},raw={best_by_shape.get(s, (0,))[0]})"
+                for s, c in counts.items() if s != self._lock_rgb
             )
             print(
-                f"[approach] WARNING: rgb has multiple streams — "
-                f"locking {self._lock_rgb[0]}x{self._lock_rgb[1]}, ignoring {others}"
+                f"[approach] rgb lock {self._lock_rgb[0]}x{self._lock_rgb[1]} "
+                f"by taller chassis view, ignoring {others}"
             )
-        if len(dep_set) > 1:
+        if len(dcounts) > 1:
             others = ", ".join(
-                f"{s[0]}x{s[1]}({c})" for s, c in Counter(depth_shapes).items()
+                f"{s[0]}x{s[1]}({c})" for s, c in dcounts.items()
                 if s != self._lock_depth
             )
             print(
-                f"[approach] WARNING: depth has multiple streams — "
-                f"locking {self._lock_depth[0]}x{self._lock_depth[1]}, ignoring {others}"
+                f"[approach] depth lock {self._lock_depth[0]}x{self._lock_depth[1]}, "
+                f"ignoring {others}"
             )
         elapsed = time.monotonic() - t_start
         self._frame_dt = (elapsed / max(1, n - 1)) if elapsed > 0 else None
@@ -525,7 +653,7 @@ class DepthApproachController:
         )
         print(
             "[approach] live: err from YOLO box vs image center; "
-            "d=depth inside that box. ALIGN waits for a detection "
+            "d=depth inside that box. obj=used/raw. ALIGN waits for a detection "
             "(does not drive blind). Lost box → re-ALIGN, not stop."
         )
         return True
@@ -643,10 +771,11 @@ class DepthApproachController:
             d_obj = m.get("d_obj")
             name = m.get("name") or "-"
             conf = m.get("conf")
+            n_raw = int(m.get("n_raw") or 0)
             print(
                 f"[approach] t={t_s:5.2f}s  {self._phase.upper():5s} "
                 f"err={'--' if lat is None else f'{lat:+.2f}'} "
-                f"obj={n_obj} {name}"
+                f"obj={n_obj}/{n_raw} {name}"
                 f"{'' if conf is None else f' {conf:.2f}'}  "
                 f"d={'--' if d_obj is None else f'{float(d_obj):.2f}'}  "
                 f"ang={ang:+.2f}  "

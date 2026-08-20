@@ -44,47 +44,17 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
-# COCO names that a floor object in this sim might land on before a fine-tune.
-# person is excluded so a bystander is not treated as the pick target.
-COCO_FLOOR_ALLOW = frozenset(
-    {
-        "bottle",
-        "cup",
-        "wine glass",
-        "bowl",
-        "vase",
-        "book",
-        "cell phone",
-        "umbrella",
-        "suitcase",
-        "handbag",
-        "backpack",
-        "sports ball",
-        "teddy bear",
-        "laptop",
-        "mouse",
-        "remote",
-        "keyboard",
-        "scissors",
-        "toothbrush",
-        "banana",
-        "apple",
-        "orange",
-        "sandwich",
-        "donut",
-        "cake",
-        "potted plant",
-        "clock",
-        "vase",
-    }
-)
+# Names skipped when picking a box (bystander / robot-adjacent false positives).
+# Class *filter at predict time* is only applied once the weights actually contain
+# the MARC target name (a fine-tune). Pretrained COCO uses classes=None.
+SKIP_NAMES = frozenset({"person"})
 
 _PKG_DIR = Path(__file__).resolve().parent
 DEFAULT_WEIGHTS = str((_PKG_DIR.parent / "weights" / "yolo11x.pt").resolve())
-DEFAULT_CONF = 0.25
+DEFAULT_CONF = 0.15
 DEFAULT_IMGSZ = 640
 DEFAULT_DEVICE = "0"
-DEFAULT_HALF = True
+DEFAULT_HALF = False
 DEFAULT_CAM = "base_left"
 
 
@@ -173,6 +143,7 @@ class YoloTracker:
         self._refresh_classes()
 
     def _refresh_classes(self):
+        """Restrict predict() only when the checkpoint has the MARC class name."""
         if not self.names:
             self._class_ids = None
             return
@@ -180,8 +151,7 @@ class YoloTracker:
         if self._target and self._target in inv:
             self._class_ids = [inv[self._target]]
             return
-        allow = [inv[n] for n in COCO_FLOOR_ALLOW if n in inv]
-        self._class_ids = allow or None
+        self._class_ids = None
 
     def load(self) -> bool:
         if self.model is not None:
@@ -208,12 +178,13 @@ class YoloTracker:
             raw_names = getattr(self.model, "names", None) or {}
             self.names = {int(k): str(v) for k, v in dict(raw_names).items()}
             self._refresh_classes()
-            dummy = np.zeros((self.cfg.imgsz, self.cfg.imgsz, 3), dtype=np.uint8)
-            self.detect(dummy)
-            n_cls = len(self._class_ids) if self._class_ids is not None else "all"
+            if self._class_ids is not None:
+                n_cls = ",".join(self.names[i] for i in self._class_ids)
+            else:
+                n_cls = "all (no class filter)"
             print(
                 f"[yolo] ready  classes={n_cls}  "
-                f"target={self._target or '(COCO allowlist)'}  "
+                f"target={self._target or '-'}  "
                 f"conf={self.cfg.conf}"
             )
             return True
@@ -223,48 +194,86 @@ class YoloTracker:
             print(f"[yolo] {self._last_fail}")
             return False
 
-    def detect(self, rgb: np.ndarray) -> Optional[dict]:
-        """Return the best box vs image center, or None.
+    def detect(self, rgb: np.ndarray, conf: Optional[float] = None) -> Optional[dict]:
+        """Return the best box vs image center (always a dict if infer ran).
 
-        ``error`` is in roughly ``[-1, 1]`` (image-right positive), matching the
-        previous depth-centroid convention so ALIGN yaw stays the same sign.
+        Pass a PIL RGB image so Ultralytics does not treat the array as BGR.
+        Do not pass ``half=`` (deprecated; also spams every tick).
         """
         if self.model is None or rgb is None or rgb.size == 0:
             return None
         h, w = rgb.shape[:2]
         if h < 2 or w < 2:
             return None
-        use_half = bool(self.cfg.half) and self.device != "cpu"
+        src = np.ascontiguousarray(rgb)
         try:
-            results = self.model.predict(
-                rgb,
-                verbose=False,
-                conf=float(self.cfg.conf),
-                imgsz=int(self.cfg.imgsz),
-                device=self.device,
-                half=use_half,
-                classes=self._class_ids,
-            )
+            from PIL import Image
+
+            src = Image.fromarray(src, mode="RGB")
+        except Exception:
+            pass
+        kw = dict(
+            verbose=False,
+            conf=float(self.cfg.conf if conf is None else conf),
+            imgsz=int(self.cfg.imgsz),
+            device=self.device,
+        )
+        if self._class_ids is not None:
+            kw["classes"] = self._class_ids
+        try:
+            results = self.model.predict(src, **kw)
         except Exception as e:
             self._last_fail = f"predict: {e}"
             return None
+        empty = {
+            "error": None,
+            "n_obj": 0,
+            "n_raw": 0,
+            "bbox": None,
+            "conf": None,
+            "cls": None,
+            "name": None,
+            "raw": [],
+            "rgb_shape": (int(h), int(w)),
+        }
         if not results:
-            return None
+            return empty
         r = results[0]
         boxes = getattr(r, "boxes", None)
         if boxes is None or len(boxes) == 0:
-            return None
+            return empty
 
-        best = None
-        best_score = -1.0
         xyxy = boxes.xyxy.detach().cpu().numpy()
         confs = boxes.conf.detach().cpu().numpy()
         clss = boxes.cls.detach().cpu().numpy()
-        for i in range(len(xyxy)):
+        n_raw = int(len(xyxy))
+        raw = []
+        for i in range(n_raw):
+            cls_id = int(clss[i])
+            raw.append((self.names.get(cls_id, str(cls_id)), float(confs[i])))
+        empty["n_raw"] = n_raw
+        empty["raw"] = raw
+
+        candidates = []
+        skipped = []
+        for i in range(n_raw):
             x1, y1, x2, y2 = (float(v) for v in xyxy[i])
             conf = float(confs[i])
             cls_id = int(clss[i])
             name = self.names.get(cls_id, str(cls_id))
+            rec = (x1, y1, x2, y2, conf, cls_id, name)
+            if name in SKIP_NAMES:
+                skipped.append(rec)
+            else:
+                candidates.append(rec)
+        if not candidates:
+            candidates = skipped
+        if not candidates:
+            return empty
+
+        best = None
+        best_score = -1.0
+        for x1, y1, x2, y2, conf, cls_id, name in candidates:
             bw = max(1.0, x2 - x1)
             bh = max(1.0, y2 - y1)
             cx = 0.5 * (x1 + x2)
@@ -279,6 +288,8 @@ class YoloTracker:
                 best = {
                     "error": float(np.clip(err, -1.0, 1.0)),
                     "n_obj": 1,
+                    "n_raw": n_raw,
+                    "raw": raw,
                     "bbox": (x1, y1, x2, y2),
                     "conf": conf,
                     "cls": cls_id,
@@ -288,4 +299,4 @@ class YoloTracker:
                     "area": float(area),
                     "rgb_shape": (int(h), int(w)),
                 }
-        return best
+        return best if best is not None else empty

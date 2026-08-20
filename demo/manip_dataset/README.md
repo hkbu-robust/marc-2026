@@ -29,9 +29,9 @@ Requires an interactive TTY (`stdin_open` / `tty` on `agent-manip-probe`). Press
 
 1. Arm moves to a **joint-space ready** pose (`MARC_READY_J1…J6`), then teleop uses EE-delta IK.
 2. **MANUAL_BASE** — `i/k/j/l` place and aim the chassis; `A` starts auto-approach.
-3. **AUTO_APPROACH** — locks the majority RGB/depth resolutions (the sim publishes two streams per topic), then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **median depth inside the YOLO box** (`MARC_APPROACH_STOP_M`), with no overrun if already closer than `MARC_APPROACH_ALREADY_NEAR` (`C` cancels).
-   Each tick logs `err` (box vs image center), `obj`/`name`/`conf`, and `d` (bbox depth). `obj=0` means YOLO saw nothing — it holds and waits.
-   Pretrained **YOLO11x** (COCO) is the default. It will not know MARC class names (`tumbler`, …); it uses a floor-object COCO allowlist. After you fine-tune, point `MARC_YOLO_WEIGHTS` at `best.pt` and `O` / `MARC_TARGET_OBJECT` will filter to that class.
+3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** view (not majority 360×640, which is a gripper-like close-up). Then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **median depth inside the YOLO box** (`MARC_APPROACH_STOP_M`), with no overrun if already closer than `MARC_APPROACH_ALREADY_NEAR` (`C` cancels).
+   Each tick logs `err` (box vs image center), `obj=used/raw`, `name`/`conf`, and `d` (bbox depth). `obj=0/0` means YOLO saw nothing; `obj=0/3` means boxes existed but were skipped (e.g. `person`).
+   Pretrained **YOLO11x** (COCO) runs with **no class filter**. `person` boxes are skipped when scoring. After you fine-tune, point `MARC_YOLO_WEIGHTS` at `best.pt` and `O` / `MARC_TARGET_OBJECT` will restrict predict to that class. RGB is passed as a PIL image. Lock dumps PNGs under `datasets/yolo_debug/`.
 4. **ARM_TELEOP** — EE nudges + grip; steps are recorded with live images.
    Closing (`v`) **ramps** over `MARC_GRIP_RAMP` and stops the instant `gripper/holding`
    goes true, plus `MARC_GRIP_EXTRA` rad of bite. `MARC_GRIP_CLOSE` is only the ceiling:
@@ -183,9 +183,10 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_TEAM_ID` | `u1` | Any value, as long as it matches the manip-trainer namespace |
 | `MARC_DATASET_ROOT` | `demo/datasets/marc_pnp` | Success output root |
 | `MARC_YOLO_WEIGHTS` | `demo/weights/yolo11x.pt` | Ultralytics `.pt`. Default downloads YOLO11x; replace with a fine-tuned checkpoint |
-| `MARC_YOLO_CONF` | `0.25` | Detection confidence floor |
+| `MARC_YOLO_CONF` | `0.15` | Detection confidence floor |
 | `MARC_YOLO_IMGSZ` | `640` | YOLO inference size |
 | `MARC_YOLO_DEVICE` | `0` | CUDA index, or `cpu` |
+| `MARC_YOLO_HALF` | `0` | FP16 predict. Off by default (avoids Ultralytics `half` deprecation spam) |
 | `MARC_YOLO_CAM` | `base_left` | RGB camera for centering (`base_left`/`base_right`) |
 | `MARC_TARGET_OBJECT` | `tumbler` | Name cycled by `O`. Filters YOLO only after the weights include that class |
 | `MARC_APPROACH_STOP_M` | `0.55` | Stop when median depth inside the YOLO box is below this (m) |
@@ -196,7 +197,7 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_APPROACH_K` | `3` | Persistence frames, counted only on **new** RGB frames |
 | `MARC_APPROACH_PERCENTILE` | `30` | Percentile of depth pixels inside the YOLO box |
 | `MARC_APPROACH_MIN_VALID` | `4` | Min valid depth pixels in the box; below this range is unknown |
-| `MARC_APPROACH_OVERRUN_M` | `0.10` | Extra forward creep after detect (m) |
+| `MARC_APPROACH_OVERRUN_M` | `0.35` | Extra forward after detect (m), so the ready-pose gripper sits over the object |
 | `MARC_APPROACH_YAW_GAIN` | `1.2` | P-gain on image-right error → `angular_z` (negated). Flip the sign if it turns the wrong way |
 | `MARC_APPROACH_YAW_MAX` | `0.35` | Clamp on yaw rate (rad/s) |
 | `MARC_APPROACH_YAW_MIN` | `0.10` | Floor on yaw rate (rad/s) while aligning, so a small error still turns the chassis |
