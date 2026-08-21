@@ -111,6 +111,10 @@ services:
       # N>0 generates N scenes without the GUI and exits (batch dataset generation).
       # 0 (default) keeps the interactive panel: New Scene / New Camera.
       TRAINER_AUTO_SCENES: "${TRAINER_AUTO_SCENES:-0}"
+      # Copies of each selected class per scene (lost objects + landmarks). People unchanged.
+      # Set both to 1 to restore the stock one-instance catalogue.
+      TRAINER_MIN_INSTANCES: "${TRAINER_MIN_INSTANCES:-4}"
+      TRAINER_MAX_INSTANCES: "${TRAINER_MAX_INSTANCES:-6}"
     # Boot wrapper (same asset patches as the platform), then the dataset generator entry.
     command: ["/marc-patches/boot.py", "/metacom2026/simulation_app/marc2026/trainer.py"]
     volumes:
