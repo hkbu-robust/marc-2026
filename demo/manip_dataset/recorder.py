@@ -18,11 +18,13 @@ except Exception:  # pragma: no cover — ImportError or numpy ABI mismatch
     h5py = None
 
 
+# Language must match the labeled motion: ARM_TELEOP grasp only. Place (`P`) is
+# not written into the HDF5, so "…and put it in the basket" would be a lie.
 INSTRUCTION_TEMPLATES = [
-    "pick up the {obj} and place it in the basket",
-    "grasp the {obj} and put it into the rear basket",
-    "pick the {obj} and drop it in the basket",
-    "grab the {obj} and place it in the robot basket",
+    "pick up the {obj}",
+    "grasp the {obj}",
+    "pick the {obj}",
+    "grab the {obj}",
 ]
 
 DEFAULT_OBJECT = "tumbler"
@@ -125,6 +127,7 @@ class EpisodeRecorder:
             "action_convention": "ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip",
             "primary_camera": self.primary_camera,
             "includes_place": False,
+            "task": "pick",
             "success": False,
             "started_at": time.time(),
         }
@@ -277,6 +280,7 @@ class EpisodeRecorder:
         self.meta["num_steps"] = len(self.steps)
         self.meta["filled_frames"] = filled
         self.meta["includes_place"] = False
+        self.meta["task"] = "pick"
         h5_path = os.path.join(out_dir, "episode.hdf5")
         meta_path = os.path.join(out_dir, "meta.json")
 

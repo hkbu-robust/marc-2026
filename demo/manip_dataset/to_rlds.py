@@ -134,6 +134,8 @@ def convert(in_dir: str, out_dir: str, image_size: int = 224, camera: str = "aut
             ee_pos=data["ee_pos"],
             ee_quat=data["ee_quat"],
             language_instruction=meta.get("language_instruction", ""),
+            object_name=meta.get("object_name", ""),
+            task=meta.get("task", "pick"),
         )
         episodes.append({
             "index": idx,
@@ -141,6 +143,8 @@ def convert(in_dir: str, out_dir: str, image_size: int = 224, camera: str = "aut
             "path": f"episodes/episode_{idx:04d}.npz",
             "num_steps": int(data["action"].shape[0]),
             "language_instruction": meta.get("language_instruction", ""),
+            "object_name": meta.get("object_name", ""),
+            "task": meta.get("task", "pick"),
             "camera": data["image_key"],
         })
         all_actions.append(data["action"])

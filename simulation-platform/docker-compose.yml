@@ -8,10 +8,11 @@
 #
 # Run (from repo root or anywhere via -f):
 #   docker compose -f simulation-platform/docker-compose.yml --profile platform     up --build   # simulation platform
-#   docker compose -f simulation-platform/docker-compose.yml --profile dataset-gen  up --build   # dataset generator
+#   docker compose -f simulation-platform/docker-compose.yml --profile dataset-gen  up --build   # CCTV dataset generator
+#   docker compose -f simulation-platform/docker-compose.yml --profile ego-dataset-gen up --build # robot-base-cam YOLO set
 #   docker compose -f simulation-platform/docker-compose.yml --profile manip-trainer up --build  # manipulation trainer
 #   docker compose -f simulation-platform/docker-compose.yml --profile platform down             # stop
-# Convenience wrapper: bash simulation-platform/marc.sh platform | dataset-gen | manip-trainer | down
+# Convenience wrapper: bash simulation-platform/marc.sh platform | dataset-gen | ego-dataset-gen | manip-trainer | down
 #
 # Change scenario/headless: .env (copy .env.example) or prefix env
 #   ENV_MARC_SCENARIO=marc2026_chungmu HEADLESS=false docker compose ... up
@@ -156,6 +157,52 @@ services:
       - ../.runtime-data/logs:/root/.nvidia-omniverse/logs:rw
       - ../.runtime-data/data:/root/.local/share/ov/data:rw
       # GUI (HEADLESS=false): view the trainer viewport for pnp_tune. Run `xhost +local:root` on the host.
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-/root/.Xauthority}:/root/.Xauthority:rw
+
+  # Robot-base-camera YOLO dataset. Same image as manip-trainer; entry is a bind-mounted
+  # generator that attaches Replicator GT to Base_Camera_Left (640x480) and writes
+  # Ultralytics labels under trainer_output/ego_yolo. Do not mix with CCTV dataset-gen
+  # when fine-tuning the approach detector.
+  ego-dataset-gen:                     # <- marc.sh ego-dataset-gen
+    <<: *marc-common
+    profiles: ["ego-dataset-gen"]
+    build:
+      context: ..
+      dockerfile: simulation-platform/Dockerfile.practice
+      args:
+        CONTENT_IMAGE: "${MARC_CONTENT_IMAGE:-ghcr.io/marc-challenge/marc-platform-content:2026.R03}"
+    image: marc-platform:practice
+    environment:
+      <<: *marc-env
+      # Batch capture does not need a viewport. Override with EGO_HEADLESS=false to watch.
+      HEADLESS: "${EGO_HEADLESS:-true}"
+      EGO_SCENES: "${EGO_SCENES:-200}"
+      EGO_SEED: "${EGO_SEED:-0}"
+      EGO_OBJECTS_MIN: "${EGO_OBJECTS_MIN:-1}"
+      EGO_OBJECTS_MAX: "${EGO_OBJECTS_MAX:-3}"
+      EGO_REACH_MIN: "${EGO_REACH_MIN:-0.5}"
+      EGO_REACH_MAX: "${EGO_REACH_MAX:-3.5}"
+      EGO_LAT: "${EGO_LAT:-2.5}"
+      EGO_BEARING_DEG: "${EGO_BEARING_DEG:-50}"
+      EGO_ROBOT_XY: "${EGO_ROBOT_XY:-4}"
+      EGO_YAW_SPAN: "${EGO_YAW_SPAN:-360}"
+      EGO_SKIP_CLASSES: "${EGO_SKIP_CLASSES:-umbrella,long_umbrella}"
+      EGO_EMPTY_FRAC: "${EGO_EMPTY_FRAC:-0.05}"
+      EGO_VAL_FRAC: "${EGO_VAL_FRAC:-0.2}"
+      EGO_OUT: "${EGO_OUT:-/metacom2026/trainer_output/ego_yolo}"
+      EGO_SAVE_OVERLAY: "${EGO_SAVE_OVERLAY:-1}"
+    command: ["/marc-patches/boot.py", "/marc-patches/ego_dataset_gen.py"]
+    volumes:
+      - ./patches:/marc-patches:ro
+      - ../trainer_output:/metacom2026/trainer_output:rw
+      - ../.runtime-data/cache/kit:/isaac-sim/kit/cache:rw
+      - ../.runtime-data/cache/ov:/root/.cache/ov:rw
+      - ../.runtime-data/cache/pip:/root/.cache/pip:rw
+      - ../.runtime-data/cache/glcache:/root/.cache/nvidia/GLCache:rw
+      - ../.runtime-data/cache/computecache:/root/.nv/ComputeCache:rw
+      - ../.runtime-data/logs:/root/.nvidia-omniverse/logs:rw
+      - ../.runtime-data/data:/root/.local/share/ov/data:rw
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-/root/.Xauthority}:/root/.Xauthority:rw
 

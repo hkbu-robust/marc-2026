@@ -6,7 +6,7 @@
 # The image ENTRYPOINT is /isaac-sim/python.sh, so setting the compose command to
 #   ["/marc-patches/boot.py", "<original entry script>", ...]
 # makes python.sh run this file, which patches and then hands off to the original entry.
-# platform / dataset-gen / manip-trainer share one image, so they share this wrapper.
+# platform / dataset-gen / ego-dataset-gen / manip-trainer share one image, so they share this wrapper.
 #
 # Patches run in a SEPARATE process so the pxr (USD) libraries are never loaded into this
 # process - that keeps them out of IsaacSim's own initialization. The handoff uses os.execv,
@@ -24,6 +24,7 @@ PATCHES = [
     "patch_object_xformops.py",
     "patch_object_rotation.py",
     "patch_trainer_instances.py",
+    "patch_gt_world_xyz.py",
 ]
 
 

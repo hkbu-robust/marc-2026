@@ -6,7 +6,8 @@
 # Call: `bash simulation-platform/marc.sh <cmd>` (no chmod/CRLF dependency). Relative to starter-kit repo root.
 #   setup     nvcr.io login guidance + xhost (GUI) + base image build (once)
 #   platform  (build if needed then) platform profile up   - runtime platform (GHCR content image)
-#   dataset-gen  dataset-gen profile up                - generate object-detection training set (labels) (GHCR content image)
+#   dataset-gen  dataset-gen profile up                - generate CCTV object-detection training set (GHCR content image)
+#   ego-dataset-gen  robot base-camera YOLO set (Base_Camera_Left, Replicator GT)
 #   manip-trainer  manipulation practice environment (manipulation_trainer.py, reuses the dataset-gen image)
 #   select [SCENARIO]  pick which problems the platform poses -> writes problems.yaml (in-container TUI)
 #   demo <id> run the SDK demo participant (separate machine/shell, -> ../demo)
@@ -67,6 +68,11 @@ case "${1:-}" in
     echo "[marc] dataset-gen: GHCR content image COPY --from."
     "${DC[@]}" -f "$COMPOSE_FILE" --profile dataset-gen up --build
     ;;
+  ego-dataset-gen)
+    preflight; ensure_base
+    echo "[marc] ego-dataset-gen: robot Base_Camera_Left YOLO labels -> trainer_output/ego_yolo"
+    "${DC[@]}" -f "$COMPOSE_FILE" --profile ego-dataset-gen up --build
+    ;;
   manip-trainer)
     preflight; ensure_base
     echo "[marc] manipulation practice environment (manipulation_trainer.py)."
@@ -95,15 +101,15 @@ case "${1:-}" in
     docker compose -f demo/docker-compose.yml up --build
     ;;
   down)
-    "${DC[@]}" -f "$COMPOSE_FILE" --profile platform --profile dataset-gen --profile manip-trainer down
+    "${DC[@]}" -f "$COMPOSE_FILE" --profile platform --profile dataset-gen --profile ego-dataset-gen --profile manip-trainer down
     ;;
   clean)
-    "${DC[@]}" -f "$COMPOSE_FILE" --profile platform --profile dataset-gen --profile manip-trainer down || true
+    "${DC[@]}" -f "$COMPOSE_FILE" --profile platform --profile dataset-gen --profile ego-dataset-gen --profile manip-trainer down || true
     docker image rm marc-platform:practice 2>/dev/null || true
     echo "[marc] clean complete (base image is kept)."
     ;;
   *)
-    echo "usage: bash simulation-platform/marc.sh {setup|platform|dataset-gen|manip-trainer|select [scenario]|demo <id>|down|clean}"
+    echo "usage: bash simulation-platform/marc.sh {setup|platform|dataset-gen|ego-dataset-gen|manip-trainer|select [scenario]|demo <id>|down|clean}"
     exit 1
     ;;
 esac

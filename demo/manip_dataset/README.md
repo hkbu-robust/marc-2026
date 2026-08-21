@@ -25,6 +25,29 @@ Isaac Sim already uses the GPU. If YOLO11x hitch-steps the sim, set
 
 Requires an interactive TTY (`stdin_open` / `tty` on `agent-manip-probe`). Press `?` for the key map.
 
+## Ego-cam YOLO dataset (approach detector)
+
+CCTV `dataset-gen` is aerial. Auto-approach sees **Base_Camera_Left** (~640×480, near-ground),
+so that detector is fine-tuned on a **separate** ego-cam set — do not mix the two image
+distributions in one `yolo detect train`.
+
+```bash
+# from simulation-platform/  (stop dataset-gen / manip-trainer first; one GPU)
+HEADLESS=true EGO_SCENES=200 docker compose --profile ego-dataset-gen up
+```
+
+Writes `trainer_output/ego_yolo/{images,labels,overlays,data.yaml}` with Isaac Replicator
+tight boxes on spawned lost objects. Then:
+
+```bash
+yolo detect train data=trainer_output/ego_yolo/data.yaml model=yolo11x.pt imgsz=640
+```
+
+Point the probe at the resulting `best.pt` with `MARC_YOLO_WEIGHTS`. Class names match the
+lost-object list except **umbrella / long_umbrella** (skipped). Every remaining class is
+forced into the set at least once; extras are shuffled. The chassis is teleported in xy
+and yaw each scene so boxes are not glued to one patch of the image.
+
 ## Episode flow
 
 1. Arm moves to a **joint-space ready** pose (`MARC_READY_J1…J6`), then teleop uses EE-delta IK.
@@ -155,6 +178,8 @@ python3 -m manip_dataset.to_rlds \
 to force a view (it falls back to the other one if the requested view is absent).
 
 Produces `episodes/episode_XXXX.npz`, `manifest.json`, and `dataset_statistics.json` (action mean/std). Wire those into your OpenVLA dataset transform / OXE RLDS builder; this repo does not run training.
+
+`language_instruction` is pick-only (`"pick up the tumbler"`). Place (`P`) is still used as a keep-filter but is not in the action labels, so the text does not mention the basket.
 
 ## Code changes need a rebuild
 
