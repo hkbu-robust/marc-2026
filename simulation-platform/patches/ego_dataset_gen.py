@@ -11,8 +11,8 @@
 # is the view auto-approach actually sees (near-ground, ~640x480).
 #
 # Env:
-#   EGO_SCENES          number of scenes (default 200)
-#   EGO_SEED            RNG seed (default 0)
+#   EGO_SCENES          new scenes this run (appends after existing stems; default 200)
+#   EGO_SEED            RNG seed (default 0; offset by resume index so reruns aren't clones)
 #   EGO_OBJECTS_MIN/MAX objects per scene (default 1-3)
 #   EGO_REACH_MIN/MAX   forward distance m (default 0.5-3.5)
 #   EGO_LAT             lateral clamp m (default 2.5; FOV placement uses bearing)
@@ -32,6 +32,7 @@ import math
 import random
 import logging
 import traceback
+import re
 
 sys.path.insert(0, "/metacom2026/simulation_app/marc2026")
 
@@ -501,6 +502,12 @@ def _save_rgb(arr, path):
     rgb = np.asarray(arr)
     if rgb.ndim == 3 and rgb.shape[2] == 4:
         rgb = rgb[:, :, :3]
+    if rgb.dtype != np.uint8:
+        mx = float(np.max(rgb)) if rgb.size else 0.0
+        if mx <= 1.5:
+            rgb = (np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+        else:
+            rgb = np.clip(rgb, 0, 255).astype(np.uint8)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         from PIL import Image
@@ -514,6 +521,41 @@ def _save_rgb(arr, path):
         except Exception as e:
             log.warning(f"RGB save failed {path}: {e}")
             return False
+
+
+_STEM_RE = re.compile(r"^(\d+)")
+
+
+def _next_image_index(out_dir):
+    """One past the highest existing 00000.jpg/.png/.txt stem. Reruns only append."""
+    highest = -1
+    for split in ("train", "val"):
+        for sub in ("images", "labels", "overlays"):
+            folder = os.path.join(out_dir, sub, split)
+            if not os.path.isdir(folder):
+                continue
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                continue
+            for name in names:
+                m = _STEM_RE.match(name)
+                if m:
+                    highest = max(highest, int(m.group(1)))
+    return highest + 1
+
+
+def _stem_taken(out_dir, stem):
+    for split in ("train", "val"):
+        for sub, exts in (
+            ("images", (".png", ".jpg", ".jpeg")),
+            ("labels", (".txt",)),
+        ):
+            folder = os.path.join(out_dir, sub, split)
+            for ext in exts:
+                if os.path.isfile(os.path.join(folder, stem + ext)):
+                    return True
+    return False
 
 
 def _write_yolo(label_path, detections, names, width, height):
@@ -581,15 +623,21 @@ def main():
         os.path.join(os.environ.get("MARC_TRAINER_DIR") or "/metacom2026/trainer_output",
                      "ego_yolo"),
     )
-    rng = random.Random(seed)
+    start_idx = _next_image_index(out_dir)
+    rng = random.Random(seed + start_idx)
+    val_period = max(2, int(round(1.0 / val_frac)))
 
     print("=" * 60)
     print("  MARC 2026 ego-cam YOLO generator (Base_Camera_Left)")
-    print(f"  scenes={n_scenes}  objects/scene={obj_min}-{obj_max}  "
+    print(f"  new_scenes={n_scenes}  resume_index={start_idx:05d}  format=png")
+    print(f"  objects/scene={obj_min}-{obj_max}  "
           f"reach={reach_min:.2f}-{reach_max:.2f}m  "
           f"robot_xy=±{robot_xy_r:.1f}m  yaw_span={yaw_span:.0f}°")
     print(f"  out={out_dir}")
     print("=" * 60, flush=True)
+    if start_idx > 0:
+        log.info(f"appending after existing stems (next={start_idx:05d}); "
+                 f"prior JPEG/PNG kept. seed offset={seed + start_idx}")
 
     try:
         cfg = Configurations()
@@ -661,6 +709,7 @@ def main():
     n_skip = 0
     spawned_counts = {n: 0 for n in names}
     labeled_counts = {n: 0 for n in names}
+    idx = start_idx
     for i in range(n_scenes):
         if not simulation_app.is_running():
             break
@@ -708,9 +757,11 @@ def main():
             n_skip += 1
             continue
 
-        split = "val" if (i + 1) > int(n_scenes * (1.0 - val_frac)) else "train"
-        stem = f"{i:05d}"
-        img_path = os.path.join(out_dir, "images", split, f"{stem}.jpg")
+        split = "val" if (idx % val_period == 0) else "train"
+        while _stem_taken(out_dir, f"{idx:05d}"):
+            idx += 1
+        stem = f"{idx:05d}"
+        img_path = os.path.join(out_dir, "images", split, f"{stem}.png")
         lbl_path = os.path.join(out_dir, "labels", split, f"{stem}.txt")
         if not _save_rgb(rgb, img_path):
             n_skip += 1
@@ -724,7 +775,7 @@ def main():
             if cls in labeled_counts:
                 labeled_counts[cls] += 1
         if os.environ.get("EGO_SAVE_OVERLAY", "1") != "0":
-            ov = os.path.join(out_dir, "overlays", split, f"{stem}.jpg")
+            ov = os.path.join(out_dir, "overlays", split, f"{stem}.png")
             try:
                 from PIL import Image, ImageDraw
                 im = Image.fromarray(np.asarray(rgb)[..., :3])
@@ -744,8 +795,9 @@ def main():
         if empty:
             n_empty_ok += 1
         kinds = ",".join(p[0] for p in placed) or "-"
-        log.info(f"scene {i:05d} {split} boxes={kept} types=[{kinds}] "
+        log.info(f"scene {stem} {split} boxes={kept} types=[{kinds}] "
                  f"xy=({xy[0]:.2f},{xy[1]:.2f}) yaw={yaw:.0f}")
+        idx += 1
 
     missing_spawn = [n for n in names if spawned_counts[n] == 0]
     missing_label = [n for n in names if labeled_counts[n] == 0]

@@ -33,11 +33,12 @@ distributions in one `yolo detect train`.
 
 ```bash
 # from simulation-platform/  (stop dataset-gen / manip-trainer first; one GPU)
+# EGO_SCENES = how many *new* frames this run. Existing images are never overwritten;
+# numbering resumes after the highest 00000.jpg/.png already on disk (JPEG+PNG mix is fine).
 HEADLESS=true EGO_SCENES=200 docker compose --profile ego-dataset-gen up
 ```
 
-Writes `trainer_output/ego_yolo/{images,labels,overlays,data.yaml}` with Isaac Replicator
-tight boxes on spawned lost objects. Then:
+Writes `trainer_output/ego_yolo/{images,labels,overlays,data.yaml}` (new frames are **PNG**). Then:
 
 ```bash
 yolo detect train data=trainer_output/ego_yolo/data.yaml model=yolo11x.pt imgsz=640
