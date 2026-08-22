@@ -1,0 +1,2812 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "lf01_mug_table",
+      "tier": "practice",
+      "text": "Find the mug on the picnic table.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "mug",
+        "landmark": "picnic_table",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "lf02_tumbler_bench",
+      "tier": "practice",
+      "text": "Find the tumbler on the bench.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": "bench",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "lf03_tumbler_hydrant",
+      "tier": "practice",
+      "text": "Find the tumbler near the fire hydrant in the parking lot.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": "hydrant",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "lf04_sunblock_table",
+      "tier": "practice",
+      "text": "Find the sunblock beside the picnic table.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "sunblock",
+        "landmark": "picnic_table",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "lf05_umbrella_vending",
+      "tier": "practice",
+      "text": "Find the umbrella beside the vending machine.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "vending_machine",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "lf06_umbrella_fallenbike",
+      "tier": "practice",
+      "text": "Find the umbrella next to the trash can.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "trash_can",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "lf07_pencilcase_table",
+      "tier": "practice",
+      "text": "Find the pencil case near the picnic table.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "pencilcase",
+        "landmark": "picnic_table",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "lf08_umbrella_parking",
+      "tier": "practice",
+      "text": "Find the umbrella dropped in the empty parking space.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": null,
+        "relation": null,
+        "situation": null,
+        "scene_hint": "parking_space"
+      }
+    },
+    {
+      "id": "lf09_tumbler_parking",
+      "tier": "practice",
+      "text": "Find the tumbler dropped in the empty parking space.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": null,
+        "relation": null,
+        "situation": null,
+        "scene_hint": "parking_space"
+      }
+    },
+    {
+      "id": "lf10_tumbler_taxi",
+      "tier": "practice",
+      "text": "Find the tumbler on the road next to the taxi.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": "taxi",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": "road"
+      }
+    },
+    {
+      "id": "lf11_umbrella_taxi",
+      "tier": "practice",
+      "text": "Find the umbrella on the road next to the taxi.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "taxi",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": "road"
+      }
+    },
+    {
+      "id": "hf01_vending_umbrella",
+      "tier": "practice",
+      "text": "After working out I grabbed a drink from the machine and left my umbrella standing next to it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "vending_machine",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "hf02_table_pencilcase",
+      "tier": "practice",
+      "text": "I was taking notes at an outdoor table and left my pencil case behind.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "pencilcase",
+        "landmark": "picnic_table",
+        "relation": null,
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "hf03_table_mug",
+      "tier": "practice",
+      "text": "I was reading with a coffee at an outdoor table and left my mug there.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "mug",
+        "landmark": "picnic_table",
+        "relation": null,
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "hf04_park_sunblock",
+      "tier": "practice",
+      "text": "I was resting in the sun at the park and left the sunblock I had been using.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "sunblock",
+        "landmark": null,
+        "relation": null,
+        "situation": null,
+        "scene_hint": "park"
+      }
+    },
+    {
+      "id": "hf05_bikerack_umbrella",
+      "tier": "practice",
+      "text": "After grabbing a drink from the vending machine I left my umbrella propped against its side.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "vending_machine",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "hf06_fallenbike_umbrella",
+      "tier": "practice",
+      "text": "I stopped to throw something in the bin and left my umbrella leaning against the trash can.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "trash_can",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "hf07_parking_tumbler",
+      "tier": "practice",
+      "text": "I think I dropped my tumbler on the ground as I got out of my car in the parking lot.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": null,
+        "relation": null,
+        "situation": null,
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "hf08_parking_umbrella",
+      "tier": "practice",
+      "text": "Getting out of my car I dropped my umbrella in the empty space next to it; find it in the parking lot.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": null,
+        "relation": null,
+        "situation": null,
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "sar01_trash_sit",
+      "tier": "practice",
+      "text": "Find the person sitting on top of the trash can in the parking lot.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "trash_can",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "sar02_vending_sit",
+      "tier": "practice",
+      "text": "Find the person sitting on top of the vending machine.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "vending_machine",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar03_bench_lie",
+      "tier": "practice",
+      "text": "Find the person lying face-down on the bench near the taxi.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bench",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar04_table_lie",
+      "tier": "practice",
+      "text": "Find the person lying on top of the picnic table.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "picnic_table",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar06_parking_collapsed",
+      "tier": "practice",
+      "text": "Find the person collapsed on the parking lot floor.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": null,
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "sar07_parking_prone",
+      "tier": "practice",
+      "text": "Find the person lying face-down and motionless in the parking lot.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": null,
+        "relation": null,
+        "situation": "accident",
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "sar08_fallenbike_down",
+      "tier": "practice",
+      "text": "Find the person fallen on the ground next to the toppled bicycle.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bicycle",
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar09_park_bending",
+      "tier": "practice",
+      "text": "Find the person bent over and motionless near the trash can in the park rest area.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "trash_can",
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": "park"
+      }
+    },
+    {
+      "id": "sarH1_park_needhelp",
+      "tier": "practice",
+      "text": "People are relaxing at the park and one is even lying on the grass; find the one near the trash can who is bent over and not moving and actually needs help.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "trash_can",
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": "grass"
+      }
+    },
+    {
+      "id": "sarH2_parking_bikeacc",
+      "tier": "practice",
+      "text": "In the parking lot a person is down next to a bicycle and looks like they had an accident; find them.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bicycle",
+        "relation": null,
+        "situation": "accident",
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "sarH3_climbed_machine",
+      "tier": "practice",
+      "text": "Someone is up where people should not be; find the person who climbed on top of the drink machine.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "vending_machine",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sarH4_parking_trashsit",
+      "tier": "practice",
+      "text": "In the parking lot, find the person who climbed up and is sitting on top of the trash can.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "trash_can",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "sarH5_taxi_benchlie",
+      "tier": "practice",
+      "text": "Near the taxi, find the person lying down on top of the bench.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bench",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sarH6_most_critical",
+      "tier": "practice",
+      "text": "Several people are in the parking lot; one is completely face-down and immobile; find the most critical one.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": null,
+        "relation": null,
+        "situation": "accident",
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "rt01_parking_tumbler",
+      "tier": "practice",
+      "text": "Pick up the tumbler dropped on the parking lot floor and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "tumbler",
+        "landmark": null,
+        "relation": null,
+        "situation": null,
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "rt02_parking_umbrella",
+      "tier": "practice",
+      "text": "Pick up the umbrella in the empty parking space and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "umbrella",
+        "landmark": null,
+        "relation": null,
+        "situation": null,
+        "scene_hint": "parking_space"
+      }
+    },
+    {
+      "id": "rt03_vending_umbrella",
+      "tier": "practice",
+      "text": "Pick up the umbrella beside the vending machine and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "umbrella",
+        "landmark": "vending_machine",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "rt04_taxi_tumbler",
+      "tier": "practice",
+      "text": "Pick up the tumbler on the road next to the taxi and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "tumbler",
+        "landmark": "taxi",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": "road"
+      }
+    },
+    {
+      "id": "rt04b_taxi_umbrella",
+      "tier": "practice",
+      "text": "Pick up the umbrella on the road next to the taxi and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "umbrella",
+        "landmark": "taxi",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": "road"
+      }
+    },
+    {
+      "id": "rtC2_fallenbike_pencil",
+      "tier": "practice",
+      "text": "Pick up the pencil case near the picnic table and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "pencilcase",
+        "landmark": "picnic_table",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_001",
+      "tier": "direct",
+      "text": "Please find the master chef can near the bench.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "master_chef_can",
+        "landmark": "bench",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_002",
+      "tier": "direct",
+      "text": "Please pick up the cracker box in front of the fire hydrant and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "cracker_box",
+        "landmark": "hydrant",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_003",
+      "tier": "direct",
+      "text": "Please find the mug on top of the picnic table.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "mug",
+        "landmark": "picnic_table",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_004",
+      "tier": "direct",
+      "text": "Please pick up the wood block beside the vending machine and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "wood_block",
+        "landmark": "vending_machine",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_005",
+      "tier": "direct",
+      "text": "Please find the cola can to the left of the police car.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cola_can",
+        "landmark": "police_car",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_006",
+      "tier": "direct",
+      "text": "Please pick up the disposable cup above the normal car two and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "disposable_cup",
+        "landmark": "normal_car_2",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_007",
+      "tier": "direct",
+      "text": "Please find the juice behind the sports car two.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "juice",
+        "landmark": "sports_car_2",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_008",
+      "tier": "direct",
+      "text": "Please pick up the tissue to the right of the taxi and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "tissue",
+        "landmark": "taxi",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_009",
+      "tier": "direct",
+      "text": "Please find the pencil case near the bicycle.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "pencilcase",
+        "landmark": "bicycle",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_010",
+      "tier": "direct",
+      "text": "Please pick up the tumbler in front of the kick scooter and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "tumbler",
+        "landmark": "kick_scooter",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_011",
+      "tier": "direct",
+      "text": "Please find the umbrella on top of the postbox.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "postbox",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_012",
+      "tier": "direct",
+      "text": "Please pick up the long umbrella beside the trash can and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "long_umbrella",
+        "landmark": "trash_can",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_013",
+      "tier": "direct",
+      "text": "Please find the sunblock to the left of the normal car one.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "sunblock",
+        "landmark": "normal_car_1",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_014",
+      "tier": "direct",
+      "text": "Please pick up the master chef can above the sports car and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "master_chef_can",
+        "landmark": "sports_car",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_015",
+      "tier": "direct",
+      "text": "Please find the cracker box behind the SUV.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cracker_box",
+        "landmark": "suv",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_016",
+      "tier": "direct",
+      "text": "Please pick up the mug to the right of the bench and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "mug",
+        "landmark": "bench",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_017",
+      "tier": "direct",
+      "text": "Please find the wood block near the fire hydrant.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "wood_block",
+        "landmark": "hydrant",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_018",
+      "tier": "direct",
+      "text": "Please pick up the cola can in front of the picnic table and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "cola_can",
+        "landmark": "picnic_table",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_019",
+      "tier": "direct",
+      "text": "Please find the disposable cup on top of the vending machine.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "disposable_cup",
+        "landmark": "vending_machine",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_020",
+      "tier": "direct",
+      "text": "Please pick up the juice beside the police car and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "juice",
+        "landmark": "police_car",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_021",
+      "tier": "direct",
+      "text": "Please find the tissue to the left of the normal car two.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tissue",
+        "landmark": "normal_car_2",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_022",
+      "tier": "direct",
+      "text": "Please pick up the pencil case above the sports car two and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "pencilcase",
+        "landmark": "sports_car_2",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_023",
+      "tier": "direct",
+      "text": "Please find the tumbler behind the taxi.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": "taxi",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_024",
+      "tier": "direct",
+      "text": "Please pick up the umbrella to the right of the bicycle and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "umbrella",
+        "landmark": "bicycle",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_025",
+      "tier": "direct",
+      "text": "Please find the long umbrella near the kick scooter.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "long_umbrella",
+        "landmark": "kick_scooter",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_026",
+      "tier": "direct",
+      "text": "Please pick up the sunblock in front of the postbox and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "sunblock",
+        "landmark": "postbox",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_027",
+      "tier": "direct",
+      "text": "Please find the master chef can on top of the trash can.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "master_chef_can",
+        "landmark": "trash_can",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_028",
+      "tier": "direct",
+      "text": "Please pick up the cracker box beside the normal car one and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "cracker_box",
+        "landmark": "normal_car_1",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_029",
+      "tier": "direct",
+      "text": "Please find the mug to the left of the sports car.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "mug",
+        "landmark": "sports_car",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_030",
+      "tier": "direct",
+      "text": "Please pick up the wood block above the SUV and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "wood_block",
+        "landmark": "suv",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_031",
+      "tier": "direct",
+      "text": "Please find the cola can behind the bench.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cola_can",
+        "landmark": "bench",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_032",
+      "tier": "direct",
+      "text": "Please pick up the disposable cup to the right of the fire hydrant and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "disposable_cup",
+        "landmark": "hydrant",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_033",
+      "tier": "direct",
+      "text": "Please find the juice near the picnic table.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "juice",
+        "landmark": "picnic_table",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_034",
+      "tier": "direct",
+      "text": "Please pick up the tissue in front of the vending machine and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "tissue",
+        "landmark": "vending_machine",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_035",
+      "tier": "direct",
+      "text": "Please find the pencil case on top of the police car.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "pencilcase",
+        "landmark": "police_car",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_036",
+      "tier": "direct",
+      "text": "Please pick up the tumbler beside the normal car two and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "tumbler",
+        "landmark": "normal_car_2",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_037",
+      "tier": "direct",
+      "text": "Please find the umbrella to the left of the sports car two.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "sports_car_2",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_038",
+      "tier": "direct",
+      "text": "Please pick up the long umbrella above the taxi and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "long_umbrella",
+        "landmark": "taxi",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_039",
+      "tier": "direct",
+      "text": "Please find the sunblock behind the bicycle.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "sunblock",
+        "landmark": "bicycle",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_040",
+      "tier": "direct",
+      "text": "Please pick up the master chef can to the right of the kick scooter and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "master_chef_can",
+        "landmark": "kick_scooter",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_041",
+      "tier": "direct",
+      "text": "Please find the cracker box near the postbox.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cracker_box",
+        "landmark": "postbox",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_042",
+      "tier": "direct",
+      "text": "Please pick up the mug in front of the trash can and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "mug",
+        "landmark": "trash_can",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_043",
+      "tier": "direct",
+      "text": "Please find the wood block on top of the normal car one.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "wood_block",
+        "landmark": "normal_car_1",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_044",
+      "tier": "direct",
+      "text": "Please pick up the cola can beside the sports car and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "cola_can",
+        "landmark": "sports_car",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_045",
+      "tier": "direct",
+      "text": "Please find the disposable cup to the left of the SUV.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "disposable_cup",
+        "landmark": "suv",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_046",
+      "tier": "direct",
+      "text": "Please pick up the juice above the bench and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "juice",
+        "landmark": "bench",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_047",
+      "tier": "direct",
+      "text": "Please find the tissue behind the fire hydrant.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tissue",
+        "landmark": "hydrant",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_048",
+      "tier": "direct",
+      "text": "Please pick up the pencil case to the right of the picnic table and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "pencilcase",
+        "landmark": "picnic_table",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_049",
+      "tier": "direct",
+      "text": "Please find the tumbler near the vending machine.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": "vending_machine",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_050",
+      "tier": "direct",
+      "text": "Please pick up the umbrella in front of the police car and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "umbrella",
+        "landmark": "police_car",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_051",
+      "tier": "direct",
+      "text": "Please find the long umbrella on top of the normal car two.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "long_umbrella",
+        "landmark": "normal_car_2",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_052",
+      "tier": "direct",
+      "text": "Please pick up the sunblock beside the sports car two and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "sunblock",
+        "landmark": "sports_car_2",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_053",
+      "tier": "direct",
+      "text": "Please find the master chef can to the left of the taxi.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "master_chef_can",
+        "landmark": "taxi",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_054",
+      "tier": "direct",
+      "text": "Please pick up the cracker box above the bicycle and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "cracker_box",
+        "landmark": "bicycle",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_055",
+      "tier": "direct",
+      "text": "Please find the mug behind the kick scooter.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "mug",
+        "landmark": "kick_scooter",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_056",
+      "tier": "direct",
+      "text": "Please pick up the wood block to the right of the postbox and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "wood_block",
+        "landmark": "postbox",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_057",
+      "tier": "direct",
+      "text": "Please find the cola can near the trash can.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cola_can",
+        "landmark": "trash_can",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_058",
+      "tier": "direct",
+      "text": "Please pick up the disposable cup in front of the normal car one and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "disposable_cup",
+        "landmark": "normal_car_1",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_059",
+      "tier": "direct",
+      "text": "Please find the juice on top of the sports car.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "juice",
+        "landmark": "sports_car",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "direct_060",
+      "tier": "direct",
+      "text": "Please pick up the tissue beside the SUV and bring it to the owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "tissue",
+        "landmark": "suv",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_001",
+      "tier": "aliases",
+      "text": "Could you locate the chef can beside the bench, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "master_chef_can",
+        "landmark": "bench",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_002",
+      "tier": "aliases",
+      "text": "Could you locate the cracker box behind the outdoor table, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cracker_box",
+        "landmark": "picnic_table",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_003",
+      "tier": "aliases",
+      "text": "Could you locate the coffee mug in front of the police car, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "mug",
+        "landmark": "police_car",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_004",
+      "tier": "aliases",
+      "text": "Could you locate the wooden block to the left of the sports car two, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "wood_block",
+        "landmark": "sports_car_2",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_005",
+      "tier": "aliases",
+      "text": "Could you locate the soda can to the right of the bike, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cola_can",
+        "landmark": "bicycle",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_006",
+      "tier": "aliases",
+      "text": "Could you locate the paper cup on top of the mailbox, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "disposable_cup",
+        "landmark": "postbox",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_007",
+      "tier": "aliases",
+      "text": "Could you locate the juice box above the normal car one, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "juice",
+        "landmark": "normal_car_1",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_008",
+      "tier": "aliases",
+      "text": "Could you locate the tissue pack near the SUV, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tissue",
+        "landmark": "suv",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_009",
+      "tier": "aliases",
+      "text": "Could you locate the pencilcase beside the hydrant, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "pencilcase",
+        "landmark": "hydrant",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_010",
+      "tier": "aliases",
+      "text": "Could you locate the travel tumbler behind the drink machine, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": "vending_machine",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_011",
+      "tier": "aliases",
+      "text": "Could you locate the umbrella in front of the normal car two, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "normal_car_2",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_012",
+      "tier": "aliases",
+      "text": "Could you locate the long umbrella to the left of the cab, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "long_umbrella",
+        "landmark": "taxi",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_013",
+      "tier": "aliases",
+      "text": "Could you locate the sunscreen to the right of the scooter, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "sunblock",
+        "landmark": "kick_scooter",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_014",
+      "tier": "aliases",
+      "text": "Could you locate the chef can on top of the bin, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "master_chef_can",
+        "landmark": "trash_can",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_015",
+      "tier": "aliases",
+      "text": "Could you locate the cracker box above the sports car, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cracker_box",
+        "landmark": "sports_car",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_016",
+      "tier": "aliases",
+      "text": "Could you locate the coffee mug near the bench, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "mug",
+        "landmark": "bench",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_017",
+      "tier": "aliases",
+      "text": "Could you locate the wooden block beside the outdoor table, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "wood_block",
+        "landmark": "picnic_table",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_018",
+      "tier": "aliases",
+      "text": "Could you locate the soda can behind the police car, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cola_can",
+        "landmark": "police_car",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_019",
+      "tier": "aliases",
+      "text": "Could you locate the paper cup in front of the sports car two, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "disposable_cup",
+        "landmark": "sports_car_2",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "alias_020",
+      "tier": "aliases",
+      "text": "Could you locate the juice box to the left of the bike, please?",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "juice",
+        "landmark": "bicycle",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_001",
+      "tier": "narrative",
+      "text": "I may have left my wood block behind the bicycle after class. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "wood_block",
+        "landmark": "bicycle",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_002",
+      "tier": "narrative",
+      "text": "I may have left my cola can in front of the vending machine after lunch. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cola_can",
+        "landmark": "vending_machine",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_003",
+      "tier": "narrative",
+      "text": "I may have left my disposable cup to the left of the sports car on my way across campus. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "disposable_cup",
+        "landmark": "sports_car",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_004",
+      "tier": "narrative",
+      "text": "I may have left my juice to the right of the bicycle while waiting outside. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "juice",
+        "landmark": "bicycle",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_005",
+      "tier": "narrative",
+      "text": "I may have left my tissue on top of the vending machine after meeting a friend. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tissue",
+        "landmark": "vending_machine",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_006",
+      "tier": "narrative",
+      "text": "I may have left my pencil case above the sports car after class. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "pencilcase",
+        "landmark": "sports_car",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_007",
+      "tier": "narrative",
+      "text": "I may have left my tumbler near the bicycle after lunch. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": "bicycle",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_008",
+      "tier": "narrative",
+      "text": "I may have left my umbrella beside the vending machine on my way across campus. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "vending_machine",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_009",
+      "tier": "narrative",
+      "text": "I may have left my long umbrella behind the sports car while waiting outside. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "long_umbrella",
+        "landmark": "sports_car",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_010",
+      "tier": "narrative",
+      "text": "I may have left my sunblock in front of the bicycle after meeting a friend. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "sunblock",
+        "landmark": "bicycle",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_011",
+      "tier": "narrative",
+      "text": "I may have left my master chef can to the left of the vending machine after class. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "master_chef_can",
+        "landmark": "vending_machine",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_012",
+      "tier": "narrative",
+      "text": "I may have left my cracker box to the right of the sports car after lunch. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cracker_box",
+        "landmark": "sports_car",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_013",
+      "tier": "narrative",
+      "text": "I may have left my mug on top of the bicycle on my way across campus. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "mug",
+        "landmark": "bicycle",
+        "relation": "on",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_014",
+      "tier": "narrative",
+      "text": "I may have left my wood block above the vending machine while waiting outside. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "wood_block",
+        "landmark": "vending_machine",
+        "relation": "above",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_015",
+      "tier": "narrative",
+      "text": "I may have left my cola can near the sports car after meeting a friend. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "cola_can",
+        "landmark": "sports_car",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_016",
+      "tier": "narrative",
+      "text": "I may have left my disposable cup beside the bicycle after class. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "disposable_cup",
+        "landmark": "bicycle",
+        "relation": "beside",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_017",
+      "tier": "narrative",
+      "text": "I may have left my juice behind the vending machine after lunch. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "juice",
+        "landmark": "vending_machine",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_018",
+      "tier": "narrative",
+      "text": "I may have left my tissue in front of the sports car on my way across campus. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tissue",
+        "landmark": "sports_car",
+        "relation": "front",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_019",
+      "tier": "narrative",
+      "text": "I may have left my pencil case to the left of the bicycle while waiting outside. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "pencilcase",
+        "landmark": "bicycle",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "narrative_020",
+      "tier": "narrative",
+      "text": "I may have left my tumbler to the right of the vending machine after meeting a friend. Please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "tumbler",
+        "landmark": "vending_machine",
+        "relation": "right",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_001",
+      "tier": "sar",
+      "text": "Find the person sitting on top of the trash can.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "trash_can",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_002",
+      "tier": "sar",
+      "text": "Locate someone who climbed on top of the vending machine.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "vending_machine",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_003",
+      "tier": "sar",
+      "text": "Find the person collapsed in the parking lot.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": null,
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "sar_probe_004",
+      "tier": "sar",
+      "text": "Find the person lying face-down and motionless on the road.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": null,
+        "relation": null,
+        "situation": "accident",
+        "scene_hint": "road"
+      }
+    },
+    {
+      "id": "sar_probe_005",
+      "tier": "sar",
+      "text": "Find the person bent over and not moving near the bin.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "trash_can",
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_006",
+      "tier": "sar",
+      "text": "Locate the person lying on top of the picnic table.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "picnic_table",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_007",
+      "tier": "sar",
+      "text": "Find the person who fell on the ground next to the bicycle.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bicycle",
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_008",
+      "tier": "sar",
+      "text": "A person near the bike looks like they had an accident; find them.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bicycle",
+        "relation": null,
+        "situation": "accident",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_009",
+      "tier": "sar",
+      "text": "Find the person walking normally near the bench.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bench",
+        "relation": null,
+        "situation": "normal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_010",
+      "tier": "sar",
+      "text": "Someone needs help beside the postbox; locate the person.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "postbox",
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_011",
+      "tier": "sar",
+      "text": "Find the person sitting on top of the trash can right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "trash_can",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_012",
+      "tier": "sar",
+      "text": "Locate someone who climbed on top of the vending machine right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "vending_machine",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_013",
+      "tier": "sar",
+      "text": "Find the person collapsed in the parking lot right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": null,
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": "parking"
+      }
+    },
+    {
+      "id": "sar_probe_014",
+      "tier": "sar",
+      "text": "Find the person lying face-down and motionless on the road right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": null,
+        "relation": null,
+        "situation": "accident",
+        "scene_hint": "road"
+      }
+    },
+    {
+      "id": "sar_probe_015",
+      "tier": "sar",
+      "text": "Find the person bent over and not moving near the bin right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "trash_can",
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_016",
+      "tier": "sar",
+      "text": "Locate the person lying on top of the picnic table right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "picnic_table",
+        "relation": null,
+        "situation": "abnormal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_017",
+      "tier": "sar",
+      "text": "Find the person who fell on the ground next to the bicycle right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bicycle",
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_018",
+      "tier": "sar",
+      "text": "A person near the bike looks like they had an accident; find them right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bicycle",
+        "relation": null,
+        "situation": "accident",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_019",
+      "tier": "sar",
+      "text": "Find the person walking normally near the bench right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "bench",
+        "relation": null,
+        "situation": "normal",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "sar_probe_020",
+      "tier": "sar",
+      "text": "Someone needs help beside the postbox; locate the person right away.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "person",
+        "landmark": "postbox",
+        "relation": null,
+        "situation": "emergency",
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "disamb_correction",
+      "tier": "disambiguation",
+      "text": "Ignore the cola can by the bench; find the umbrella near the bicycle.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "umbrella",
+        "landmark": "bicycle",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "disamb_owner",
+      "tier": "disambiguation",
+      "text": "Bring the tumbler near the bench to its owner.",
+      "expected_intent": "bring",
+      "expected": {
+        "intent": "bring",
+        "target_type": "tumbler",
+        "landmark": "bench",
+        "relation": "near",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "disamb_left_relation",
+      "tier": "disambiguation",
+      "text": "I left my mug on the left side of the bench; please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "mug",
+        "landmark": "bench",
+        "relation": "left",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "disamb_behind_plain",
+      "tier": "disambiguation",
+      "text": "I left my pencil case behind; please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "pencilcase",
+        "landmark": null,
+        "relation": null,
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "disamb_behind_relation",
+      "tier": "disambiguation",
+      "text": "I left my pencil case behind the vending machine; please find it.",
+      "expected_intent": "find",
+      "expected": {
+        "intent": "find",
+        "target_type": "pencilcase",
+        "landmark": "vending_machine",
+        "relation": "behind",
+        "situation": null,
+        "scene_hint": null
+      }
+    },
+    {
+      "id": "error_empty",
+      "tier": "invalid",
+      "text": "   ",
+      "expected_intent": "find",
+      "expected_error": "empty"
+    },
+    {
+      "id": "error_unknown_target",
+      "tier": "invalid",
+      "text": "Find the laptop near the bench.",
+      "expected_intent": "find",
+      "expected_error": "unknown_target"
+    },
+    {
+      "id": "error_multiple_targets",
+      "tier": "invalid",
+      "text": "Find the mug or tumbler near the bench.",
+      "expected_intent": "find",
+      "expected_error": "ambiguous_target"
+    },
+    {
+      "id": "error_person_or_object",
+      "tier": "invalid",
+      "text": "Find the person or the umbrella near the bench.",
+      "expected_intent": "find",
+      "expected_error": "ambiguous_target"
+    },
+    {
+      "id": "error_relation_conflict",
+      "tier": "invalid",
+      "text": "Find the mug near and behind the bench.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_situation_conflict",
+      "tier": "invalid",
+      "text": "Find the person walking normally while sitting on top of the trash can.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_situation"
+    },
+    {
+      "id": "error_unknown_situation",
+      "tier": "invalid",
+      "text": "Find the person near the bench.",
+      "expected_intent": "find",
+      "expected_error": "unknown_situation"
+    },
+    {
+      "id": "error_intent_find_mismatch",
+      "tier": "invalid",
+      "text": "Find the mug near the bench.",
+      "expected_intent": "bring",
+      "expected_error": "intent_mismatch"
+    },
+    {
+      "id": "error_intent_bring_mismatch",
+      "tier": "invalid",
+      "text": "Bring the mug near the bench to the owner.",
+      "expected_intent": "find",
+      "expected_error": "intent_mismatch"
+    },
+    {
+      "id": "error_ambiguous_landmark",
+      "tier": "invalid",
+      "text": "Find the mug by the bench and the taxi.",
+      "expected_intent": "find",
+      "expected_error": "ambiguous_landmark"
+    },
+    {
+      "id": "reference_reordered_location",
+      "tier": "reference",
+      "text": "Beside the vending machine is where I set down my mug after buying a drink. Could you locate it?",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "vending_machine", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "reference_implicit_find",
+      "tier": "reference",
+      "text": "My umbrella should still be near the picnic table.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "picnic_table", "relation": "near", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "reference_implicit_bring_owner",
+      "tier": "reference",
+      "text": "The tumbler beside the bench needs to go back to its owner.",
+      "expected_intent": "bring",
+      "expected": {"intent": "bring", "target_type": "tumbler", "landmark": "bench", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "reference_it_antecedent",
+      "tier": "reference",
+      "text": "I set my mug beside the vending machine. Can you find it?",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "vending_machine", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "reference_incidental_person",
+      "tier": "reference",
+      "text": "Find the umbrella someone left near the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "bench", "relation": "near", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "reference_incidental_object_person_target",
+      "tier": "reference",
+      "text": "Find the person who dropped a mug and then collapsed beside the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "bench", "relation": null, "situation": "emergency", "scene_hint": null}
+    },
+    {
+      "id": "reference_incidental_umbrella_person_target",
+      "tier": "reference",
+      "text": "Find someone collapsed near the bench while holding an umbrella.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "bench", "relation": null, "situation": "emergency", "scene_hint": null}
+    },
+    {
+      "id": "reference_long_umbrella_postbox",
+      "tier": "reference",
+      "text": "Please locate the long umbrella behind the postbox.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "long_umbrella", "landmark": "postbox", "relation": "behind", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "reference_tissue_story",
+      "tier": "reference",
+      "text": "I checked the mail and may have left my tissue to the right of the postbox; could you find it?",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "tissue", "landmark": "postbox", "relation": "right", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "reference_machine_pronoun",
+      "tier": "reference",
+      "text": "After buying a drink from the machine, I set my mug beside it. Please locate the mug.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "vending_machine", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "morphology_plural_objects_landmarks",
+      "tier": "morphology",
+      "text": "Locate the mugs beside the benches.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "bench", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "morphology_plural_sar_landmark",
+      "tier": "morphology",
+      "text": "Find the person walking normally near the bicycles.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "bicycle", "relation": null, "situation": "normal", "scene_hint": null}
+    },
+    {
+      "id": "morphology_plural_aliases",
+      "tier": "morphology",
+      "text": "Please locate the umbrellas beside the vending machines.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "vending_machine", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "correction_leading_distractor",
+      "tier": "correction",
+      "text": "Not the mug near the bench—the umbrella beside the bicycle is mine; find it.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "bicycle", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "correction_trailing_distractor",
+      "tier": "correction",
+      "text": "Find the mug near the bench, not the tumbler near the taxi.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "bench", "relation": "near", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "correction_intent_scope",
+      "tier": "correction",
+      "text": "Do not bring the mug; find the umbrella beside the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "bench", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "attachment_leading_context",
+      "tier": "attachment",
+      "text": "Near the taxi, find the mug behind the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "bench", "relation": "behind", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "attachment_support_before_context",
+      "tier": "attachment",
+      "text": "Find the mug on the bench near the taxi.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "bench", "relation": "on", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "attachment_ordinary_over",
+      "tier": "attachment",
+      "text": "I tripped over the bench and dropped my mug near it.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "bench", "relation": "near", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "sar_paraphrase_fallen_beside",
+      "tier": "sar",
+      "text": "Find the person who has fallen beside the bicycle.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "bicycle", "relation": null, "situation": "emergency", "scene_hint": null}
+    },
+    {
+      "id": "sar_paraphrase_standing_normally",
+      "tier": "sar",
+      "text": "Find the person standing normally beside the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "bench", "relation": null, "situation": "normal", "scene_hint": null}
+    },
+    {
+      "id": "sar_paraphrase_reversed_cues",
+      "tier": "sar",
+      "text": "Find the person motionless and face-down in the parking lot.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": null, "relation": null, "situation": "accident", "scene_hint": "parking"}
+    },
+    {
+      "id": "sar_paraphrase_atop",
+      "tier": "sar",
+      "text": "Locate the person sitting atop the trash can.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "trash_can", "relation": null, "situation": "abnormal", "scene_hint": null}
+    },
+    {
+      "id": "sar_paraphrase_normal_distractor",
+      "tier": "sar",
+      "text": "Several people are relaxing; locate the one bent over and not moving beside the postbox.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "postbox", "relation": null, "situation": "emergency", "scene_hint": null}
+    },
+    {
+      "id": "surface_asr_fillers",
+      "tier": "surface",
+      "text": "Uh, please find—the pencil-case... beside the post box.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "pencilcase", "landmark": "postbox", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "surface_caps_separators",
+      "tier": "surface",
+      "text": "FIND THE SUN-BLOCK / NEAR THE FIRE-HYDRANT",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "sunblock", "landmark": "hydrant", "relation": "near", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "error_unknown_incidental_person",
+      "tier": "invalid",
+      "text": "Someone left the laptop near the bench; find it.",
+      "expected_intent": "find",
+      "expected_error": "unknown_target"
+    },
+    {
+      "id": "error_conflicting_intents",
+      "tier": "invalid",
+      "text": "Find and bring the mug near the bench.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_intent"
+    },
+    {
+      "id": "error_conflicting_explicit_situations",
+      "tier": "invalid",
+      "text": "Find the person who had an accident and then collapsed.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_situation"
+    },
+    {
+      "id": "error_coordinated_alternatives",
+      "tier": "invalid",
+      "text": "Find either the mug near the bench or the tumbler near the taxi.",
+      "expected_intent": "find",
+      "expected_error": "ambiguous_target"
+    },
+    {
+      "id": "error_unknown_landmark",
+      "tier": "invalid",
+      "text": "Find the mug near the fountain.",
+      "expected_intent": "find",
+      "expected_error": "unknown_landmark"
+    },
+    {
+      "id": "error_unresolved_landmark_pronoun",
+      "tier": "invalid",
+      "text": "Find the mug on top of it.",
+      "expected_intent": "find",
+      "expected_error": "unknown_landmark"
+    },
+    {
+      "id": "reference_person_with_multiple_incidental_objects",
+      "tier": "reference",
+      "text": "Find the person collapsed beside the bench holding a mug and an umbrella.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "bench", "relation": null, "situation": "emergency", "scene_hint": null}
+    },
+    {
+      "id": "correction_negated_target_first",
+      "tier": "correction",
+      "text": "Find not the mug, but the umbrella near the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "bench", "relation": "near", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "correction_negated_middle_target",
+      "tier": "correction",
+      "text": "Find the umbrella, not the mug, beside the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "bench", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "attachment_next_to_leading_context",
+      "tier": "attachment",
+      "text": "Next to the taxi, find the mug behind the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "bench", "relation": "behind", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "attachment_incidental_leaning",
+      "tier": "attachment",
+      "text": "I was leaning against the vending machine when I dropped my mug near the bench. Find it.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "bench", "relation": "near", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "sar_normal_car_emergency",
+      "tier": "sar",
+      "text": "Find the person collapsed near the normal car one.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "normal_car_1", "relation": null, "situation": "emergency", "scene_hint": null}
+    },
+    {
+      "id": "sar_normal_car_abnormal",
+      "tier": "sar",
+      "text": "Find the person lying on top of the normal car two.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": "normal_car_2", "relation": null, "situation": "abnormal", "scene_hint": null}
+    },
+    {
+      "id": "error_incidental_person_without_action",
+      "tier": "invalid",
+      "text": "Someone walking normally left the laptop near the bench.",
+      "expected_intent": "find",
+      "expected_error": "unknown_target"
+    },
+    {
+      "id": "error_comma_separated_targets",
+      "tier": "invalid",
+      "text": "Find the mug, the tumbler near the bench.",
+      "expected_intent": "find",
+      "expected_error": "ambiguous_target"
+    },
+    {
+      "id": "error_sequential_targets",
+      "tier": "invalid",
+      "text": "Find the mug then the tumbler near the bench.",
+      "expected_intent": "find",
+      "expected_error": "ambiguous_target"
+    },
+    {
+      "id": "error_misspelled_landmark",
+      "tier": "invalid",
+      "text": "Find the mug near the bycicls.",
+      "expected_intent": "find",
+      "expected_error": "unknown_landmark"
+    },
+    {
+      "id": "error_relations_across_landmarks_near_first",
+      "tier": "invalid",
+      "text": "Find the mug near the bench and behind the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_relations_across_landmarks_behind_first",
+      "tier": "invalid",
+      "text": "Find the mug behind the bench and near the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_alternative_relations_across_landmarks",
+      "tier": "invalid",
+      "text": "Find the mug near the bench or behind the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_comma_relations_across_landmarks",
+      "tier": "invalid",
+      "text": "Find the mug near the bench, behind the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_while_relations_across_landmarks",
+      "tier": "invalid",
+      "text": "Find the mug near the bench while behind the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_as_well_as_relations_across_landmarks",
+      "tier": "invalid",
+      "text": "Find the mug near the bench as well as behind the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "correction_ascii_contraction",
+      "tier": "correction",
+      "text": "Don't bring the mug; find the umbrella beside the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "bench", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "correction_curly_contraction",
+      "tier": "correction",
+      "text": "Don’t bring the mug; find the umbrella beside the bench.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "bench", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "reference_pre_action_attachment",
+      "tier": "reference",
+      "text": "My mug is beside the taxi; the person near the bench saw it. Please find the mug.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "taxi", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "reference_reordered_two_landmarks",
+      "tier": "reference",
+      "text": "Near the bench a person saw my mug beside the taxi; locate it.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "taxi", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "sar_completely_still",
+      "tier": "sar",
+      "text": "Find the person face down and completely still on the road.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": null, "relation": null, "situation": "accident", "scene_hint": "road"}
+    },
+    {
+      "id": "sar_unresponsive",
+      "tier": "sar",
+      "text": "Find the person face down and unresponsive in the parking lot.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "person", "landmark": null, "relation": null, "situation": "accident", "scene_hint": "parking"}
+    },
+    {
+      "id": "error_misspelled_target",
+      "tier": "invalid",
+      "text": "Find the umberlla near the bench.",
+      "expected_intent": "find",
+      "expected_error": "unknown_target"
+    },
+    {
+      "id": "error_support_then_behind_context",
+      "tier": "invalid",
+      "text": "Find the mug on the bench behind the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_support_then_beside_context",
+      "tier": "invalid",
+      "text": "Find the mug on the bench beside the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_support_then_above_context",
+      "tier": "invalid",
+      "text": "Find the mug on the bench above the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_support_then_around_context",
+      "tier": "invalid",
+      "text": "Find the mug on the bench around the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "attachment_leaning_after_context",
+      "tier": "attachment",
+      "text": "Near the bench, find the umbrella leaning against the vending machine.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "umbrella", "landmark": "vending_machine", "relation": "beside", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "error_left_side_then_near_context",
+      "tier": "invalid",
+      "text": "Find the mug to the left side of the bench near the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "error_right_side_then_near_context",
+      "tier": "invalid",
+      "text": "Find the mug on the right side of the bench near the taxi.",
+      "expected_intent": "find",
+      "expected_error": "conflicting_relation"
+    }
+  ]
+}
