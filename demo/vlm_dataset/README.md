@@ -20,9 +20,20 @@ python3 demo/vlm_dataset/cctv_gt_to_qwen.py \
   --out trainer_output/qwen2vl_cctv
 ```
 
-The converter prints `hard=` / `hard_frac=` (same-class object clones) and
-per-class landmark and object counts. If `car` / `police_car` / `sports_car`
-are tiny, raise `TRAINER_VEHICLE_INCLUSION_PROBABILITY` — do not spawn 4-6 SUVs.
+The converter prints `hard=` / `hard_frac=` (same-class object clones),
+SAR situation counts, and per-class landmark/object histograms.
+
+SAR rows use `target_type: person` and `situation` (`person_sitting` is always
+`normal`). Object rows still use `relation`. Same dump also converts to YOLO:
+
+```bash
+python3 demo/vlm_dataset/cctv_gt_to_yolo.py \
+  --in trainer_output/marc2026_chungmu \
+  --out trainer_output/yolo_cctv
+```
+
+Use the same `--val-frac` on both so train/val scenes match. YOLO classes are
+poses (`person_crouching`), not identity meshes. Do **not** mix ego-cam frames.
 
 Assistant text is a `GroundingResult` JSON (`camera_id`, `target_type`,
 `landmark`, `relation`, `anchor_coord`, `target_coord`) so it matches

@@ -6,6 +6,8 @@ and writes LLaMA-Factory / official Qwen2-VL JSONL.
 
 Each row is one referring-expression grounded in a GroundingResult payload
 (camera_id, target_type, landmark, relation, target_coord, anchor_coord).
+SAR (person) rows use target_type "person" and interpretation.situation
+(accident / emergency / abnormal / normal). person_sitting is always normal.
 
 When several instances of the same class are in frame, the landmark is what
 disambiguates — that is the VLM signal YOLO does not need.
@@ -61,8 +63,40 @@ TEMPLATES = {
     ),
 }
 
-# Skip people / pose types — SAR is a different instruction family.
+# Skip people / pose types in the lost-object family — SAR is a second row type.
 _PERSON_PREFIXES = ("person_", "male_", "female_", "professor_", "student_")
+
+# Spoken pose fragments for SAR prompts (GT class is the pose, not identity).
+_SAR_POSE_SPEAK = {
+    "person_prone": "lying face-down",
+    "person_lying_down": "lying down",
+    "person_bending": "bent over",
+    "person_crouching": "crouched",
+    "person_reclining": "reclining",
+    "person_sitting": "sitting",
+    "person_reaching": "reaching",
+    "person_walking": "walking",
+    "person_walking_away": "walking away",
+}
+
+# Heuristic pose -> situation. person_sitting is always normal.
+_SAR_SITUATION = {
+    "person_prone": "accident",
+    "person_lying_down": "accident",
+    "person_bending": "emergency",
+    "person_crouching": "emergency",
+    "person_reclining": "abnormal",
+    "person_sitting": "normal",
+    "person_reaching": "normal",
+    "person_walking": "normal",
+    "person_walking_away": "normal",
+}
+
+SAR_TEMPLATES = (
+    "Find the person {pose} near the {lm}.",
+    "Find the person {pose} beside the {lm}.",
+    "Locate the person {pose} near the {lm}.",
+)
 
 
 def _display(name: str) -> str:
@@ -78,6 +112,22 @@ def _is_person(cls: str) -> bool:
 
 def _is_umbrella(cls: str) -> bool:
     return "umbrella" in (cls or "").lower()
+
+
+def _sar_pose_speak(cls: str) -> str:
+    c = (cls or "").lower()
+    if c in _SAR_POSE_SPEAK:
+        return _SAR_POSE_SPEAK[c]
+    if c.startswith("person_"):
+        return c.replace("person_", "").replace("_", " ")
+    return "in distress"
+
+
+def _sar_situation(cls: str) -> str:
+    c = (cls or "").lower()
+    if c == "person_sitting" or c.startswith("person_sitting"):
+        return "normal"
+    return _SAR_SITUATION.get(c, "abnormal")
 
 
 def _bbox_center(bbox) -> Optional[Tuple[float, float]]:
@@ -278,17 +328,96 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
     return rows
 
 
+def _payload_landmarks(dets, objects):
+    object_classes = {o.get("class") for o in objects}
+    landmarks = [
+        d for d in dets
+        if (d.get("kind") == "landmark" or str(d.get("class") or "") in DISPLAY)
+        and d.get("class")
+        and not _is_umbrella(str(d.get("class") or ""))
+        and not _is_person(str(d.get("class") or ""))
+        and _bbox_center(d.get("bbox"))
+        and (d.get("kind") == "landmark" or str(d.get("class")) not in object_classes)
+    ]
+    if not landmarks:
+        landmarks = [
+            d for d in dets
+            if d not in objects and d.get("class") and _bbox_center(d.get("bbox"))
+            and not _is_person(str(d.get("class") or ""))
+            and not _is_umbrella(str(d.get("class") or ""))
+        ]
+    return landmarks
+
+
+def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
+    """Person rows: target_type=person, situation from pose (sitting always normal)."""
+    dets = list(payload.get("detections") or [])
+    people = [
+        d for d in dets
+        if _is_person(str(d.get("class") or ""))
+        and d.get("class")
+        and _bbox_center(d.get("bbox"))
+    ]
+    if not people:
+        return []
+    objects = [
+        d for d in dets
+        if (d.get("kind") or "object") != "landmark"
+        and not _is_person(str(d.get("class") or ""))
+        and not _is_umbrella(str(d.get("class") or ""))
+        and d.get("class")
+    ]
+    landmarks = _payload_landmarks(dets, objects)
+    if not landmarks:
+        return []
+
+    n_people = len(people)
+    scored = []
+    for person in people:
+        oc = _bbox_center(person["bbox"])
+        best = None
+        best_d = None
+        for lm in landmarks:
+            lc = _bbox_center(lm["bbox"])
+            d = math.hypot(oc[0] - lc[0], oc[1] - lc[1])
+            if best_d is None or d < best_d:
+                best_d, best = d, lm
+        if best is None:
+            continue
+        sit = _sar_situation(str(person.get("class") or ""))
+        distress = sit != "normal"
+        hard = n_people > 1
+        scored.append((not distress, not hard, rng.random(), person, best, sit, hard))
+
+    scored.sort()
+    picked = scored[: max(1, max_per_image)]
+    rows = []
+    for _, _, _, person, lm, sit, hard in picked:
+        tmpl = rng.choice(SAR_TEMPLATES)
+        instruction = tmpl.format(
+            pose=_sar_pose_speak(str(person.get("class") or "")),
+            lm=_display(lm["class"]),
+        )
+        rows.append((instruction, person, lm, sit, hard))
+    return rows
+
+
 def _sample(png_path: str, payload: dict, camera_id: str, instruction: str,
-            obj: dict, lm: dict, rel: str, fmt: str) -> dict:
+            obj: dict, lm: dict, fmt: str, rel: Optional[str] = None,
+            situation: Optional[str] = None, target_type: Optional[str] = None) -> dict:
+    interp = {
+        "target_type": target_type or obj["class"],
+        "landmark": lm["class"] if lm else "",
+    }
+    if rel is not None:
+        interp["relation"] = rel
+    if situation is not None:
+        interp["situation"] = situation
     answer = {
         "camera_id": camera_id,
-        "interpretation": {
-            "target_type": obj["class"],
-            "landmark": lm["class"],
-            "relation": rel,
-        },
+        "interpretation": interp,
         "grounding": {
-            "anchor_coord": _coord3(_det_xyz(lm, payload)),
+            "anchor_coord": _coord3(_det_xyz(lm, payload)) if lm else [0.0, 0.0, 0.0],
             "target_coord": _coord3(_det_xyz(obj, payload)),
         },
     }
@@ -313,7 +442,7 @@ def _sample(png_path: str, payload: dict, camera_id: str, instruction: str,
 
 
 def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
-            seed: int, fmt: str) -> None:
+            seed: int, fmt: str, max_sar_per_image: int = 2) -> None:
     rng = random.Random(seed)
     os.makedirs(out_dir, exist_ok=True)
     scenes = list(_iter_scenes(in_dir))
@@ -336,6 +465,8 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
     val_rows: List[dict] = []
     n_hard = 0
     n_skip = 0
+    n_sar = 0
+    sit_counts: Counter = Counter()
     lm_counts: Counter = Counter()
     obj_counts: Counter = Counter()
 
@@ -353,15 +484,25 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 continue
             png_path, payload = pair
             camera_id = str(payload.get("frame_id") or stem)
-            rows = _pairs_for_payload(payload, rng, max_per_image)
-            if not rows:
+            obj_rows = _pairs_for_payload(payload, rng, max_per_image)
+            sar_rows = _sar_pairs_for_payload(payload, rng, max_sar_per_image)
+            if not obj_rows and not sar_rows:
                 n_skip += 1
                 continue
-            for instruction, obj, lm, rel, hard in rows:
+            for instruction, obj, lm, rel, hard in obj_rows:
                 bucket.append(_sample(
-                    png_path, payload, camera_id, instruction, obj, lm, rel, fmt))
+                    png_path, payload, camera_id, instruction, obj, lm, fmt, rel=rel))
                 lm_counts[str(lm.get("class") or "?")] += 1
                 obj_counts[str(obj.get("class") or "?")] += 1
+                if hard:
+                    n_hard += 1
+            for instruction, person, lm, sit, hard in sar_rows:
+                bucket.append(_sample(
+                    png_path, payload, camera_id, instruction, person, lm, fmt,
+                    situation=sit, target_type="person"))
+                lm_counts[str(lm.get("class") or "?")] += 1
+                sit_counts[sit] += 1
+                n_sar += 1
                 if hard:
                     n_hard += 1
 
@@ -381,30 +522,36 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
         "num_train": len(train_rows),
         "num_val": len(val_rows),
         "num_hard_same_class": n_hard,
+        "num_sar": n_sar,
         "hard_frac": round(n_hard / n_total, 4) if n_total else 0.0,
         "skipped_cameras": n_skip,
         "max_per_image": max_per_image,
+        "max_sar_per_image": max_sar_per_image,
         "landmark_class_counts": dict(lm_counts.most_common()),
         "object_class_counts": dict(obj_counts.most_common()),
+        "sar_situation_counts": dict(sit_counts.most_common()),
         "assistant": "GroundingResult JSON (camera_id, interpretation, grounding)",
         "notes": (
             "Fine-tune Qwen2-VL-Instruct with these JSONL files. "
-            "Do not mix ego-cam or OpenVLA pick frames into this set. "
-            "If car/police_car/sports_car counts are tiny, raise "
-            "TRAINER_VEHICLE_INCLUSION_PROBABILITY; do not restore 4-6 SUVs."
+            "Object rows use relation; SAR rows use target_type=person and situation. "
+            "person_sitting is always situation=normal. "
+            "Do not mix ego-cam or OpenVLA pick frames into this set."
         ),
     }
     info_path = os.path.join(out_dir, "dataset_info.json")
     with open(info_path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
     print(f"[qwen] train={len(train_rows)} val={len(val_rows)} "
-          f"hard={n_hard} hard_frac={info['hard_frac']} skipped_cam={n_skip}")
+          f"hard={n_hard} hard_frac={info['hard_frac']} sar={n_sar} skipped_cam={n_skip}")
     if lm_counts:
         lm_txt = ", ".join(f"{k}={v}" for k, v in lm_counts.most_common())
         print(f"[qwen] landmarks: {lm_txt}")
     if obj_counts:
         obj_txt = ", ".join(f"{k}={v}" for k, v in obj_counts.most_common())
         print(f"[qwen] objects: {obj_txt}")
+    if sit_counts:
+        sit_txt = ", ".join(f"{k}={v}" for k, v in sit_counts.most_common())
+        print(f"[qwen] sar situations: {sit_txt}")
     print(f"[qwen] {train_path}")
     print(f"[qwen] {val_path}")
     print(f"[qwen] {info_path}")
@@ -418,6 +565,8 @@ def main():
                     help="JSONL output directory")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--max-per-image", type=int, default=4)
+    ap.add_argument("--max-sar-per-image", type=int, default=2,
+                    help="max SAR (person) rows per camera image")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--format", choices=("llama-factory", "sharegpt"),
                     default="llama-factory",
@@ -426,7 +575,7 @@ def main():
     if not os.path.isdir(args.in_dir):
         raise SystemExit(f"input dir not found: {args.in_dir}")
     convert(args.in_dir, args.out_dir, args.val_frac, args.max_per_image,
-            args.seed, args.format)
+            args.seed, args.format, max_sar_per_image=args.max_sar_per_image)
 
 
 if __name__ == "__main__":

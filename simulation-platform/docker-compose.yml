@@ -132,6 +132,9 @@ services:
       TRAINER_VEHICLE_MAX_TYPES: "${TRAINER_VEHICLE_MAX_TYPES:-1}"
       # Lost objects never spawned (umbrella / long_umbrella / *umbrella*).
       TRAINER_SKIP_CLASSES: "${TRAINER_SKIP_CLASSES:-umbrella,long_umbrella}"
+      # 1 = one of each person identity per scene (female/professor/weight/male),
+      # random pose. 0 = stock radio (one character x all poses).
+      TRAINER_PEOPLE_ALL_CHARS: "${TRAINER_PEOPLE_ALL_CHARS:-1}"
     # Boot wrapper (same asset patches as the platform), then the dataset generator entry.
     command: ["/marc-patches/boot.py", "/metacom2026/simulation_app/marc2026/trainer.py"]
     volumes:

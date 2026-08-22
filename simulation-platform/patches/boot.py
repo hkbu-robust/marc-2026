@@ -25,6 +25,7 @@ PATCHES = [
     "patch_object_rotation.py",
     "patch_trainer_instances.py",
     "patch_trainer_auto_scenes.py",
+    "patch_trainer_people.py",
     "patch_gt_world_xyz.py",
 ]
 
