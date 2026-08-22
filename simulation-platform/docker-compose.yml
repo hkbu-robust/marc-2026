@@ -112,10 +112,23 @@ services:
       # N>0 generates N scenes without the GUI and exits (batch dataset generation).
       # 0 (default) keeps the interactive panel: New Scene / New Camera.
       TRAINER_AUTO_SCENES: "${TRAINER_AUTO_SCENES:-0}"
-      # Copies of each selected class per scene (lost objects + landmarks). People unchanged.
-      # Set both to 1 to restore the stock one-instance catalogue.
+      # Lost-object copies per selected class (default 4-6). People unchanged.
       TRAINER_MIN_INSTANCES: "${TRAINER_MIN_INSTANCES:-4}"
       TRAINER_MAX_INSTANCES: "${TRAINER_MAX_INSTANCES:-6}"
+      # Landmark copies per kept type. Lower than objects so benches/tables do not
+      # bury small targets. Set both to 1 for the stock one-instance catalogue.
+      TRAINER_LANDMARK_MIN_INSTANCES: "${TRAINER_LANDMARK_MIN_INSTANCES:-1}"
+      TRAINER_LANDMARK_MAX_INSTANCES: "${TRAINER_LANDMARK_MAX_INSTANCES:-2}"
+      # Probability each checked non-vehicle landmark type is kept this scene.
+      # 0.35 = subset per frame (Qwen referring expressions); 1 = every type.
+      TRAINER_CLASS_INCLUSION_PROBABILITY: "${TRAINER_CLASS_INCLUSION_PROBABILITY:-0.35}"
+      # Cars / SUVs / taxis: at most one type, one copy, rarely included.
+      TRAINER_VEHICLE_MIN_INSTANCES: "${TRAINER_VEHICLE_MIN_INSTANCES:-1}"
+      TRAINER_VEHICLE_MAX_INSTANCES: "${TRAINER_VEHICLE_MAX_INSTANCES:-1}"
+      TRAINER_VEHICLE_INCLUSION_PROBABILITY: "${TRAINER_VEHICLE_INCLUSION_PROBABILITY:-0.15}"
+      TRAINER_VEHICLE_MAX_TYPES: "${TRAINER_VEHICLE_MAX_TYPES:-1}"
+      # Lost objects never spawned (umbrella / long_umbrella / *umbrella*).
+      TRAINER_SKIP_CLASSES: "${TRAINER_SKIP_CLASSES:-umbrella,long_umbrella}"
     # Boot wrapper (same asset patches as the platform), then the dataset generator entry.
     command: ["/marc-patches/boot.py", "/metacom2026/simulation_app/marc2026/trainer.py"]
     volumes:

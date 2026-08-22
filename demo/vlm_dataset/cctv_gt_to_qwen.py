@@ -26,6 +26,7 @@ import os
 import random
 import re
 import sys
+from collections import Counter
 from typing import Dict, Iterable, List, Optional, Tuple
 
 SCENE_RE = re.compile(r"^scene_(\d+)$")
@@ -73,6 +74,10 @@ def _display(name: str) -> str:
 def _is_person(cls: str) -> bool:
     c = (cls or "").lower()
     return c == "person" or c.startswith("person_") or any(c.startswith(p) for p in _PERSON_PREFIXES)
+
+
+def _is_umbrella(cls: str) -> bool:
+    return "umbrella" in (cls or "").lower()
 
 
 def _bbox_center(bbox) -> Optional[Tuple[float, float]]:
@@ -213,6 +218,7 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
         d for d in dets
         if (d.get("kind") or "object") != "landmark"
         and not _is_person(str(d.get("class") or ""))
+        and not _is_umbrella(str(d.get("class") or ""))
         and d.get("class")
         and _bbox_center(d.get("bbox"))
     ]
@@ -220,6 +226,7 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
         d for d in dets
         if (d.get("kind") == "landmark" or str(d.get("class") or "") in DISPLAY)
         and d.get("class")
+        and not _is_umbrella(str(d.get("class") or ""))
         and _bbox_center(d.get("bbox"))
         and (d.get("kind") == "landmark" or str(d.get("class")) not in {
             o.get("class") for o in objects
@@ -231,6 +238,7 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
             d for d in dets
             if d not in objects and d.get("class") and _bbox_center(d.get("bbox"))
             and not _is_person(str(d.get("class") or ""))
+            and not _is_umbrella(str(d.get("class") or ""))
         ]
     if not objects or not landmarks:
         return []
@@ -328,6 +336,8 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
     val_rows: List[dict] = []
     n_hard = 0
     n_skip = 0
+    lm_counts: Counter = Counter()
+    obj_counts: Counter = Counter()
 
     for idx, (scene_id, scene_dir) in enumerate(scenes):
         stems = [
@@ -350,6 +360,8 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
             for instruction, obj, lm, rel, hard in rows:
                 bucket.append(_sample(
                     png_path, payload, camera_id, instruction, obj, lm, rel, fmt))
+                lm_counts[str(lm.get("class") or "?")] += 1
+                obj_counts[str(obj.get("class") or "?")] += 1
                 if hard:
                     n_hard += 1
 
@@ -362,25 +374,37 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
 
     train_path = _write("train.jsonl", train_rows)
     val_path = _write("val.jsonl", val_rows)
+    n_total = len(train_rows) + len(val_rows)
     info = {
         "format": fmt,
         "source": os.path.abspath(in_dir),
         "num_train": len(train_rows),
         "num_val": len(val_rows),
         "num_hard_same_class": n_hard,
+        "hard_frac": round(n_hard / n_total, 4) if n_total else 0.0,
         "skipped_cameras": n_skip,
         "max_per_image": max_per_image,
+        "landmark_class_counts": dict(lm_counts.most_common()),
+        "object_class_counts": dict(obj_counts.most_common()),
         "assistant": "GroundingResult JSON (camera_id, interpretation, grounding)",
         "notes": (
             "Fine-tune Qwen2-VL-Instruct with these JSONL files. "
-            "Do not mix ego-cam or OpenVLA pick frames into this set."
+            "Do not mix ego-cam or OpenVLA pick frames into this set. "
+            "If car/police_car/sports_car counts are tiny, raise "
+            "TRAINER_VEHICLE_INCLUSION_PROBABILITY; do not restore 4-6 SUVs."
         ),
     }
     info_path = os.path.join(out_dir, "dataset_info.json")
     with open(info_path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
     print(f"[qwen] train={len(train_rows)} val={len(val_rows)} "
-          f"hard={n_hard} skipped_cam={n_skip}")
+          f"hard={n_hard} hard_frac={info['hard_frac']} skipped_cam={n_skip}")
+    if lm_counts:
+        lm_txt = ", ".join(f"{k}={v}" for k, v in lm_counts.most_common())
+        print(f"[qwen] landmarks: {lm_txt}")
+    if obj_counts:
+        obj_txt = ", ".join(f"{k}={v}" for k, v in obj_counts.most_common())
+        print(f"[qwen] objects: {obj_txt}")
     print(f"[qwen] {train_path}")
     print(f"[qwen] {val_path}")
     print(f"[qwen] {info_path}")
