@@ -15,7 +15,7 @@ logic through callbacks.
 |---|---|
 | `participant_app.py` | Entry point -- registers `MARCClient` callbacks and wires the full Stage 1 / Stage 2 flow |
 | `mock_agent_vla.py` | Mock perception. Instead of analysing CCTV, it looks up the answer for the received voice_command in `mock_demo_data.yaml` and returns a `GroundingResult` |
-| `mock_agent_navigation.py` | Stage 2 navigation: goal-seek control + occupancy-grid A* planning + obstacle avoidance |
+| `mock_agent_navigation.py` | Stage 2 navigation: goal-seek control + occupancy-grid D* Lite + lidar overlay |
 | `mock_agent_manipulation.py` | Robot-arm pick motion (joint-angle keyframes) |
 | `mock_demo_data.yaml` | Demo-only data extracted from the scenario (per-problem answer coordinates + obstacles). Real participants do not have this |
 | `Dockerfile`, `docker-compose.yml` | Containerized run (the standard submission form) |
@@ -63,8 +63,8 @@ Even without `pip install`ing `marc_sdk`, `launch.sh` adds the SDK path (the sta
 
 1. **Registration** -> SESSION_ACK
 2. **Stage 1**: per-round `voice_command` -> mock VLA looks up the answer -> `submit_grounding()` (repeated)
-3. **Stage 2**: `task_description` -> mock VLA -> `submit_stage2_grounding()` -> on reveal, occupancy A* to the
-   target -> arm pick -> A* to the owner zone -> `task_complete()`
+3. **Stage 2**: `task_description` -> mock VLA -> `submit_stage2_grounding()` -> on reveal, occupancy D* Lite + lidar to the
+   target -> arm pick -> D* Lite to the owner zone -> `task_complete()`
 4. **End**: log the final score
 
 ## Environment variables
@@ -74,3 +74,4 @@ Even without `pip install`ing `marc_sdk`, `launch.sh` adds the SDK path (the sta
 | `MARC_TEAM_ID` | `u1` | Team ID |
 | `MARC_TOKEN` | -- | Session token (required) |
 | `ROS_DOMAIN_ID` | `0` | ROS domain |
+| `NAV_USE_MOCK_OBSTACLES` | unset | If `1`, inject yaml discs from `mock_demo_data.yaml` (debug only; scoring has no yaml) |

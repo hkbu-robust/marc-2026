@@ -111,7 +111,10 @@ services:
       <<: *marc-env
       # N>0 generates N scenes without the GUI and exits (batch dataset generation).
       # 0 (default) keeps the interactive panel: New Scene / New Camera.
+      # Stock trainer caps each run at 200; boot patch honors N (optional
+      # TRAINER_AUTO_SCENES_MAX restores a ceiling, e.g. 200).
       TRAINER_AUTO_SCENES: "${TRAINER_AUTO_SCENES:-0}"
+      TRAINER_AUTO_SCENES_MAX: "${TRAINER_AUTO_SCENES_MAX:-0}"
       # Lost-object copies per selected class (default 4-6). People unchanged.
       TRAINER_MIN_INSTANCES: "${TRAINER_MIN_INSTANCES:-4}"
       TRAINER_MAX_INSTANCES: "${TRAINER_MAX_INSTANCES:-6}"

@@ -24,6 +24,7 @@ PATCHES = [
     "patch_object_xformops.py",
     "patch_object_rotation.py",
     "patch_trainer_instances.py",
+    "patch_trainer_auto_scenes.py",
     "patch_gt_world_xyz.py",
 ]
 
