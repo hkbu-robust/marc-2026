@@ -16,3 +16,14 @@ simulation-platform/.env
 /demo/datasets
 /demo/weights/*.pt
 /demo/weights/*.onnx
+
+# submission: omit these
+/datasets/**
+!/datasets/README.md
+/checkpoints/
+/runs/
+/artifacts/
+/.cache/
+
+# luka: workstation specific & personal
+docs/luka/
