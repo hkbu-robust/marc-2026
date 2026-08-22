@@ -14,3 +14,14 @@ simulation-platform/.env
 *.hdf5
 *.png
 /demo/datasets
+
+# submission: omit these
+/datasets/**
+!/datasets/README.md
+/checkpoints/
+/runs/
+/artifacts/
+/.cache/
+
+# luka: workstation specific & personal
+docs/luka/
