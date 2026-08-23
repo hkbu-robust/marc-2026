@@ -7,7 +7,9 @@ and writes LLaMA-Factory / official Qwen2-VL JSONL.
 Each row is one referring-expression grounded in a GroundingResult payload
 (camera_id, target_type, landmark, relation, target_coord, anchor_coord).
 SAR (person) rows use target_type "person" and interpretation.situation
-(accident / emergency / abnormal / normal). person_sitting is always normal.
+(accident / emergency / abnormal / normal). Situation is pose + support:
+sitting on a bench is normal; sitting or standing on a vending machine /
+trash can is abnormal (competition: "climbed on top of the drink machine").
 
 When several instances of the same class are in frame, the landmark is what
 disambiguates — that is the VLM signal YOLO does not need.
@@ -40,6 +42,10 @@ DISPLAY = {
     "disposable_cup": "disposable cup",
     "pencilcase": "pencil case",
     "picnic_table": "picnic table",
+    "bench": "bench",
+    "hydrant": "hydrant",
+    "postbox": "postbox",
+    "taxi": "taxi",
     "vending_machine": "vending machine",
     "trash_can": "trash can",
     "kick_scooter": "kick scooter",
@@ -61,6 +67,15 @@ TEMPLATES = {
         "Find the {obj} close to the {lm}.",
         "Locate the {obj} near the {lm}.",
     ),
+    "on": (
+        "Find the {obj} on the {lm}.",
+        "Find the {obj} on top of the {lm}.",
+        "Locate the {obj} on the {lm}.",
+    ),
+    "above": (
+        "Find the {obj} above the {lm}.",
+        "Locate the {obj} above the {lm}.",
+    ),
 }
 
 # Skip people / pose types in the lost-object family — SAR is a second row type.
@@ -79,7 +94,7 @@ _SAR_POSE_SPEAK = {
     "person_walking_away": "walking away",
 }
 
-# Heuristic pose -> situation. person_sitting is always normal.
+# Heuristic pose -> situation when the person is on the ground (not on a landmark).
 _SAR_SITUATION = {
     "person_prone": "accident",
     "person_lying_down": "accident",
@@ -91,6 +106,25 @@ _SAR_SITUATION = {
     "person_walking": "normal",
     "person_walking_away": "normal",
 }
+
+_SEAT_LANDMARKS = frozenset({"bench", "picnic_table", "picnic_table"})
+_CLIMB_LANDMARKS = frozenset({
+    "vending_machine", "trash_can", "hydrant", "postbox",
+    "bicycle", "kick_scooter",
+})
+_VEHICLE_LANDMARKS = frozenset({
+    "police_car", "normal_car_1", "normal_car_2",
+    "sports_car", "sports_car_2", "suv", "taxi",
+})
+_WRONG_PLACE_LANDMARKS = _CLIMB_LANDMARKS | _VEHICLE_LANDMARKS
+
+_ON_XY_M = 1.6
+_ON_DZ_M = 0.12
+_ABOVE_DZ_M = 0.7
+
+_LYING_POSES = ("person_prone", "person_lying_down")
+_SITTING_POSES = ("person_sitting", "person_reclining")
+_DISTRESS_POSES = ("person_prone", "person_lying_down", "person_bending", "person_crouching")
 
 SAR_TEMPLATES = (
     "Find the person {pose} near the {lm}.",
@@ -123,11 +157,209 @@ def _sar_pose_speak(cls: str) -> str:
     return "in distress"
 
 
-def _sar_situation(cls: str) -> str:
+def _sar_pose_family(cls: str) -> str:
+    c = (cls or "").lower()
+    if c.startswith("person_sitting"):
+        return "sitting"
+    if c.startswith("person_reclining"):
+        return "reclining"
+    if c.startswith("person_prone"):
+        return "prone"
+    if c.startswith("person_lying"):
+        return "lying"
+    if c.startswith("person_bending"):
+        return "bending"
+    if c.startswith("person_crouching"):
+        return "crouching"
+    return "other"
+
+
+def _sar_ground_situation(cls: str) -> str:
+    """Pose-only situation when the person is not on a landmark top."""
     c = (cls or "").lower()
     if c == "person_sitting" or c.startswith("person_sitting"):
         return "normal"
     return _SAR_SITUATION.get(c, "abnormal")
+
+
+def _xyz(det: dict) -> Optional[List[float]]:
+    xyz = det.get("world_xyz")
+    if isinstance(xyz, (list, tuple)) and len(xyz) >= 3:
+        return [float(xyz[0]), float(xyz[1]), float(xyz[2])]
+    return None
+
+
+def _has_authored_xyz(det: dict) -> bool:
+    xyz = det.get("world_xyz")
+    return isinstance(xyz, (list, tuple)) and len(xyz) >= 3
+
+
+def _support_rel(person: dict, lm: dict) -> Optional[str]:
+    """Return on/above when world_xyz says the person is on that landmark, else None."""
+    p = _xyz(person)
+    l = _xyz(lm)
+    if p is None or l is None:
+        return None
+    if not _has_authored_xyz(person) or not _has_authored_xyz(lm):
+        return None
+    dxy = math.hypot(p[0] - l[0], p[1] - l[1])
+    dz = p[2] - l[2]
+    if dxy > _ON_XY_M or dz < _ON_DZ_M:
+        return None
+    return "above" if dz >= _ABOVE_DZ_M else "on"
+
+
+def _is_wrong_place(lm_cls: str) -> bool:
+    c = (lm_cls or "").lower()
+    if c in _WRONG_PLACE_LANDMARKS:
+        return True
+    return "car" in c or c in ("suv", "taxi")
+
+
+def _is_seat(lm_cls: str) -> bool:
+    return (lm_cls or "").lower() in _SEAT_LANDMARKS
+
+
+def _speak_landmark(cls: str, rng: random.Random, drink: bool = False) -> str:
+    c = (cls or "").lower()
+    if c == "vending_machine":
+        if drink:
+            return rng.choice(("drink machine", "drink machine", "vending machine"))
+        return rng.choice(("vending machine", "drink machine"))
+    if c == "trash_can":
+        return rng.choice(("trash can", "trash can", "bin"))
+    return _display(cls)
+
+
+def _sar_situation_for(person: dict, lm: dict, rel: Optional[str],
+                       rng: random.Random) -> str:
+    pose = str(person.get("class") or "")
+    lm_cls = str((lm or {}).get("class") or "")
+    family = _sar_pose_family(pose)
+    on_top = rel in ("on", "above")
+    if on_top and _is_wrong_place(lm_cls):
+        roll = rng.random()
+        if roll < 0.62:
+            return "abnormal"
+        if roll < 0.85:
+            return "emergency"
+        return "accident"
+    if on_top and _is_seat(lm_cls):
+        if family in ("lying", "prone"):
+            return "normal" if lm_cls in ("picnic_table", "picnic_table") else "abnormal"
+        if family in ("sitting", "reclining"):
+            return "normal"
+        return "abnormal"
+    return _sar_ground_situation(pose)
+
+
+def _sar_instruction(person: dict, lm: dict, rel: Optional[str], situation: str,
+                     rng: random.Random) -> str:
+    pose = str(person.get("class") or "")
+    lm_cls = str((lm or {}).get("class") or "")
+    family = _sar_pose_family(pose)
+    speak = _sar_pose_speak(pose)
+    on_top = rel in ("on", "above")
+    if on_top and lm_cls == "vending_machine":
+        drink = _speak_landmark(lm_cls, rng, drink=True)
+        return rng.choice((
+            f"Someone is up where people should not be; find the person who climbed on top of the {drink}.",
+            f"Find the person who climbed on top of the {drink}.",
+            f"Find the person sitting on top of the vending machine.",
+            f"Find the person who climbed up onto the {drink}.",
+        ))
+    if on_top and lm_cls == "trash_can":
+        can = _speak_landmark(lm_cls, rng)
+        return rng.choice((
+            f"In the parking lot, find the person who climbed up and is sitting on top of the {can}.",
+            f"Find the person sitting on top of the {can}.",
+            f"Find the person sitting on top of the trash can in the parking lot.",
+        ))
+    if on_top and _is_wrong_place(lm_cls):
+        name = _speak_landmark(lm_cls, rng)
+        return rng.choice((
+            f"Someone is up where people should not be; find the person on top of the {name}.",
+            f"Find the person who climbed on top of the {name}.",
+            f"Find the person sitting on top of the {name}.",
+        ))
+    if on_top and lm_cls in ("picnic_table", "picnic_table") and family in ("lying", "prone"):
+        return rng.choice((
+            "Find the person lying on top of the picnic table.",
+            "Find the person lying on the picnic table.",
+        ))
+    if on_top and lm_cls == "bench" and family in ("lying", "prone"):
+        return rng.choice((
+            "Find the person lying down on top of the bench.",
+            "Find the person lying face-down on the bench.",
+            "Near the taxi, find the person lying down on top of the bench.",
+        ))
+    if on_top and family in ("sitting", "reclining") and _is_seat(lm_cls):
+        name = _speak_landmark(lm_cls, rng)
+        return rng.choice((
+            f"Find the person sitting on the {name}.",
+            f"Find the person sitting on top of the {name}.",
+        ))
+    if not on_top and family in ("lying", "prone"):
+        name = _speak_landmark(lm_cls, rng)
+        return rng.choice((
+            f"Find the person collapsed on the floor near the {name}.",
+            f"Find the person lying face-down and motionless near the {name}.",
+            f"Several people are in view; one is completely face-down and immobile; find the most critical one.",
+            f"Find the person lying face-down and motionless.",
+        ))
+    if not on_top and family in ("bending", "crouching"):
+        name = _speak_landmark(lm_cls, rng)
+        return rng.choice((
+            f"Find the person bent over and motionless near the {name}.",
+            f"People are relaxing at the park and one is even lying on the grass; find the one near the {name} who is bent over and not moving and actually needs help.",
+            f"Find the person {speak} near the {name}.",
+        ))
+    name = _speak_landmark(lm_cls, rng)
+    tmpl = rng.choice(SAR_TEMPLATES)
+    return tmpl.format(pose=speak, lm=name)
+
+
+def _pick_support_landmark(person: dict, landmarks: List[dict], payload: dict):
+    pc = _bbox_center(person.get("bbox"))
+    best = None
+    best_key = None
+    for lm in landmarks:
+        rel = _support_rel(person, lm)
+        p = _xyz(person)
+        l = _xyz(lm)
+        if rel is not None and p is not None and l is not None:
+            dxy = math.hypot(p[0] - l[0], p[1] - l[1])
+            key = (0, dxy)
+        else:
+            lc = _bbox_center(lm.get("bbox"))
+            if pc is None or lc is None:
+                continue
+            key = (1, math.hypot(pc[0] - lc[0], pc[1] - lc[1]))
+        if best_key is None or key < best_key:
+            best_key, best = key, lm
+    return best
+
+
+def _world_or_pixel_relation(obj: dict, lm: dict, pixel_rel: str) -> str:
+    """Prefer on/above from authored world_xyz; otherwise the 2D pixel relation."""
+    p = _xyz(obj)
+    l = _xyz(lm)
+    if p is None or l is None:
+        return pixel_rel
+    if not _has_authored_xyz(obj) or not _has_authored_xyz(lm):
+        return pixel_rel
+    dxy = math.hypot(p[0] - l[0], p[1] - l[1])
+    dz = p[2] - l[2]
+    if dxy <= _ON_XY_M and dz >= _ABOVE_DZ_M:
+        return "above"
+    if dxy <= _ON_XY_M and dz >= _ON_DZ_M:
+        return "on"
+    return pixel_rel
+
+
+def _sar_situation(cls: str) -> str:
+    """Back-compat pose-only label. Prefer _sar_situation_for()."""
+    return _sar_ground_situation(cls)
 
 
 def _bbox_center(bbox) -> Optional[Tuple[float, float]]:
@@ -314,7 +546,8 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
                 best_d, best = d, lm
         if best is None:
             continue
-        rel = _relation(oc, _bbox_center(best["bbox"]), width)
+        rel = _world_or_pixel_relation(
+            obj, best, _relation(oc, _bbox_center(best["bbox"]), width))
         hard = counts.get(obj["class"], 1) > 1
         scored.append((hard, rng.random(), obj, best, rel))
 
@@ -350,7 +583,7 @@ def _payload_landmarks(dets, objects):
 
 
 def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
-    """Person rows: target_type=person, situation from pose (sitting always normal)."""
+    """Person rows: target_type=person, situation from pose + on-landmark support."""
     dets = list(payload.get("detections") or [])
     people = [
         d for d in dets
@@ -374,31 +607,29 @@ def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int
     n_people = len(people)
     scored = []
     for person in people:
-        oc = _bbox_center(person["bbox"])
-        best = None
-        best_d = None
-        for lm in landmarks:
-            lc = _bbox_center(lm["bbox"])
-            d = math.hypot(oc[0] - lc[0], oc[1] - lc[1])
-            if best_d is None or d < best_d:
-                best_d, best = d, lm
+        best = _pick_support_landmark(person, landmarks, payload)
         if best is None:
             continue
-        sit = _sar_situation(str(person.get("class") or ""))
-        distress = sit != "normal"
+        rel = _support_rel(person, best)
+        sit = _sar_situation_for(person, best, rel, rng)
+        lm_cls = str(best.get("class") or "")
+        on_wrong = rel in ("on", "above") and _is_wrong_place(lm_cls)
+        distress = sit in ("accident", "emergency")
         hard = n_people > 1
-        scored.append((not distress, not hard, rng.random(), person, best, sit, hard))
+        # Prefer climbed-wrong-place, then collapsed, then other abnormal.
+        scored.append((
+            0 if on_wrong else 1 if distress else 2 if sit == "abnormal" else 3,
+            0 if hard else 1,
+            rng.random(),
+            person, best, sit, hard, rel,
+        ))
 
     scored.sort()
     picked = scored[: max(1, max_per_image)]
     rows = []
-    for _, _, _, person, lm, sit, hard in picked:
-        tmpl = rng.choice(SAR_TEMPLATES)
-        instruction = tmpl.format(
-            pose=_sar_pose_speak(str(person.get("class") or "")),
-            lm=_display(lm["class"]),
-        )
-        rows.append((instruction, person, lm, sit, hard))
+    for _, _, _, person, lm, sit, hard, rel in picked:
+        instruction = _sar_instruction(person, lm, rel, sit, rng)
+        rows.append((instruction, person, lm, sit, hard, rel))
     return rows
 
 
@@ -496,10 +727,10 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 obj_counts[str(obj.get("class") or "?")] += 1
                 if hard:
                     n_hard += 1
-            for instruction, person, lm, sit, hard in sar_rows:
+            for instruction, person, lm, sit, hard, rel in sar_rows:
                 bucket.append(_sample(
                     png_path, payload, camera_id, instruction, person, lm, fmt,
-                    situation=sit, target_type="person"))
+                    rel=rel, situation=sit, target_type="person"))
                 lm_counts[str(lm.get("class") or "?")] += 1
                 sit_counts[sit] += 1
                 n_sar += 1
@@ -533,8 +764,10 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
         "assistant": "GroundingResult JSON (camera_id, interpretation, grounding)",
         "notes": (
             "Fine-tune Qwen2-VL-Instruct with these JSONL files. "
-            "Object rows use relation; SAR rows use target_type=person and situation. "
-            "person_sitting is always situation=normal. "
+            "Object rows use relation (beside/near/on/above). "
+            "SAR rows use target_type=person and situation from pose + support: "
+            "sitting on a bench is normal; sitting/standing on a vending machine "
+            "or trash can is abnormal (drink machine / climbed-on-top paraphrases). "
             "Do not mix ego-cam or OpenVLA pick frames into this set."
         ),
     }

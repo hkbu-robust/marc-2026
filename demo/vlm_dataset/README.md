@@ -23,8 +23,23 @@ python3 demo/vlm_dataset/cctv_gt_to_qwen.py \
 The converter prints `hard=` / `hard_frac=` (same-class object clones),
 SAR situation counts, and per-class landmark/object histograms.
 
-SAR rows use `target_type: person` and `situation` (`person_sitting` is always
-`normal`). Object rows still use `relation`. Same dump also converts to YOLO:
+SAR rows use `target_type: person` and `situation` from **pose + support**,
+not pose alone. Sitting on a bench is `normal`; sitting or standing on a
+vending machine / trash can is `abnormal` (prompts include “climbed on top of
+the drink machine”). Object rows still use `relation` (`beside` / `near`, and
+`on` / `above` when `world_xyz` says so).
+
+dataset-gen must actually put some people **on** those landmarks or the
+converter cannot invent the visual. Recreate with the boot patches (people
+identities + on-landmark seating):
+
+```bash
+TRAINER_CLASS_INCLUSION_PROBABILITY=0.35 TRAINER_PEOPLE_ALL_CHARS=1 \
+  TRAINER_PEOPLE_ON_LANDMARK_PROB=0.45 TRAINER_AUTO_SCENES=100 HEADLESS=true \
+  docker compose --profile dataset-gen up --force-recreate
+```
+
+Same dump also converts to YOLO:
 
 ```bash
 python3 demo/vlm_dataset/cctv_gt_to_yolo.py \

@@ -135,6 +135,11 @@ services:
       # 1 = one of each person identity per scene (female/professor/weight/male),
       # random pose. 0 = stock radio (one character x all poses).
       TRAINER_PEOPLE_ALL_CHARS: "${TRAINER_PEOPLE_ALL_CHARS:-1}"
+      # Seat a fraction of people on landmark tops (vending machine, trash can,
+      # bench, picnic table). Needed for SAR "climbed on the drink machine".
+      TRAINER_PEOPLE_ON_LANDMARK_PROB: "${TRAINER_PEOPLE_ON_LANDMARK_PROB:-0.45}"
+      TRAINER_PEOPLE_WRONG_PLACE_PROB: "${TRAINER_PEOPLE_WRONG_PLACE_PROB:-0.55}"
+      TRAINER_FORCE_CLIMB_LANDMARK_PROB: "${TRAINER_FORCE_CLIMB_LANDMARK_PROB:-0.35}"
     # Boot wrapper (same asset patches as the platform), then the dataset generator entry.
     command: ["/marc-patches/boot.py", "/metacom2026/simulation_app/marc2026/trainer.py"]
     volumes:
