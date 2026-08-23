@@ -18,7 +18,7 @@ def fetch_cctv_round(client: MARCClient) -> tuple[dict[str, CctvFrame], list[str
         frames: camera_id -> decoded frame (only cameras with a usable image)
         camera_ids: sorted ids from ``client.list_cctv()``
     """
-    camera_ids = list(client.list_cctv())
+    camera_ids = sorted(client.list_cctv())
     frames: dict[str, CctvFrame] = {}
     for camera_id in camera_ids:
         msg = client.get_cctv_image(camera_id)
