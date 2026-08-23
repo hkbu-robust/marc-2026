@@ -24,6 +24,7 @@ import time
 
 from marc_sdk import MARCClient
 
+from marc_agent.perception.cctv_dump import maybe_dump_cctv_round
 from marc_agent.perception.stage1_detect import detect_stage1_round
 from mock_agent_vla import MockVLAGrounding
 from mock_agent_navigation import (
@@ -112,6 +113,7 @@ class DemoParticipant:
         log.info("[Stage1] round %s/%s: \"%s\"",
                  mission.round, mission.total_rounds, mission.voice_command)
         self._last_detections = detect_stage1_round(self.client)
+        maybe_dump_cctv_round(self._last_detections, round_num=mission.round)
         log.info("[Stage1] CCTV round: %d cameras, %d frames, %d object candidates, %d SAR candidates",
                  len(self._last_detections.camera_ids),
                  len(self._last_detections.frames),
