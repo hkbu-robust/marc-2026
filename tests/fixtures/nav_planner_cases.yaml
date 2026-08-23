@@ -1,0 +1,746 @@
+cases:
+- id: straight_0
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [5.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: straight_1
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [6.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: straight_2
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [7.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: straight_3
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [8.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: straight_4
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [9.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: straight_5
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [10.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: straight_6
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [11.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: straight_7
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [12.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: straight_8
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [13.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: straight_9
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  snap_m: 1.5
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 1.5]
+  goal: [14.5, 1.5]
+  expect_reachable: true
+  compare_astar: true
+- id: detour_gap_0
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  start: [0.5, 3.5]
+  goal: [8.5, 3.5]
+  expect_reachable: true
+  compare_astar: true
+- id: detour_gap_1
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  start: [0.5, 3.5]
+  goal: [8.5, 3.5]
+  expect_reachable: true
+  compare_astar: true
+- id: detour_gap_2
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  start: [0.5, 3.5]
+  goal: [8.5, 3.5]
+  expect_reachable: true
+  compare_astar: true
+- id: detour_gap_3
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  start: [0.5, 3.5]
+  goal: [8.5, 3.5]
+  expect_reachable: true
+  compare_astar: true
+- id: detour_gap_4
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  start: [0.5, 3.5]
+  goal: [8.5, 3.5]
+  expect_reachable: true
+  compare_astar: true
+- id: detour_gap_5
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  start: [0.5, 3.5]
+  goal: [8.5, 3.5]
+  expect_reachable: true
+  compare_astar: true
+- id: detour_gap_6
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  start: [0.5, 3.5]
+  goal: [8.5, 3.5]
+  expect_reachable: true
+  compare_astar: true
+- id: detour_gap_7
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 100, 0, 0, 0, 0]
+  start: [0.5, 3.5]
+  goal: [8.5, 3.5]
+  expect_reachable: true
+  compare_astar: true
+- id: solid_wall_0
+  tier: invalid
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  start: [0.5, 0.5]
+  goal: [4.5, 0.5]
+  expect_error: no_path
+- id: solid_wall_1
+  tier: invalid
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  start: [0.5, 1.5]
+  goal: [4.5, 1.5]
+  expect_error: no_path
+- id: solid_wall_2
+  tier: invalid
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  start: [0.5, 2.5]
+  goal: [4.5, 2.5]
+  expect_error: no_path
+- id: solid_wall_3
+  tier: invalid
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  start: [0.5, 3.5]
+  goal: [4.5, 3.5]
+  expect_error: no_path
+- id: solid_wall_4
+  tier: invalid
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  start: [0.5, 4.5]
+  goal: [4.5, 4.5]
+  expect_error: no_path
+- id: solid_wall_5
+  tier: invalid
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  - [0, 0, 100, 0, 0]
+  start: [0.5, 0.5]
+  goal: [4.5, 0.5]
+  expect_error: no_path
+- id: start_blocked
+  tier: invalid
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 2.0
+  snap_m: 0.5
+  grid:
+  - [100, 100, 100]
+  - [100, 100, 100]
+  - [0, 0, 0]
+  start: [0.5, 0.5]
+  goal: [2.5, 2.5]
+  expect_error: start_blocked
+- id: goal_blocked
+  tier: invalid
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 2.0
+  snap_m: 0.5
+  grid:
+  - [0, 0, 0]
+  - [100, 100, 100]
+  - [100, 100, 100]
+  start: [0.5, 0.5]
+  goal: [2.5, 2.5]
+  expect_error: goal_blocked
+- id: oob_goal
+  tier: invalid
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 1.0
+  grid:
+  - [0, 0, 0]
+  - [0, 0, 0]
+  - [0, 0, 0]
+  start: [0.5, 0.5]
+  goal: [50.0, 50.0]
+  expect_error: out_of_bounds
+- id: empty_map
+  tier: invalid
+  expect_error: no_map
+  no_load: true
+  start: [0.0, 0.0]
+  goal: [1.0, 1.0]
+- id: l_shape_0
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [100, 100, 100, 100, 100, 100, 100, 100]
+  - [0, 0, 0, 0, 0, 0, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  start: [0.5, 1.5]
+  goal: [6.5, 6.5]
+  expect_reachable: true
+  compare_astar: true
+- id: l_shape_1
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [100, 100, 100, 100, 100, 100, 100, 100]
+  - [0, 0, 0, 0, 0, 0, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  start: [0.5, 1.5]
+  goal: [6.5, 6.5]
+  expect_reachable: true
+  compare_astar: true
+- id: l_shape_2
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [100, 100, 100, 100, 100, 100, 100, 100]
+  - [0, 0, 0, 0, 0, 0, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  start: [0.5, 1.5]
+  goal: [6.5, 6.5]
+  expect_reachable: true
+  compare_astar: true
+- id: l_shape_3
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [100, 100, 100, 100, 100, 100, 100, 100]
+  - [0, 0, 0, 0, 0, 0, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  start: [0.5, 1.5]
+  goal: [6.5, 6.5]
+  expect_reachable: true
+  compare_astar: true
+- id: l_shape_4
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [100, 100, 100, 100, 100, 100, 100, 100]
+  - [0, 0, 0, 0, 0, 0, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  start: [0.5, 1.5]
+  goal: [6.5, 6.5]
+  expect_reachable: true
+  compare_astar: true
+- id: l_shape_5
+  tier: static
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [100, 100, 100, 100, 100, 100, 100, 100]
+  - [0, 0, 0, 0, 0, 0, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  - [100, 100, 100, 100, 100, 100, 0, 100]
+  start: [0.5, 1.5]
+  goal: [6.5, 6.5]
+  expect_reachable: true
+  compare_astar: true
+- id: overlay_block_0
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_after_plan:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  expect_reachable_after: true
+  expect_path_avoids_cell: [2, 4]
+- id: overlay_block_1
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_after_plan:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  expect_reachable_after: true
+  expect_path_avoids_cell: [2, 4]
+- id: overlay_block_2
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_after_plan:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  expect_reachable_after: true
+  expect_path_avoids_cell: [2, 4]
+- id: overlay_block_3
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_after_plan:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  expect_reachable_after: true
+  expect_path_avoids_cell: [2, 4]
+- id: overlay_block_4
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_after_plan:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  expect_reachable_after: true
+  expect_path_avoids_cell: [2, 4]
+- id: overlay_block_5
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_after_plan:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  expect_reachable_after: true
+  expect_path_avoids_cell: [2, 4]
+- id: overlay_clear_0
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_before:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  clear_overlay_after_replan: true
+  expect_reachable: true
+- id: overlay_clear_1
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_before:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  clear_overlay_after_replan: true
+  expect_reachable: true
+- id: overlay_clear_2
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_before:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  clear_overlay_after_replan: true
+  expect_reachable: true
+- id: overlay_clear_3
+  tier: overlay
+  resolution: 1.0
+  origin: [0.0, 0.0]
+  inflation_m: 0.0
+  margin_m: 20.0
+  grid:
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  - [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  start: [0.5, 2.5]
+  goal: [8.5, 2.5]
+  overlay_before:
+    xy: [4.5, 2.5]
+    radius_m: 0.6
+    cost: 100
+  clear_overlay_after_replan: true
+  expect_reachable: true

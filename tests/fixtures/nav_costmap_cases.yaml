@@ -1,0 +1,107 @@
+cases:
+  - id: corridor_free
+    tier: costmap
+    resolution: 1.0
+    origin: [0.0, 0.0]
+    grid:
+      - [0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0]
+    inflation_m: 0.0
+    start: [0.5, 1.5]
+    goal: [4.5, 1.5]
+    expect_free_local: [[0, 0], [0, 4], [1, 2]]
+
+  - id: blocked_center
+    tier: costmap
+    resolution: 1.0
+    origin: [0.0, 0.0]
+    grid:
+      - [0, 0, 0]
+      - [0, 100, 0]
+      - [0, 0, 0]
+    inflation_m: 0.0
+    expect_blocked_parent: [[1, 1]]
+    expect_free_parent: [[0, 0], [2, 2]]
+
+  - id: unknown_blocked
+    tier: costmap
+    resolution: 1.0
+    origin: [0.0, 0.0]
+    unknown_is_blocked: true
+    grid:
+      - [0, -1, 0]
+      - [0, 0, 0]
+    inflation_m: 0.0
+    expect_blocked_parent: [[0, 1]]
+    expect_free_parent: [[0, 0], [1, 1]]
+
+  - id: unknown_allowed
+    tier: costmap
+    resolution: 1.0
+    origin: [0.0, 0.0]
+    unknown_is_blocked: false
+    grid:
+      - [0, -1, 0]
+    inflation_m: 0.0
+    expect_free_parent: [[0, 1]]
+
+  - id: inflation_narrow_gap
+    tier: costmap
+    resolution: 1.0
+    origin: [0.0, 0.0]
+    grid:
+      - [0, 0, 0, 0, 0]
+      - [100, 100, 0, 100, 100]
+      - [0, 0, 0, 0, 0]
+    inflation_m: 1.0
+    start: [0.5, 0.5]
+    goal: [4.5, 0.5]
+    expect_local_free_false: [[1, 2]]
+
+  - id: overlay_disc
+    tier: costmap
+    resolution: 1.0
+    origin: [0.0, 0.0]
+    grid:
+      - [0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0]
+    inflation_m: 0.0
+    overlay_disc: {xy: [2.5, 2.5], radius_m: 1.0, cost: 100}
+    expect_blocked_parent: [[2, 2], [1, 2], [2, 1], [3, 2], [2, 3]]
+
+  - id: crop_contains
+    tier: costmap
+    resolution: 1.0
+    origin: [0.0, 0.0]
+    grid: &big10
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    inflation_m: 0.0
+    margin_m: 2.0
+    start: [1.5, 1.5]
+    goal: [7.5, 7.5]
+    expect_crop_contains_world: [[1.5, 1.5], [7.5, 7.5]]
+
+  - id: set_overlay_cell
+    tier: costmap
+    resolution: 1.0
+    origin: [0.0, 0.0]
+    grid:
+      - [0, 0, 0]
+      - [0, 0, 0]
+      - [0, 0, 0]
+    inflation_m: 0.0
+    set_overlay: [[1, 1, 100]]
+    expect_blocked_parent: [[1, 1]]
