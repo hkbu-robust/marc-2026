@@ -24,6 +24,7 @@ import time
 
 from marc_sdk import MARCClient
 
+from marc_agent.perception.stage1_detect import detect_stage1_round
 from mock_agent_vla import MockVLAGrounding
 from mock_agent_navigation import (
     OccupancyGridPlanner, PathFollower, GoalSeekController,
@@ -90,6 +91,7 @@ class DemoParticipant:
         # Obstructions from the scenario yaml (landmarks such as vehicles) -- inject static
         # obstacles not in the occupancy map into the planner to route around them (demo only).
         self._obstacles = load_obstacles()
+        self._last_detections = None
         self._register_handlers()
 
     # -- handler registration --
@@ -109,8 +111,14 @@ class DemoParticipant:
     def _on_mission(self, mission):
         log.info("[Stage1] round %s/%s: \"%s\"",
                  mission.round, mission.total_rounds, mission.voice_command)
+        self._last_detections = detect_stage1_round(self.client)
+        log.info("[Stage1] CCTV round: %d cameras, %d frames, %d object candidates, %d SAR candidates",
+                 len(self._last_detections.camera_ids),
+                 len(self._last_detections.frames),
+                 len(self._last_detections.objects),
+                 len(self._last_detections.sar))
+        # Submission still uses the mock VLA until #8/#9 choose and project candidates.
         result = self.vla.process(mission.voice_command, self.client.list_cctv())
-        # result is a GroundingResult -- submit it directly.
         self.client.submit_grounding(result)
 
     # -- Stage 2: submit interpretation -> drive --
