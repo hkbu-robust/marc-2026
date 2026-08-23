@@ -68,45 +68,6 @@ class ParsedCommand:
     scene_hint: Optional[str] = None
 
 
-MISSION_OBJECT_TYPES = frozenset(
-    {
-        "master_chef_can",
-        "cracker_box",
-        "mug",
-        "wood_block",
-        "cola_can",
-        "disposable_cup",
-        "juice",
-        "tissue",
-        "pencilcase",
-        "tumbler",
-        "umbrella",
-        "long_umbrella",
-        "sunblock",
-    }
-)
-
-LANDMARK_TYPES = frozenset(
-    {
-        "bench",
-        "bicycle",
-        "hydrant",
-        "kick_scooter",
-        "picnic_table",
-        "postbox",
-        "vending_machine",
-        "trash_can",
-        "police_car",
-        "normal_car_1",
-        "normal_car_2",
-        "sports_car",
-        "sports_car_2",
-        "suv",
-        "taxi",
-    }
-)
-
-
 _OBJECT_ALIASES = {
     "master_chef_can": ("master chef can", "master chef cans", "chef can", "chef cans"),
     "cracker_box": ("cracker box", "cracker boxes"),
@@ -141,6 +102,9 @@ _LANDMARK_ALIASES = {
     "taxi": ("taxi", "taxis", "cab", "cabs"),
 }
 
+MISSION_OBJECT_TYPES = frozenset(_OBJECT_ALIASES)
+LANDMARK_TYPES = frozenset(_LANDMARK_ALIASES)
+
 _SCENE_HINTS = (
     ("empty parking space", "parking_space"),
     ("parking space", "parking_space"),
@@ -152,11 +116,41 @@ _SCENE_HINTS = (
     ("park", "park"),
 )
 
-_PERSON_WORD_RE = re.compile(r"\b(person|people|someone|somebody)\b")
-_BRING_RE = re.compile(r"\b(bring|retrieve|deliver|pick\s+up|collect)\b")
-_FIND_RE = re.compile(r"\b(find|locate|look\s+for|pinpoint)\b")
-_ACTION_RE = re.compile(
-    r"\b(?:find|locate|look\s+for|pinpoint|bring|retrieve|deliver|pick\s+up|collect)\b"
+_PERSON_WORD_PATTERN = r"person|people|someone|somebody"
+_PERSON_PRONOUN_PATTERN = r"them|they"
+_PERSON_REFERENCE_PATTERN = rf"{_PERSON_WORD_PATTERN}|one|{_PERSON_PRONOUN_PATTERN}"
+_PERSON_MENTION_PATTERN = rf"one\s+person|{_PERSON_REFERENCE_PATTERN}"
+_ANAPHORIC_PERSON_TARGET_PATTERN = (
+    rf"(?:that|this|(?:the\s+)?same)\s+person|"
+    rf"the(?:\s+\w+){{0,4}}\s+(?:person|one)|{_PERSON_PRONOUN_PATTERN}|one"
+)
+_PERSON_WORD_RE = re.compile(rf"\b(?:{_PERSON_WORD_PATTERN})\b")
+_PERSON_REFERENCE_RE = re.compile(rf"\b(?:{_PERSON_REFERENCE_PATTERN})\b")
+_PERSON_MENTION_RE = re.compile(rf"\b(?:{_PERSON_MENTION_PATTERN})\b")
+_PERSON_ANAPHOR_RE = re.compile(rf"\b(?:{_ANAPHORIC_PERSON_TARGET_PATTERN})\b")
+_FIND_PATTERN = r"find|locate|look\s+for|pinpoint"
+_BRING_PATTERN = r"bring|retrieve|deliver|pick\s+up|collect"
+_PLACEMENT_PATTERN = r"left|lost|forgot|set|placed|dropped"
+_HELP_CUE_PATTERN = (
+    r"need(?:s|ed|ing)?(?:\s+urgent)?\s+help|"
+    r"(?:is\s+)?in\s+need\s+of\s+help|requires?\s+help"
+)
+_SCENE_LOCATION_PATTERN = r"at|in|on|near|around"
+_LANDMARK_LOCATION_PATTERN = rf"{_SCENE_LOCATION_PATTERN}|by"
+_NEXT_TO_PATTERN = r"next\s+to"
+_FIND_RE = re.compile(rf"\b(?:{_FIND_PATTERN})\b")
+_BRING_RE = re.compile(rf"\b(?:{_BRING_PATTERN})\b")
+_ACTION_RE = re.compile(rf"\b(?:{_FIND_PATTERN}|{_BRING_PATTERN})\b")
+
+_RELATION_PHRASES: tuple[tuple[Relation, str], ...] = (
+    (Relation.FRONT, r"(?:in\s+)?front\s+of"),
+    (Relation.LEFT, r"(?:on|to)\s+the\s+left\s+(?:side\s+)?of"),
+    (Relation.RIGHT, r"(?:on|to)\s+the\s+right\s+(?:side\s+)?of"),
+    (Relation.ABOVE, r"above"),
+    (Relation.BESIDE, r"(?:beside|alongside)"),
+    (Relation.NEAR, r"(?:near|close\s+to|around)"),
+    (Relation.ON, r"on(?:\s+top\s+of)?"),
+    (Relation.BEHIND, r"behind"),
 )
 
 
@@ -170,6 +164,7 @@ class _Match:
 def _normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).casefold()
     text = re.sub(r"\bdon(?:['’]?t)\b", "do not", text)
+    text = text.replace("’", "'")
     text = text.replace("–", ";").replace("—", ";")
     text = text.replace("‐", "-").replace("‑", "-")
     text = re.sub(r"[-_/]+", " ", text)
@@ -182,6 +177,42 @@ def _normalize(text: str) -> str:
 def _phrase_pattern(phrase: str) -> re.Pattern[str]:
     words = [re.escape(word) for word in phrase.split()]
     return re.compile(r"(?<!\w)" + r"\s+".join(words) + r"(?!\w)")
+
+
+def _clause_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    clause_start = max(text.rfind(mark, 0, start) for mark in ";,.") + 1
+    stops = [position for mark in ";,." if (position := text.find(mark, end)) >= 0]
+    return clause_start, min(stops, default=len(text))
+
+
+def _next_clause(text: str, clause_end: int) -> str:
+    following_start = clause_end + 1
+    _, following_end = _clause_bounds(text, following_start, following_start)
+    return text[following_start:following_end]
+
+
+def _previous_clause(text: str, clause_start: int) -> str:
+    previous_end = max(0, clause_start - 1)
+    previous_start = max(
+        text.rfind(mark, 0, previous_end) for mark in ";,."
+    ) + 1
+    return text[previous_start:previous_end]
+
+
+def _has_target_reference(fragment: str, target_type: str, is_sar: bool) -> bool:
+    if is_sar:
+        return bool(_PERSON_REFERENCE_RE.search(fragment))
+    aliases = _OBJECT_ALIASES.get(target_type, ())
+    return any(_phrase_pattern(alias).search(fragment) for alias in aliases) or bool(
+        _ACTION_RE.search(fragment) and re.search(r"\b(?:it|this|that)\b", fragment)
+    )
+
+
+def _has_person_beneficiary(fragment: str) -> bool:
+    return any(
+        re.search(r"\b(?:for|to)\s+(?:the\s+)?$", fragment[: match.start()])
+        for match in _PERSON_WORD_RE.finditer(fragment)
+    )
 
 
 def _matches(text: str, aliases: dict[str, Iterable[str]]) -> list[_Match]:
@@ -201,13 +232,103 @@ def _matches(text: str, aliases: dict[str, Iterable[str]]) -> list[_Match]:
     return sorted(kept, key=lambda item: item.start)
 
 
+def _person_mention_introduces_referent(fragment: str, match: re.Match[str]) -> bool:
+    mention = match.group(0)
+    if _PERSON_ANAPHOR_RE.fullmatch(mention):
+        return False
+    prefix = fragment[max(0, match.start() - 12) : match.start()]
+    return not re.search(r"\b(?:the|this|that|same)\s+$", prefix)
+
+
+def _through_selected_person(fragment: str, selected_end: int) -> str:
+    for mention in _PERSON_MENTION_RE.finditer(fragment, selected_end):
+        if _person_mention_introduces_referent(fragment, mention):
+            return fragment[: mention.start()]
+    return fragment
+
+
+def _has_multiple_person_referents(fragment: str) -> bool:
+    if _PERSON_WORD_RE.search(fragment) and re.search(
+        r"\b(?:another|a\s+second|a\s+third)(?:\s+person)?\b", fragment
+    ):
+        return True
+    introductions = 0
+    for match in _PERSON_MENTION_RE.finditer(fragment):
+        mention = match.group(0)
+        prefix = fragment[max(0, match.start() - 12) : match.start()]
+        if mention == "people" or re.search(r"\b(?:another|other|second|third)\s+$", prefix):
+            return True
+        if not _person_mention_introduces_referent(fragment, match):
+            continue
+        introductions += 1
+        if introductions > 1:
+            return True
+    return False
+
+
+def _has_unambiguous_person_anaphor(
+    fragment: str, *, has_multiple_antecedents: bool
+) -> bool:
+    match = re.search(
+        rf"\b(?:{_FIND_PATTERN})\s+"
+        rf"(?P<target>{_ANAPHORIC_PERSON_TARGET_PATTERN})\b",
+        fragment,
+    )
+    if match is None:
+        return False
+    target = match.group("target")
+    introduces_landmark = bool(_matches(fragment, _LANDMARK_ALIASES))
+    if target == "the one":
+        return not has_multiple_antecedents
+    if target == "the person":
+        return not has_multiple_antecedents and not introduces_landmark
+    return True
+
+
+def _sar_evidence_scope(text: str) -> str:
+    """Keep only language that can describe the selected person target."""
+    actions = list(_ACTION_RE.finditer(text))
+    if not actions:
+        return text
+    action = actions[-1]
+    after_action = text[action.end():]
+    target = _PERSON_REFERENCE_RE.search(after_action)
+    if target is None:
+        return after_action
+
+    target_description = _through_selected_person(after_action, target.end())
+    command_context = text[action.start() : action.end()] + target_description
+    target_phrase = after_action[:target.end()]
+    is_anaphoric = bool(_PERSON_ANAPHOR_RE.search(target_phrase))
+    antecedent_context = text[:action.start()].rstrip(" ;,.")
+    if is_anaphoric and not _has_multiple_person_referents(antecedent_context):
+        return f"{antecedent_context} ; {command_context}".strip(" ;")
+    sentence_start = max(text.rfind(".", 0, action.start()), text.rfind(";", 0, action.start())) + 1
+    leading_context = text[sentence_start:action.start()].strip()
+    if leading_context and not _PERSON_REFERENCE_RE.search(leading_context):
+        command_context = f"{leading_context} {command_context}"
+    return command_context.strip(" ;")
+
+
+def _sar_scene_scope(text: str) -> str:
+    """Exclude people introduced after the selected SAR target from scene evidence."""
+    actions = list(_ACTION_RE.finditer(text))
+    if not actions:
+        return text
+    action = actions[-1]
+    target = _PERSON_REFERENCE_RE.search(text, action.end())
+    if target is None:
+        return text
+    return _through_selected_person(text, target.end())
+
+
 def _target_scope(text: str) -> str:
     """Drop an explicit correction/distractor clause before parsing the target."""
     parts = [part.strip() for part in re.split(r"[;.]", text) if part.strip()]
     kept = [part for part in parts if not re.match(r"^(?:ignore\b|not\b|do\s+not\b)", part)]
     scope = " ; ".join(kept) if kept else text
     scope = re.sub(
-        r"\b(find|locate|look\s+for|pinpoint)\s+not\s+[^,;]+,\s*but\s+",
+        rf"\b({_FIND_PATTERN})\s+not\s+[^,;]+,\s*but\s+",
         r"\1 ",
         scope,
     )
@@ -247,10 +368,36 @@ def _direct_target(text: str, object_matches: list[_Match]) -> Optional[tuple[st
         for match in object_matches
         if match.start >= action.end()
     ]
-    for match in re.finditer(r"\b(?:person|someone|somebody|one|them|they)\b", text[action.end() :]):
+    for match in _PERSON_REFERENCE_RE.finditer(text[action.end() :]):
         value = match.group(0)
-        if value in {"one", "them", "they"} and not _PERSON_WORD_RE.search(text[: action.start()]):
+        absolute_start = action.end() + match.start()
+        absolute_end = action.end() + match.end()
+        if _PERSON_WORD_RE.fullmatch(value) and re.match(
+            r"'s\b", text[absolute_end:]
+        ):
             continue
+        has_later_object = any(
+            object_match.start >= absolute_end for object_match in object_matches
+        )
+        is_person_beneficiary = _PERSON_WORD_RE.fullmatch(value) and has_later_object and (
+            _has_person_beneficiary(text[action.end() : absolute_end])
+            or bool(_BRING_RE.fullmatch(action.group(0)))
+        )
+        if is_person_beneficiary:
+            continue
+        if _PERSON_ANAPHOR_RE.fullmatch(value) and not _PERSON_WORD_RE.search(text[: action.start()]):
+            continue
+        target_phrase = text[action.end() : absolute_end]
+        is_anaphoric = bool(_PERSON_ANAPHOR_RE.search(target_phrase))
+        if (
+            is_anaphoric
+            and _has_multiple_person_referents(text[: action.start()])
+            and not _has_sar_target_description(text[action.end():])
+        ):
+            raise CommandParseError(
+                ParseErrorCode.AMBIGUOUS_TARGET,
+                "person reference has multiple plausible antecedents",
+            )
         candidates.append((action.end() + match.start(), action.end() + match.end(), "person", True))
     if not candidates:
         return None
@@ -287,8 +434,8 @@ def _resolve_target(text: str) -> tuple[str, bool]:
     if values:
         return next(iter(values)), False
     incidental_person = re.search(
-        r"\b(?:person|someone|somebody)\b[^;,.]{0,80}"
-        r"\b(?:left|lost|forgot|set|placed)\b[^;,.]+",
+        rf"\b(?:{_PERSON_WORD_PATTERN})\b[^;,.]{{0,80}}"
+        rf"\b(?:{_PLACEMENT_PATTERN})\b[^;,.]+",
         text,
     )
     if _PERSON_WORD_RE.search(text) and not incidental_person:
@@ -296,58 +443,69 @@ def _resolve_target(text: str) -> tuple[str, bool]:
     raise CommandParseError(ParseErrorCode.UNKNOWN_TARGET, "no supported mission target was found")
 
 
+def _next_to_relation(landmark: str) -> Relation:
+    return Relation.NEAR if landmark in {"trash_can", "taxi", "bicycle"} else Relation.BESIDE
+
+
+def _is_leading_relation(prefix: str) -> bool:
+    patterns = [pattern for _, pattern in _RELATION_PHRASES]
+    patterns.append(_NEXT_TO_PATTERN)
+    return any(
+        re.fullmatch(rf"\s*(?:{pattern})(?:\s+(?:an?|the))?\s*", prefix)
+        for pattern in patterns
+    )
+
+
+def _relations_before_landmark(prefix: str, landmark: str) -> set[Relation]:
+    relations: set[Relation] = set()
+    for relation, pattern in _RELATION_PHRASES:
+        if relation in {Relation.ON, Relation.BEHIND}:
+            matched = re.search(
+                rf"\b(?:{pattern})(?:\s+(?:an?|the))?\s*$", prefix
+            )
+        else:
+            matched = re.search(rf"\b(?:{pattern})\b", prefix)
+        if matched:
+            relations.add(relation)
+    if re.search(rf"\b(?:{_NEXT_TO_PATTERN})\s+(?:(?:an?|the)\s+)?$", prefix):
+        relations.add(_next_to_relation(landmark))
+    if re.search(r"\b(?:propped|leaning)\s+against\s+(?:(?:an?|the)\s+)?$", prefix):
+        relations.add(Relation.NEAR if landmark == "trash_can" else Relation.BESIDE)
+    return relations
+
+
+def _pronoun_relations(text: str, landmark: str) -> set[Relation]:
+    relations = {
+        relation
+        for relation, pattern in _RELATION_PHRASES
+        if re.search(rf"\b(?:{pattern})\s+it\b", text)
+    }
+    if re.search(rf"\b(?:{_NEXT_TO_PATTERN})\s+it\b", text):
+        relations.add(_next_to_relation(landmark))
+    if re.search(r"\bagainst\s+its\s+side\b", text):
+        relations.add(Relation.BESIDE)
+    return relations
+
+
 def _relation_candidates(text: str, landmarks: list[_Match], landmark: Optional[str]) -> set[Relation]:
     relations: set[Relation] = set()
-    phrases: tuple[tuple[Relation, str], ...] = (
-        (Relation.FRONT, r"\b(?:in\s+)?front\s+of\b"),
-        (Relation.LEFT, r"\b(?:on|to)\s+the\s+left\s+(?:side\s+)?of\b"),
-        (Relation.RIGHT, r"\b(?:on|to)\s+the\s+right\s+(?:side\s+)?of\b"),
-        (Relation.ABOVE, r"\babove\b"),
-        (Relation.BESIDE, r"\b(?:beside|alongside)\b"),
-        (Relation.NEAR, r"\b(?:near|close\s+to|around)\b"),
-        (Relation.ON, r"\bon\s+top\s+of\b"),
-    )
     selected = [match for match in landmarks if match.value == landmark]
     for match in selected:
         prior_ends = [other.end for other in landmarks if other.end <= match.start and other is not match]
         prefix_start = max([max(0, match.start - 45), *prior_ends])
-        prefix = text[prefix_start : match.start]
-        for relation, pattern in phrases:
-            if re.search(pattern, prefix):
-                relations.add(relation)
-        if re.search(r"\bon(?:\s+the)?\s*$", prefix):
-            relations.add(Relation.ON)
-        if re.search(r"\bbehind(?:\s+the)?\s*$", prefix):
-            relations.add(Relation.BEHIND)
-        if re.search(r"\bnext\s+to\s+(?:the\s+)?$", prefix):
-            if landmark in {"trash_can", "taxi", "bicycle"}:
-                relations.add(Relation.NEAR)
-            else:
-                relations.add(Relation.BESIDE)
-        if re.search(r"\b(?:propped|leaning)\s+against\s+(?:the\s+)?$", prefix):
-            relations.add(Relation.NEAR if landmark == "trash_can" else Relation.BESIDE)
+        relations.update(_relations_before_landmark(text[prefix_start : match.start], match.value))
 
     if not landmarks:
-        for relation, pattern in phrases:
+        for relation, pattern in _RELATION_PHRASES:
+            if relation in {Relation.ON, Relation.BEHIND}:
+                continue
             if re.search(pattern, text):
                 relations.add(relation)
         if re.search(r"\bon\s+top\s+of\s+(?:it|this|that)\b", text):
             relations.add(Relation.ON)
 
-    if landmark is not None and len({match.value for match in landmarks}) == 1:
-        pronouns = (
-            (Relation.FRONT, r"\b(?:in\s+)?front\s+of\s+it\b"),
-            (Relation.LEFT, r"\b(?:on|to)\s+the\s+left\s+(?:side\s+)?of\s+it\b"),
-            (Relation.RIGHT, r"\b(?:on|to)\s+the\s+right\s+(?:side\s+)?of\s+it\b"),
-            (Relation.ABOVE, r"\babove\s+it\b"),
-            (Relation.BESIDE, r"\b(?:beside|alongside|next\s+to)\s+it\b|\bagainst\s+its\s+side\b"),
-            (Relation.NEAR, r"\bnear\s+it\b"),
-            (Relation.ON, r"\bon(?:\s+top\s+of)?\s+it\b"),
-            (Relation.BEHIND, r"\bbehind\s+it\b"),
-        )
-        for relation, pattern in pronouns:
-            if re.search(pattern, text):
-                relations.add(relation)
+    if landmark is not None:
+        relations.update(_pronoun_relations(text, landmark))
 
     return relations
 
@@ -361,16 +519,104 @@ def _choose_landmark(
     values = {match.value for match in landmarks}
     if not values:
         return None
+
     if len(values) == 1:
-        return next(iter(values))
+        match = landmarks[0]
+        target_mentions = [
+            target for target in _matches(text, _OBJECT_ALIASES) if target.value == target_type
+        ]
+        prefix = text[max(0, match.start - 45) : match.start]
+        direct_relations = _relations_before_landmark(prefix, match.value)
+        pronoun_relations = _pronoun_relations(text, match.value)
+        clause_start, clause_end = _clause_bounds(text, match.start, match.end)
+        clause = text[clause_start:clause_end]
+        previous_clause = _previous_clause(text, clause_start)
+        following_clause = _next_clause(text, clause_end)
+        relation_describes_beneficiary = not is_sar and any(
+            target.end <= match.start
+            and _has_person_beneficiary(text[target.end : match.start])
+            for target in target_mentions
+        )
+        relation_describes_person = not is_sar and bool(
+            _PERSON_REFERENCE_RE.search(text[clause_start:match.start])
+            and any(target.start > match.end for target in target_mentions)
+        )
+        following_person_context = bool(
+            not is_sar
+            and (
+                _PERSON_REFERENCE_RE.search(clause)
+                or _PERSON_REFERENCE_RE.search(following_clause)
+            )
+            and not _has_target_reference(clause, target_type, is_sar)
+        )
+        attached_relation = (
+            (direct_relations or pronoun_relations)
+            and not relation_describes_beneficiary
+            and not relation_describes_person
+            and not following_person_context
+            and (
+                _has_target_reference(clause, target_type, is_sar)
+                or (
+                    pronoun_relations
+                    and _has_target_reference(following_clause, target_type, is_sar)
+                )
+                or (
+                    _is_leading_relation(text[clause_start:match.start])
+                    and (
+                        _has_target_reference(previous_clause, target_type, is_sar)
+                        or _has_target_reference(following_clause, target_type, is_sar)
+                    )
+                )
+            )
+        )
+        if is_sar and direct_relations:
+            attached_relation = True
+        if attached_relation:
+            return match.value
+        location_prefix = text[max(0, match.start - 12) : match.start]
+        narrative_attachment = any(
+            match.end <= target.end
+            and re.search(
+                rf"\b(?:{_LANDMARK_LOCATION_PATTERN})\s+(?:an?\s+|the\s+)?$",
+                location_prefix,
+            )
+            and re.search(rf"\b(?:{_PLACEMENT_PATTERN})\b", text[match.end : target.end])
+            and not re.search(r"\belsewhere\b", text[match.end :])
+            for target in target_mentions
+        )
+        return match.value if narrative_attachment else None
 
     # SAR support is the physical noun attached to the pose; a second place landmark
     # ("bench near the taxi") is context, not the person's support.
     if is_sar:
         for match in landmarks:
             prefix = text[max(0, match.start - 24) : match.start]
-            if re.search(r"\b(?:on|on\s+top\s+of|next\s+to)\s+(?:the\s+)?$", prefix):
+            relations = _relations_before_landmark(prefix, match.value)
+            clause_start, clause_end = _clause_bounds(text, match.start, match.end)
+            support_relation = Relation.ON in relations or re.search(
+                rf"\b(?:{_NEXT_TO_PATTERN})\s+(?:the\s+)?$", prefix
+            )
+            if support_relation and _has_target_reference(
+                text[clause_start:clause_end], target_type, is_sar
+            ):
                 return match.value
+
+    target_mentions = [
+        match for match in _matches(text, _OBJECT_ALIASES) if match.value == target_type
+    ]
+    if not is_sar and re.search(r"\bon\s+it\b", text):
+        supporting = [
+            match
+            for match in landmarks
+            if any(
+                match.end <= target.start
+                and re.search(r"\b(?:has|holds|contains)\b", text[match.end : target.start])
+                and re.search(r"\bon\s+it\b", text[target.end :])
+                for target in target_mentions
+            )
+        ]
+        if supporting:
+            return supporting[0].value
 
     # For object queries, prefer the related landmark after the action/target. A
     # leading location such as "Near the taxi, find the mug behind the bench" is context.
@@ -378,9 +624,22 @@ def _choose_landmark(
     related: list[_Match] = []
     for match in landmarks:
         prefix = text[max(0, match.start - 30) : match.start]
-        if re.search(
-            r"\b(?:near|around|beside|behind|above|alongside|close\s+to|front\s+of|(?:left|right)\s+(?:side\s+)?of|on(?:\s+top\s+of)?|next\s+to|(?:propped|leaning)\s+against)\s+(?:the\s+)?$",
-            prefix,
+        clause_start, clause_end = _clause_bounds(text, match.start, match.end)
+        relation_attached = _has_target_reference(
+            text[clause_start:clause_end], target_type, is_sar
+        ) or (
+            _is_leading_relation(text[clause_start:match.start])
+            and _has_target_reference(_previous_clause(text, clause_start), target_type, is_sar)
+        )
+        relation_describes_beneficiary = not is_sar and any(
+            target.end <= match.start
+            and _has_person_beneficiary(text[target.end : match.start])
+            for target in target_mentions
+        )
+        if (
+            _relations_before_landmark(prefix, match.value)
+            and relation_attached
+            and not relation_describes_beneficiary
         ):
             related.append(match)
     if action_ends:
@@ -389,8 +648,10 @@ def _choose_landmark(
             first = after_action[0]
             first_prefix = text[max(action_ends[-1], first.start - 30) : first.start]
             nested_support_context = bool(
-                re.search(r"\bon(?:\s+top\s+of)?\s+(?:the\s+)?$", first_prefix)
+                Relation.ON in _relations_before_landmark(first_prefix, first.value)
                 and len(after_action) == 2
+                # Only literal "near" forms nested support context; organizer
+                # "around" remains a second explicit constraint.
                 and re.search(
                     r"\bnear\s+(?:the\s+)?$",
                     text[first.end : after_action[1].start],
@@ -402,9 +663,6 @@ def _choose_landmark(
                     "multiple landmark-relation constraints are explicit",
                 )
             return after_action[0].value
-    target_mentions = [
-        match for match in _matches(text, _OBJECT_ALIASES) if match.value == target_type
-    ]
     locally_attached = [
         landmark
         for landmark in related
@@ -417,6 +675,13 @@ def _choose_landmark(
         return locally_attached[0].value
     if len({match.value for match in related}) == 1:
         return related[0].value
+    if not related:
+        if action_ends and any(match.start >= action_ends[-1] for match in landmarks):
+            raise CommandParseError(
+                ParseErrorCode.AMBIGUOUS_LANDMARK,
+                f"multiple landmarks are plausible: {sorted(values)}",
+            )
+        return None
     raise CommandParseError(
         ParseErrorCode.AMBIGUOUS_LANDMARK,
         f"multiple landmarks are plausible: {sorted(values)}",
@@ -429,15 +694,30 @@ def _resolve_situation(text: str) -> Situation:
     incapacitated = bool(
         re.search(r"\b(?:immobile|motionless|unresponsive|completely\s+still)\b", text)
     )
-    if re.search(r"\baccident\b|\bmost\s+critical\b", text) or (face_down and incapacitated):
+    prone = bool(re.search(r"\b(?:face\s+down|prone)\b", text))
+    if re.search(r"\baccident\b|\bmost\s+critical\b", text) or (prone and incapacitated):
         explicit.add(Situation.ACCIDENT)
-    if re.search(r"\b(?:collapsed|needs?\s+help|emergency|fell|fallen)\b|\bbent\s+over\b.*\b(?:not\s+moving|motionless)\b", text):
-        explicit.add(Situation.EMERGENCY)
-    if re.search(r"\b(?:climbed|should\s+not\s+be)\b|\b(?:sitting|lying|lie)\b.*\bon\s+top\s+of\b", text):
-        explicit.add(Situation.ABNORMAL)
-    if re.search(r"\b(?:walking|standing)\s+normally\b|\b(?:walking|relaxing|fine)\b|\bnormal\b(?!\s+car\b)", text) and not re.search(
-        r"\b(?:needs?\s+help|not\s+moving|motionless|immobile|unresponsive|completely\s+still|critical)\b", text
+    if re.search(
+        rf"\b(?:collapsed|{_HELP_CUE_PATTERN}|emergency|fell|fallen)\b|"
+        r"\b(?:bent|bending)\s+over\b.*\b(?:not\s+moving|motionless)\b",
+        text,
     ):
+        explicit.add(Situation.EMERGENCY)
+    if re.search(
+        r"\b(?:abnormal|climbed|should\s+not\s+be)\b|"
+        r"\b(?:sitting|lying|lie|reclining)\b.*\bon\s+top\s+of\b",
+        text,
+    ):
+        explicit.add(Situation.ABNORMAL)
+    explicit_normal = re.search(
+        r"\b(?:walking|standing)\s+normally\b|\bnormal\b(?!\s+car\b)", text
+    )
+    implicit_normal = re.search(r"\b(?:walking|relaxing|fine)\b", text) and not re.search(
+        rf"\b(?:{_HELP_CUE_PATTERN}|not\s+moving|motionless|immobile|unresponsive|"
+        r"completely\s+still|critical)\b",
+        text,
+    )
+    if explicit_normal or implicit_normal:
         explicit.add(Situation.NORMAL)
     if len(explicit) > 1:
         raise CommandParseError(
@@ -450,7 +730,7 @@ def _resolve_situation(text: str) -> Situation:
     # Public pose/support rules: prostrate on transit/non-mount is emergency; on
     # seating is abnormal; prone incapacitation is an accident.
     cues: set[Situation] = set()
-    if re.search(r"\b(?:lying|collapsed|bent\s+over|fell|fallen)\b", text):
+    if re.search(r"\b(?:lying|collapsed|bent\s+over|bending\s+over|fell|fallen)\b", text):
         if re.search(r"\b(?:parking|road|walkway|sidewalk|trash\s+can|vending\s+machine|hydrant)\b", text):
             cues.add(Situation.EMERGENCY)
         elif re.search(r"\b(?:bench|picnic\s+table)\b", text):
@@ -469,10 +749,117 @@ def _resolve_situation(text: str) -> Situation:
     raise CommandParseError(ParseErrorCode.UNKNOWN_SITUATION, "person target has no supported SAR situation")
 
 
-def _scene_hint(text: str) -> Optional[str]:
+def _has_sar_target_description(fragment: str) -> bool:
+    clause = re.split(r"[;,.]", fragment, maxsplit=1)[0]
+    anaphor = _PERSON_ANAPHOR_RE.search(clause)
+    if anaphor is not None:
+        clause = _through_selected_person(clause, anaphor.end())
+    landmarks = _matches(clause, _LANDMARK_ALIASES)
+    if any(
+        _relations_before_landmark(
+            clause[max(0, landmark.start - 45) : landmark.start], landmark.value
+        )
+        or re.search(
+            rf"\b(?:{_LANDMARK_LOCATION_PATTERN})\s+(?:an?\s+|the\s+)?$",
+            clause[max(0, landmark.start - 24) : landmark.start],
+        )
+        for landmark in landmarks
+    ):
+        return True
+    try:
+        _resolve_situation(clause)
+    except CommandParseError as error:
+        if error.code == ParseErrorCode.UNKNOWN_SITUATION:
+            return False
+        raise
+    return True
+
+
+def _scene_hint(text: str, target_type: str, is_sar: bool) -> Optional[str]:
     for phrase, value in _SCENE_HINTS:
-        if _phrase_pattern(phrase).search(text):
-            return value
+        for match in _phrase_pattern(phrase).finditer(text):
+            prefix = text[max(0, match.start() - 24) : match.start()]
+            if not re.search(
+                rf"\b(?:{_SCENE_LOCATION_PATTERN})\s+(?:(?:an?|the)\s+)?$", prefix
+            ):
+                continue
+            clause_start, clause_end = _clause_bounds(text, match.start(), match.end())
+            clause = text[clause_start:clause_end]
+            following_clause = _next_clause(text, clause_end)
+            before_scene = text[clause_start:match.start()]
+            after_scene = text[match.end():clause_end]
+            target_before_scene = _has_target_reference(before_scene, target_type, is_sar)
+            if not is_sar and target_before_scene:
+                target_mentions = [
+                    item for item in _matches(clause, _OBJECT_ALIASES)
+                    if item.value == target_type and item.end <= match.start() - clause_start
+                ]
+                if target_mentions and _has_person_beneficiary(
+                    clause[target_mentions[-1].end : match.start() - clause_start]
+                ):
+                    continue
+            if is_sar and not _ACTION_RE.search(clause):
+                preceding_person_references = list(
+                    _PERSON_MENTION_RE.finditer(before_scene)
+                )
+                target_before_scene = bool(
+                    preceding_person_references
+                    and (
+                        (
+                            not _ACTION_RE.search(text)
+                            and not _has_multiple_person_referents(text)
+                        )
+                        or
+                        preceding_person_references[-1].group(0) == "people"
+                        or _has_unambiguous_person_anaphor(
+                            following_clause,
+                            has_multiple_antecedents=_has_multiple_person_referents(clause),
+                        )
+                    )
+                )
+            target_after_scene = _has_target_reference(after_scene, target_type, is_sar)
+            placement_before_target = target_after_scene and bool(
+                re.search(rf"\b(?:{_PLACEMENT_PATTERN})\b", after_scene)
+                and not re.search(
+                    rf"\b(?:{_FIND_PATTERN}|{_BRING_PATTERN})\b.*"
+                    rf"\b(?:{_PLACEMENT_PATTERN})\b",
+                    after_scene,
+                )
+            )
+            leading_location = bool(
+                re.fullmatch(
+                    rf"\s*(?:{_SCENE_LOCATION_PATTERN})\s+(?:(?:an?|the)\s+)?",
+                    text[clause_start:match.start()],
+                )
+            )
+            sentence_start = text.rfind(".", 0, match.start()) + 1
+            sentence_context = text[sentence_start:match.start()]
+            action_target_context = leading_location and bool(
+                _ACTION_RE.search(sentence_context)
+                and _has_target_reference(sentence_context, target_type, is_sar)
+            )
+            following_context = leading_location and bool(
+                _has_target_reference(following_clause, target_type, is_sar)
+            )
+            leading_compound_location = bool(
+                _ACTION_RE.search(following_clause)
+                and _has_target_reference(following_clause, target_type, is_sar)
+                and _matches(clause, _LANDMARK_ALIASES)
+                and any(
+                    re.match(rf"\s*(?:{pattern})\b", clause)
+                    for _, pattern in _RELATION_PHRASES
+                )
+            )
+            if "elsewhere" in clause:
+                continue
+            if (
+                target_before_scene
+                or placement_before_target
+                or action_target_context
+                or following_context
+                or leading_compound_location
+            ):
+                return value
     return None
 
 
@@ -494,16 +881,27 @@ def parse_command(
     scope = _target_scope(normalized)
     intent = _resolve_intent(scope, expected_intent)
     target_type, is_sar = _resolve_target(scope)
-    landmarks = _matches(scope, _LANDMARK_ALIASES)
-    landmark = _choose_landmark(scope, landmarks, is_sar, target_type)
-    hint = _scene_hint(scope)
+    evidence_scope = _sar_evidence_scope(scope) if is_sar else scope
+    landmarks = _matches(evidence_scope, _LANDMARK_ALIASES)
+    landmark = _choose_landmark(evidence_scope, landmarks, is_sar, target_type)
+    hint_scope = scope
+    if is_sar:
+        actions = list(_ACTION_RE.finditer(scope))
+        antecedent_context = scope[: actions[-1].start()] if actions else ""
+        if _has_multiple_person_referents(antecedent_context) and not re.search(
+            r"\bpeople\b", antecedent_context
+        ):
+            hint_scope = evidence_scope
+        else:
+            hint_scope = _sar_scene_scope(scope)
+    hint = _scene_hint(hint_scope, target_type, is_sar)
 
     if is_sar:
         return ParsedCommand(
             intent=intent,
             target_type="person",
             landmark=landmark,
-            situation=_resolve_situation(scope),
+            situation=_resolve_situation(evidence_scope),
             scene_hint=hint,
         )
 
