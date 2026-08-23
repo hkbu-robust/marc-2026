@@ -28,8 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /agent
 
-# context = starter kit root -> copy marc_sdk (library) + demo (agent)
+# context = starter kit root -> copy marc_sdk, participant intelligence, and demo adapter
 COPY marc_sdk /agent/marc_sdk
+COPY marc_agent /agent/marc_agent
 COPY demo     /agent/demo
 
 # Same RMW as the runtime platform (FastDDS). Import paths for marc_sdk (/agent) + demo local modules (/agent/demo).
