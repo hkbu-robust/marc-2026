@@ -27,3 +27,4 @@ simulation-platform/.env
 
 # luka: workstation specific & personal
 docs/luka/
+.DS_Store
