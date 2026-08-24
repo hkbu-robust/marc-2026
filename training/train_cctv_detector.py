@@ -1,4 +1,4 @@
-"""Prepare the Stage 1 dataset and launch the fixed YOLO26x training job."""
+"""Prepare the Stage 1 CCTV dataset and launch the fixed YOLO26x training job."""
 
 from __future__ import annotations
 

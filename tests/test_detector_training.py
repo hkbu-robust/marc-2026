@@ -8,8 +8,8 @@ from pathlib import Path
 
 import yaml
 
-from training.train_detector import prepare_dataset
-from training.evaluate_detector import _score
+from training.train_cctv_detector import prepare_dataset
+from training.evaluate_cctv_detector import _score, _select_head, _select_runtime
 
 
 class DetectorDatasetTests(unittest.TestCase):
@@ -66,6 +66,54 @@ class DetectorDatasetTests(unittest.TestCase):
         self.assertEqual(1.0, result["recall"])
         self.assertEqual(1.0, result["precision"])
         self.assertEqual(1.0, result["cameras"]["rig_1_a"]["recall"])
+
+    def test_operational_score_matches_in_confidence_order(self):
+        frames = [{
+            "image": Path("x.png"), "camera": "rig_1_a",
+            "labels": [(0, 0.05, 0.05, 0.10, 0.10), (0, 0.07, 0.05, 0.10, 0.10)],
+        }]
+        predictions = {"x.png": [
+            {"class_id": 0, "conf": 0.9, "xyxy": [-2, 0, 8, 10], "shape": (100, 100)},
+            {"class_id": 0, "conf": 0.8, "xyxy": [0, 0, 10, 10], "shape": (100, 100)},
+        ]}
+
+        result = _score(frames, predictions, ["target"], conf=0.1, budget=2)
+
+        self.assertEqual(1.0, result["recall"])
+        self.assertEqual(1.0, result["precision"])
+
+    def test_head_selection_uses_equal_candidate_budget(self):
+        def result(end2end, confidence, budget, recall, nms_iou=0.7, macro_f1=None):
+            bucket = {"recall": recall}
+            return {
+                "end2end": end2end, "nms_iou": nms_iou, "confidence": confidence,
+                "candidate_limit": budget, "recall": recall, "macro_recall": recall,
+                "macro_f1": recall if macro_f1 is None else macro_f1,
+                "mean_inference_ms": 10.0, "classes": {"target": bucket},
+                "cameras": {"rig_1_a": bucket}, "sizes": {"tiny": bucket, "small": bucket},
+            }
+
+        comparisons = [
+            result(True, 0.001, 20, 0.9),
+            result(False, 0.001, 20, 0.8),
+            result(False, 0.1, 10, 0.99),
+        ]
+        self.assertTrue(_select_head(comparisons))
+
+    def test_runtime_selection_considers_every_nms_setting(self):
+        def result(nms_iou, macro_f1):
+            bucket = {"recall": 0.9}
+            return {
+                "end2end": False, "nms_iou": nms_iou, "confidence": 0.3,
+                "candidate_limit": 50, "recall": 0.9, "macro_recall": 0.9,
+                "macro_f1": macro_f1, "mean_inference_ms": 10.0,
+                "classes": {"target": bucket}, "cameras": {"rig_1_a": bucket},
+                "sizes": {"tiny": bucket, "small": bucket},
+            }
+
+        comparisons = [result(0.7, 0.8), result(0.5, 0.9)]
+        self.assertEqual(0.5, _select_runtime(comparisons, False)["nms_iou"])
+        self.assertEqual(0.5, _select_runtime(list(reversed(comparisons)), False)["nms_iou"])
 
 
 if __name__ == "__main__":
