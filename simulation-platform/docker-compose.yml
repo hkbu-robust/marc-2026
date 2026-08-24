@@ -140,12 +140,11 @@ services:
       TRAINER_PEOPLE_ON_LANDMARK_PROB: "${TRAINER_PEOPLE_ON_LANDMARK_PROB:-0.45}"
       TRAINER_PEOPLE_WRONG_PLACE_PROB: "${TRAINER_PEOPLE_WRONG_PLACE_PROB:-0.55}"
       TRAINER_FORCE_CLIMB_LANDMARK_PROB: "${TRAINER_FORCE_CLIMB_LANDMARK_PROB:-0.35}"
-      # 1 = keep normal object/landmark density, cycle one climb target per
-      # scene, place that landmark where the roof stays in frame, and drop
-      # posed joints onto the raycasted top. Extra people stay on the ground.
+      # 1 = construct every scene with one random-pose climber on a guaranteed
+      # climb landmark (vending-biased). Extra people stay on the ground.
       TRAINER_PEOPLE_ABOVE: "${TRAINER_PEOPLE_ABOVE:-0}"
       TRAINER_PEOPLE_ABOVE_CLEARANCE: "${TRAINER_PEOPLE_ABOVE_CLEARANCE:-0.03}"
-      TRAINER_PEOPLE_ABOVE_TYPES: "${TRAINER_PEOPLE_ABOVE_TYPES:-}"
+      TRAINER_PEOPLE_ABOVE_TYPES: "${TRAINER_PEOPLE_ABOVE_TYPES:-vending_machine,trash_can,hydrant,postbox}"
       # Repeat counts in the climb-target cycle. Default 3x vending machines.
       TRAINER_PEOPLE_ABOVE_WEIGHTS: "${TRAINER_PEOPLE_ABOVE_WEIGHTS:-vending_machine:3}"
       # Render fresh frames after redeploy/contact before GT capture, clearing

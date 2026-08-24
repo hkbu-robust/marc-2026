@@ -73,12 +73,10 @@ class AboveModePatchTests(unittest.TestCase):
                 )
                 self.assertTrue(placement["above"])
                 self.assertEqual(placement["contact_clearance"], 0.03)
-                if placement["on_landmark_type"] in (
-                        "vending_machine", "postbox"):
-                    self.assertIn(
-                        climbers[0]["type"],
-                        ("person_sitting", "person_crouching"),
-                    )
+                self.assertIn(
+                    climbers[0]["type"],
+                    ("person_reaching", "person_crouching", "person_sitting"),
+                )
                 extras = [
                     p for p in people
                     if not (p.get("placement") or {}).get("above")
@@ -95,6 +93,42 @@ class AboveModePatchTests(unittest.TestCase):
              "trash_can", "hydrant", "postbox"],
         )
         self.assertEqual(targets.count("vending_machine"), 3)
+
+    def test_injects_climber_when_catalog_people_are_empty(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = [{'type': 'mug', 'count': 6}]\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<above-fallback-climber>", "exec"), namespace)
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "1"
+            os.environ["TRAINER_PEOPLE_ALL_CHARS"] = "0"
+            os.environ["TRAINER_PEOPLE_ABOVE_TYPES"] = "vending_machine"
+            os.environ["TRAINER_PEOPLE_ABOVE_WEIGHTS"] = "vending_machine:1"
+            landmarks, specs = namespace["build"](
+                [{"name": "bench_0"}],
+                ["female_student_01"],
+                ["person_reaching"],
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        people = [o for o in specs if o.get("character")]
+        self.assertEqual(len(people), 1)
+        self.assertTrue((people[0].get("placement") or {}).get("above"))
+        self.assertEqual(
+            people[0]["placement"]["on_landmark_type"], "vending_machine")
+        self.assertIn("vending_machine_0", {s["name"] for s in landmarks})
 
     def test_equal_weights_restore_even_cycle(self):
         patch = _load_patch()

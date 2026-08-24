@@ -13,10 +13,11 @@
 #   1. sets place_on_landmark=True in trainer.py
 #   2. lets an object spec's placement overlay the pose YAML
 #   3. re-seats those people after landmark ground-snap (trash cans tip)
-#   4. if placement.above is set, raycasts the landmark's real top surface
-#      and drops the posed skeleton onto that patch (in contact AND on top,
-#      not AABB-hovering beside it). Save only when that contact verifies
-#      AND the camera sees the person stacked on the unclipped landmark top.
+#   4. if placement.above is set, constructs the stacked image: seats the
+#      posed skeleton on a raycasted top-patch (retry XY until in contact
+#      AND on top), parks the landmark in camera headroom, and if the roof
+#      would still clip, nudges it nearer and recaptures. The 2D/3D save
+#      check is a safety net, not a generate-and-filter lottery.
 #
 # boot.py runs this before dataset-gen. Idempotent via MARKER. Pair with
 # patch_trainer_people.py, which actually stamps placement onto people specs.
@@ -191,7 +192,7 @@ NEW_SAVE_V1 = '''        active_payload = gt_by_mission.get(active_mission_id)
                     log.warning(f"offline GT save failed: {e}")
 '''
 
-NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
+NEW_SAVE_V2 = '''        active_payload = gt_by_mission.get(active_mission_id)
         _active_valid = True
         if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
                 "0", "false", "no", "off", ""):
@@ -273,6 +274,144 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                 f"{'saved' if _active_valid else 'skipped'} "
                 f"placed={_n_placed} stacked={_n_stack} "
                 f"people={len(_people)} landmarks={len(_landmarks)}")
+        if save_offline_enabled and _active_valid:
+            # 선택된 카메라만 저장 (배치 콘텐츠가 있는 active 미션).
+            if active_payload is not None:
+                try:
+                    gt.save_offline(scene_id, {active_mission_id: active_payload})
+                except Exception as e:
+                    log.warning(f"offline GT save failed: {e}")
+'''
+
+NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
+        _active_valid = True
+        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            _img = (active_payload or {}).get("image") or {}
+            try:
+                _ih = float(_img.get("height") or 0.0)
+            except (TypeError, ValueError):
+                _ih = 0.0
+            _top_m = max(8.0, 0.03 * _ih) if _ih else 8.0
+            _want = {
+                x.strip() for x in
+                (os.environ.get("TRAINER_PEOPLE_ABOVE_TYPES", "") or "").split(",")
+                if x.strip()
+            }
+            def _bbox4(_det):
+                _b = _det.get("bbox") or []
+                if len(_b) != 4:
+                    return None
+                _x0, _y0, _x1, _y1 = (
+                    float(_b[0]), float(_b[1]), float(_b[2]), float(_b[3]))
+                if _x1 < _x0:
+                    _x0, _x1 = _x1, _x0
+                if _y1 < _y0:
+                    _y0, _y1 = _y1, _y0
+                if _x1 - _x0 < 1.0 or _y1 - _y0 < 1.0:
+                    return None
+                return _x0, _y0, _x1, _y1
+            def _visible_stack(_person, _lm):
+                _pb, _lb = _bbox4(_person), _bbox4(_lm)
+                if _pb is None or _lb is None:
+                    return False
+                _ox0, _oy0, _ox1, _oy1 = _pb
+                _lx0, _ly0, _lx1, _ly1 = _lb
+                # Roof / climber cut off at the top of the CCTV frame.
+                if _oy0 <= _top_m or _ly0 <= _top_m:
+                    return False
+                _ovx = min(_ox1, _lx1) - max(_ox0, _lx0)
+                _minw = min(_ox1 - _ox0, _lx1 - _lx0)
+                if _minw <= 1.0 or _ovx < 0.4 * _minw:
+                    return False
+                if 0.5 * (_oy0 + _oy1) >= 0.5 * (_ly0 + _ly1):
+                    return False
+                _lmh = _ly1 - _ly0
+                if _lmh < 8.0:
+                    return False
+                if (_ly1 - _oy1) < 0.22 * _lmh:
+                    return False
+                if _oy0 > _ly0:
+                    return False
+                return True
+            def _marc_eval_above(_payload):
+                try:
+                    from world import object_deployer as _od_above
+                    _n_placed = int(getattr(
+                        _od_above, "_marc_above_placed_n", 0) or 0)
+                    _target = str(getattr(
+                        _od_above, "_marc_above_target", "") or "")
+                except Exception:
+                    _n_placed = 0
+                    _target = ""
+                _want_now = {_target} if _target else _want
+                _dets = list((_payload or {}).get("detections") or [])
+                _people = [
+                    d for d in _dets
+                    if str(d.get("class") or "").startswith("person_")
+                ]
+                _landmarks = [
+                    d for d in _dets
+                    if (
+                        str(d.get("class") or "") in _want_now
+                        if _want_now else d.get("kind") == "landmark"
+                    )
+                ]
+                _n_stack = sum(
+                    1 for _p in _people for _lm in _landmarks
+                    if _visible_stack(_p, _lm)
+                )
+                return _n_placed, _target, _n_stack, len(_people), len(_landmarks)
+            _n_placed, _target, _n_stack, _n_peep, _n_lm = _marc_eval_above(
+                active_payload)
+            _active_valid = _n_placed > 0 and _n_stack > 0
+            _nudge_i = 0
+            while (not _active_valid) and _n_placed > 0 and _nudge_i < 3:
+                _nudge_i += 1
+                try:
+                    from world.object_deployer import (
+                        _marc_nudge_above_nearer as _nudge_fn,
+                        _marc_place_above_people as _place_fn,
+                    )
+                    _miss = next(
+                        m for m in missions if m.get("id") == active_mission_id)
+                    if not _nudge_fn(
+                            _miss["id"], _miss.get("objects") or [],
+                            configurations):
+                        break
+                    _place_fn(
+                        _miss["id"], _miss.get("objects") or [],
+                        configurations)
+                    for _ in range(6):
+                        simulation_context.step(render=True)
+                    gt_by_mission = gt.capture(
+                        scene_id, simulation_app,
+                        stamp=float(getattr(
+                            simulation_context, "current_time", 0.0) or 0.0),
+                        render_step=lambda: simulation_context.step(
+                            render=True))
+                    total = 0
+                    for mid, payload in gt_by_mission.items():
+                        ros2.publish_groundtruth(mid, payload)
+                        total += len(payload.get("detections", []))
+                    active_payload = gt_by_mission.get(active_mission_id)
+                    _n_placed, _target, _n_stack, _n_peep, _n_lm = (
+                        _marc_eval_above(active_payload))
+                    _active_valid = _n_placed > 0 and _n_stack > 0
+                    log.info(
+                        f"Above scene {scene_id}: nudge {_nudge_i} "
+                        f"target={_target or '-'} "
+                        f"{'aligned' if _active_valid else 'retry'} "
+                        f"placed={_n_placed} stacked={_n_stack}")
+                except Exception as _ne:
+                    log.warning(
+                        f"above-mode nudge failed (non-fatal): {_ne}")
+                    break
+            log.info(
+                f"Above scene {scene_id}: target={_target or '-'} "
+                f"{'saved' if _active_valid else 'skipped'} "
+                f"placed={_n_placed} stacked={_n_stack} "
+                f"people={_n_peep} landmarks={_n_lm}")
         if save_offline_enabled and _active_valid:
             # 선택된 카메라만 저장 (배치 콘텐츠가 있는 active 미션).
             if active_payload is not None:
@@ -404,7 +543,7 @@ NEW_POSITIONS_V1 = '''        positions = generate_cell_positions(area, n_lm + n
                 obj_pos[_climber_i] = list(lm_pos[_lm_i])
 '''
 
-NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_obj)
+NEW_POSITIONS_V2 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
         lm_pos = positions[:n_lm]
         obj_pos = positions[n_lm:]
         if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
@@ -459,6 +598,70 @@ NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_ob
                 if _spot is not None:
                     lm_pos[_lm_i] = _spot
                 obj_pos[_climber_i] = list(lm_pos[_lm_i])
+'''
+
+NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_obj)
+        lm_pos = positions[:n_lm]
+        obj_pos = positions[n_lm:]
+        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            import re as _re_pos
+            _pl = ""
+            _climber_i = None
+            _obj_i = 0
+            for _spec in objects or []:
+                _n = max(1, int(_spec.get("count", 1) or 1))
+                _opl = (_spec.get("placement") or {})
+                if _climber_i is None and _opl.get("above"):
+                    _climber_i = _obj_i
+                    _pl = str(_opl.get("on_landmark_type") or "")
+                _obj_i += _n
+            _lm_i = None
+            if _pl:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t == _pl:
+                        _lm_i = _i
+                        break
+            if _lm_i is None:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t not in ("bench", "picnic_table"):
+                        _lm_i = _i
+                        break
+            if _lm_i is not None and _lm_i < len(lm_pos):
+                _spot = None
+                if isinstance(area, dict):
+                    try:
+                        _tl = list(area["top_left"])
+                        _tr = list(area["top_right"])
+                        _br = list(area["bottom_right"])
+                        _bl = list(area["bottom_left"])
+                        _u = 0.42 + random.random() * 0.16
+                        _v = (0.20 + random.random() * 0.12
+                              if _pl in ("vending_machine", "postbox")
+                              else 0.30 + random.random() * 0.12)
+                        _bot = [(1.0 - _u) * _bl[_k] + _u * _br[_k]
+                                for _k in range(3)]
+                        _top = [(1.0 - _u) * _tl[_k] + _u * _tr[_k]
+                                for _k in range(3)]
+                        _spot = [(1.0 - _v) * _bot[_k] + _v * _top[_k]
+                                 for _k in range(3)]
+                        try:
+                            from world import object_deployer as _od_near
+                            _od_near._marc_above_near_xy = (
+                                _bot[0] - _top[0], _bot[1] - _top[1])
+                        except Exception:
+                            pass
+                    except Exception:
+                        _spot = None
+                if _spot is not None:
+                    lm_pos[_lm_i] = _spot
+                if (_climber_i is not None
+                        and _climber_i < len(obj_pos)):
+                    obj_pos[_climber_i] = list(lm_pos[_lm_i])
 '''
 
 OLD_DEPLOY_LANDMARKS = '''        deploy_landmarks(mission_id, landmarks, area, configurations,
@@ -552,7 +755,7 @@ def above_contact_ok(foot_xyz, lm_lo, lm_hi, top_z, max_gap=0.06):
 ABOVE_HELPER = r'''
 
 def _marc_place_above_people(mission_id, objects, configurations=None):
-    """[marc-patch] _marc_above_surface_contact: posed joints on raycast top."""
+    """[marc-patch] _marc_above_construct: posed joints on raycast top (_marc_above_surface_contact)."""
     jobs = []
     for spec in objects or []:
         pl = spec.get("placement") or {}
@@ -689,7 +892,7 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             origin_z = hz - 0.01
         return None
 
-    def _top_patch(lm):
+    def _top_candidates(lm):
         rng = _world_range(lm)
         if rng is None:
             return None
@@ -711,8 +914,78 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             patch = [h for h in hits if h[2] >= top_z - 0.04]
             cx = sum(h[0] for h in patch) / float(len(patch))
             cy = sum(h[1] for h in patch) / float(len(patch))
-            return [cx, cy, top_z], lo, hi
-        return [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]), hi[2]], lo, hi
+            ordered = [(cx, cy, top_z)]
+            rest = sorted(
+                patch, key=lambda h: (h[0] - cx) ** 2 + (h[1] - cy) ** 2)
+            for h in rest:
+                if abs(h[0] - cx) > 0.01 or abs(h[1] - cy) > 0.01:
+                    ordered.append(h)
+            return ordered, lo, hi
+        mid = (
+            0.5 * (lo[0] + hi[0]),
+            0.5 * (lo[1] + hi[1]),
+            hi[2],
+        )
+        return [mid], lo, hi
+
+    def _seat_at(person, cx, cy, top_z, clearance):
+        person_xyz = _world_xyz(person)
+        if person_xyz is None:
+            return None
+        joints = _posed_joints(person)
+        support = _support_from_joints(joints)
+        if support is None:
+            rng = _world_range(person)
+            if rng is None:
+                return None
+            p_lo, p_hi = rng
+            support = [
+                0.5 * (p_lo[0] + p_hi[0]),
+                0.5 * (p_lo[1] + p_hi[1]),
+                p_lo[2],
+            ]
+        _set_xyz(person, [
+            person_xyz[0] + (cx - support[0]),
+            person_xyz[1] + (cy - support[1]),
+            person_xyz[2],
+        ])
+        if callable(_drop_to_support):
+            try:
+                _drop_to_support(
+                    stage, str(person.GetPath()),
+                    support_z=top_z, clearance=clearance)
+            except Exception:
+                person_xyz = _world_xyz(person)
+                joints = _posed_joints(person)
+                support = _support_from_joints(joints)
+                if person_xyz is None or support is None:
+                    return None
+                _set_xyz(person, [
+                    person_xyz[0], person_xyz[1],
+                    person_xyz[2] + (top_z + clearance - support[2]),
+                ])
+        else:
+            person_xyz = _world_xyz(person)
+            joints = _posed_joints(person)
+            support = _support_from_joints(joints)
+            if person_xyz is None or support is None:
+                return None
+            _set_xyz(person, [
+                person_xyz[0], person_xyz[1],
+                person_xyz[2] + (top_z + clearance - support[2]),
+            ])
+        joints = _posed_joints(person)
+        support = _support_from_joints(joints)
+        if support is None:
+            rng = _world_range(person)
+            if rng is None:
+                return None
+            support = [
+                0.5 * (rng[0][0] + rng[1][0]),
+                0.5 * (rng[0][1] + rng[1][1]),
+                rng[0][2],
+            ]
+        return support
 
     def _contact_ok(foot, lo, hi, top_z):
         fx, fy, fz = foot
@@ -809,72 +1082,26 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         if not lms or not people:
             continue
         lm, person = lms[0], people[0]
-        top = _top_patch(lm)
-        if top is None:
+        cand = _top_candidates(lm)
+        if cand is None:
             continue
-        (cx, cy, top_z), lo, hi = top
-        person_xyz = _world_xyz(person)
-        if person_xyz is None:
-            continue
-        joints = _posed_joints(person)
-        support = _support_from_joints(joints)
-        if support is None:
-            rng = _world_range(person)
-            if rng is None:
-                continue
-            p_lo, p_hi = rng
-            support = [
-                0.5 * (p_lo[0] + p_hi[0]),
-                0.5 * (p_lo[1] + p_hi[1]),
-                p_lo[2],
-            ]
-        _set_xyz(person, [
-            person_xyz[0] + (cx - support[0]),
-            person_xyz[1] + (cy - support[1]),
-            person_xyz[2],
-        ])
-        if callable(_drop_to_support):
-            try:
-                _drop_to_support(
-                    stage, str(person.GetPath()),
-                    support_z=top_z, clearance=clearance)
-            except Exception:
-                person_xyz = _world_xyz(person)
-                joints = _posed_joints(person)
-                support = _support_from_joints(joints)
-                if person_xyz is None or support is None:
-                    continue
-                _set_xyz(person, [
-                    person_xyz[0], person_xyz[1],
-                    person_xyz[2] + (top_z + clearance - support[2]),
-                ])
-        else:
-            person_xyz = _world_xyz(person)
-            joints = _posed_joints(person)
-            support = _support_from_joints(joints)
-            if person_xyz is None or support is None:
-                continue
-            _set_xyz(person, [
-                person_xyz[0], person_xyz[1],
-                person_xyz[2] + (top_z + clearance - support[2]),
-            ])
-        joints = _posed_joints(person)
-        support = _support_from_joints(joints)
-        if support is None:
-            rng = _world_range(person)
-            if rng is None:
-                continue
-            support = [
-                0.5 * (rng[0][0] + rng[1][0]),
-                0.5 * (rng[0][1] + rng[1][1]),
-                rng[0][2],
-            ]
-        if not _contact_ok(support, lo, hi, top_z):
+        candidates, lo, hi = cand
+        seated = False
+        support = None
+        top_z = candidates[0][2]
+        for cx, cy, top_z in candidates:
+            support = _seat_at(person, cx, cy, top_z, clearance)
+            if support is not None and _contact_ok(support, lo, hi, top_z):
+                seated = True
+                break
+        if not seated:
             print(
                 "[on-landmark-patch] above-mode: rejected %s on %s "
-                "(support=%.3f,%.3f,%.3f top_z=%.3f)"
+                "(support=%s top_z=%.3f after %d top-patch tries)"
                 % (str(person.GetPath()), str(lm.GetPath()),
-                   support[0], support[1], support[2], top_z)
+                   ("%.3f,%.3f,%.3f" % tuple(support)
+                    if support is not None else "-"),
+                   top_z, len(candidates))
             )
             continue
         used_lms.add(str(lm.GetPath()))
@@ -885,6 +1112,101 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         "[on-landmark-patch] above-mode: target=%s placed %d/%d person(s) "
         "with surface contact" % ((jobs[0][1] if jobs else "-"), n, len(jobs))
     )
+
+
+def _marc_nudge_above_nearer(mission_id, objects, configurations=None, step=0.18):
+    """[marc-patch] Slide climb target toward camera-near so the roof stays in frame."""
+    near = globals().get("_marc_above_near_xy")
+    if not near:
+        return False
+    try:
+        nx, ny = float(near[0]), float(near[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    mag = (nx * nx + ny * ny) ** 0.5
+    if mag < 1e-4:
+        return False
+    nx, ny = nx / mag * float(step), ny / mag * float(step)
+    jobs = []
+    for spec in objects or []:
+        pl = spec.get("placement") or {}
+        if pl.get("above"):
+            jobs.append((spec, str(pl.get("on_landmark_type") or "")))
+    if not jobs:
+        return False
+    try:
+        import omni.usd
+        from pxr import UsdGeom, Gf, Usd
+    except Exception:
+        return False
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return False
+
+    def _world_xyz(prim):
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            return None
+        t = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()
+        return [float(t[0]), float(t[1]), float(t[2])]
+
+    def _set_xyz(prim, xyz):
+        path = str(prim.GetPath())
+        setter = globals().get("_set_prim_translate")
+        if callable(setter):
+            try:
+                setter(path, xyz)
+                return
+            except Exception:
+                pass
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            return
+        ops = {op.GetOpName(): op for op in xf.GetOrderedXformOps()}
+        op = ops.get("xformOp:translate")
+        if op is None:
+            op = xf.AddTranslateOp()
+        op.Set(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
+
+    def _norm(s):
+        return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+    spec, typ = jobs[0]
+    group = stage.GetPrimAtPath("/world/landmarks/%s" % mission_id)
+    lm = None
+    if group and group.IsValid():
+        for child in group.GetChildren():
+            name = str(child.GetName() or "")
+            blob = _norm(name) + _norm(str(child.GetPath()))
+            if (not typ) or name.startswith(typ) or _norm(typ) in blob:
+                lm = child
+                break
+    pose = str(spec.get("type") or "")
+    ch = str(spec.get("character") or "")
+    person = None
+    try:
+        n = max(1, int(spec.get("count", 1) or 1))
+    except (TypeError, ValueError):
+        n = 1
+    for seq in range(n):
+        pp = "/world/people/%s_%s_%s_%s" % (mission_id, pose, ch, seq)
+        prim = stage.GetPrimAtPath(pp)
+        if prim and prim.IsValid():
+            person = prim
+            break
+    if lm is None or person is None:
+        return False
+    lm_xyz = _world_xyz(lm)
+    p_xyz = _world_xyz(person)
+    if lm_xyz is None or p_xyz is None:
+        return False
+    _set_xyz(lm, [lm_xyz[0] + nx, lm_xyz[1] + ny, lm_xyz[2]])
+    _set_xyz(person, [p_xyz[0] + nx, p_xyz[1] + ny, p_xyz[2]])
+    print(
+        "[on-landmark-patch] above-mode: nudged %s toward camera-near "
+        "(dx=%.3f dy=%.3f)" % (typ or "-", nx, ny)
+    )
+    return True
 '''
 
 
@@ -895,16 +1217,23 @@ def _ensure_above_helper(path):
         src = f.read()
     have_fn = "def _marc_place_above_people" in src
     have_contact = (
-        "_marc_above_surface_contact" in src and "_marc_above_target" in src
-        and "above-mode: target=" in src)
+        "_marc_above_construct" in src and "_marc_above_target" in src
+        and "above-mode: target=" in src
+        and "def _marc_nudge_above_nearer" in src)
     if have_fn and have_contact:
         return False
     if have_fn:
-        start = src.find("\ndef _marc_place_above_people")
-        if start < 0:
-            start = src.find("def _marc_place_above_people")
-        if start >= 0:
-            src = src[:start]
+        starts = []
+        for name in (
+                "\ndef _marc_place_above_people",
+                "\ndef _marc_nudge_above_nearer",
+                "def _marc_place_above_people",
+        ):
+            i = src.find(name)
+            if i >= 0:
+                starts.append(i)
+        if starts:
+            src = src[:min(starts)]
         action = "replaced"
     else:
         action = "appended"
@@ -967,7 +1296,9 @@ def main():
             elif OLD_SNAP in tnew and "reposition_on_landmark_people" not in tnew:
                 tnew = tnew.replace(OLD_SNAP, NEW_SNAP, 1)
         if NEW_SAVE not in tnew:
-            if NEW_SAVE_V1 in tnew:
+            if NEW_SAVE_V2 in tnew:
+                tnew = tnew.replace(NEW_SAVE_V2, NEW_SAVE, 1)
+            elif NEW_SAVE_V1 in tnew:
                 tnew = tnew.replace(NEW_SAVE_V1, NEW_SAVE, 1)
             elif OLD_SAVE in tnew:
                 tnew = tnew.replace(OLD_SAVE, NEW_SAVE, 1)
@@ -1019,7 +1350,9 @@ def main():
         if OLD_INITIAL_WARN in tnew:
             tnew = tnew.replace(OLD_INITIAL_WARN, NEW_INITIAL_WARN, 1)
         if NEW_POSITIONS not in tnew:
-            if NEW_POSITIONS_V1 in tnew:
+            if NEW_POSITIONS_V2 in tnew:
+                tnew = tnew.replace(NEW_POSITIONS_V2, NEW_POSITIONS, 1)
+            elif NEW_POSITIONS_V1 in tnew:
                 tnew = tnew.replace(NEW_POSITIONS_V1, NEW_POSITIONS, 1)
             elif OLD_POSITIONS in tnew:
                 tnew = tnew.replace(OLD_POSITIONS, NEW_POSITIONS, 1)
@@ -1041,7 +1374,7 @@ def main():
                     f.write(tnew)
                 n += 1
                 print("[on-landmark-patch] trainer.py: place_on_landmark=True "
-                      "(+ surface contact, warmup; save/count on-top only)")
+                      "(+ construct stacked image, warmup; 2D/3D save is a safety net)")
             except OSError as e:
                 print(f"[on-landmark-patch] trainer write failed, skipping: {e}")
         else:

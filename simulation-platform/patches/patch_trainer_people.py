@@ -15,12 +15,9 @@
 # of those prefer a non-seat landmark. TRAINER_FORCE_CLIMB_LANDMARK_PROB
 # (default 0.35) injects vending_machine or trash_can when the scene has none.
 #
-# TRAINER_PEOPLE_ABOVE=1 keeps the normal object/landmark/people density, then
-# guarantees one climber: a non-seat target type is cycled per scene (injected
-# only if missing; vending machines are 3x by default), moved to the front of
-# the landmark list, and one person is co-located on that cell then dropped
-# onto the raycasted top surface using the posed skeleton (in contact AND on
-# top; seats/vehicles are never climb targets).
+# TRAINER_PEOPLE_ABOVE=1 constructs every scene with one random-pose climber
+# on a guaranteed climb landmark (vending-biased), rest of the mix unchanged.
+# Seats/vehicles are never climb targets. Extra people stay on the ground.
 #
 # boot.py runs this before dataset-gen (trainer.py). Idempotent via MARKER.
 import os
@@ -298,14 +295,6 @@ NEW_COMBOS = '''    combos = []
                 "above": True,
                 "contact_clearance": _marc_above_clearance(),
             }
-            fit = [p for p in _ON_ABOVE_POSES if p in _pose_set]
-            if _target in ("vending_machine", "postbox"):
-                _tall = [p for p in ("person_sitting", "person_crouching")
-                         if p in _pose_set]
-                if _tall:
-                    fit = _tall
-            if fit:
-                spec["type"] = random.choice(fit)
             _climber_placed = True
         elif (not _above_mode) and random.random() < _marc_frac(
                 "TRAINER_PEOPLE_ON_LANDMARK_PROB", 0.45):
@@ -330,6 +319,17 @@ NEW_COMBOS = '''    combos = []
                 if fit:
                     spec["type"] = random.choice(fit)
         objects.append(spec)
+    if _above_mode and _target and not _climber_placed and all_chars and all_poses:
+        objects.append({
+            "type": random.choice(all_poses),
+            "character": all_chars[0],
+            "count": 1,
+            "placement": {
+                "on_landmark_type": _target,
+                "above": True,
+                "contact_clearance": _marc_above_clearance(),
+            },
+        })
 '''
 
 
@@ -352,6 +352,55 @@ def main():
         src = f.read()
 
     if MARKER in src:
+        changed = False
+        old_pin = (
+            '            fit = [p for p in _ON_ABOVE_POSES if p in _pose_set]\n'
+            '            if _target in ("vending_machine", "postbox"):\n'
+            '                _tall = [p for p in ("person_sitting", "person_crouching")\n'
+            '                         if p in _pose_set]\n'
+            '                if _tall:\n'
+            '                    fit = _tall\n'
+            '            if fit:\n'
+            '                spec["type"] = random.choice(fit)\n'
+            '            _climber_placed = True\n'
+        )
+        if old_pin in src:
+            src = src.replace(old_pin, "            _climber_placed = True\n", 1)
+            changed = True
+        fallback = (
+            "    if _above_mode and _target and not _climber_placed "
+            "and all_chars and all_poses:"
+        )
+        if fallback not in src and "_climber_placed = False" in src:
+            needle = (
+                "                if fit:\n"
+                "                    spec[\"type\"] = random.choice(fit)\n"
+                "        objects.append(spec)\n"
+            )
+            insert = needle + (
+                "    if _above_mode and _target and not _climber_placed "
+                "and all_chars and all_poses:\n"
+                "        objects.append({\n"
+                "            \"type\": random.choice(all_poses),\n"
+                "            \"character\": all_chars[0],\n"
+                "            \"count\": 1,\n"
+                "            \"placement\": {\n"
+                "                \"on_landmark_type\": _target,\n"
+                "                \"above\": True,\n"
+                "                \"contact_clearance\": _marc_above_clearance(),\n"
+                "            },\n"
+                "        })\n"
+            )
+            if needle in src:
+                src = src.replace(needle, insert, 1)
+                changed = True
+        if changed:
+            if not _write(src):
+                return 0
+            print("[people-patch] upgraded: construct-first climber "
+                  "(random pose, guaranteed target)")
+            _log_people()
+            return 0
         print("[people-patch] already applied, skipping")
         return 0
 
