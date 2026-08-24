@@ -15,12 +15,11 @@
 # of those prefer a non-seat landmark. TRAINER_FORCE_CLIMB_LANDMARK_PROB
 # (default 0.35) injects vending_machine or trash_can when the scene has none.
 #
-# TRAINER_PEOPLE_ABOVE=1 switches to abnormal "climbed above" mode: every
-# person is parked on a non-seat landmark at that landmark's XY, lifted by
-# TRAINER_PEOPLE_ABOVE_Z metres (default 2.55 — same origin-aligned hover as
-# the drink-machine samples). Benches / picnic tables are skipped. Optional
-# TRAINER_PEOPLE_ABOVE_TYPES is a comma list of landmark classes; default is
-# vending / trash / hydrant / postbox / bicycle / kick scooter / cars.
+# TRAINER_PEOPLE_ABOVE=1 switches to focused abnormal mode: each scene picks
+# one non-seat target type, round-robin, and spawns one climbing person on it.
+# TRAINER_PEOPLE_ABOVE_TYPES is the coverage cycle; the target is injected if
+# landmark subsampling dropped it. The deployer patch uses final world bounds
+# to put the posed person's bottom on the landmark top (pose-aware contact).
 #
 # boot.py runs this before dataset-gen (trainer.py). Idempotent via MARKER.
 import os
@@ -168,11 +167,12 @@ NEW_COMBOS = '''    combos = []
     def _marc_people_above():
         """[marc-patch] Marker: abnormal climbed-above (landmark XY + Z lift)."""
         return _marc_flag("TRAINER_PEOPLE_ABOVE", "0")
-    def _marc_above_z():
+    def _marc_above_clearance():
         try:
-            return float(os.environ.get("TRAINER_PEOPLE_ABOVE_Z", "2.55") or "2.55")
+            return float(os.environ.get(
+                "TRAINER_PEOPLE_ABOVE_CLEARANCE", "0.01") or "0.01")
         except (TypeError, ValueError):
-            return 2.55
+            return 0.01
     def _marc_lm_typ(spec):
         import re as _re_lm
         return _re_lm.sub(r"_[0-9]+$", "", str((spec or {}).get("name") or ""))
@@ -214,7 +214,8 @@ NEW_COMBOS = '''    combos = []
     _ON_SEAT_POSES = ("person_sitting", "person_reclining", "person_lying_down")
     _ON_ABOVE_POSES = ("person_reaching", "person_crouching", "person_sitting")
     _above_mode = _marc_people_above()
-    if random.random() < _marc_frac("TRAINER_FORCE_CLIMB_LANDMARK_PROB", 0.35):
+    if (not _above_mode and
+            random.random() < _marc_frac("TRAINER_FORCE_CLIMB_LANDMARK_PROB", 0.35)):
         _have = {_marc_lm_typ(s) for s in landmarks}
         if not (_have & set(_CLIMB)):
             landmarks.append({"name": "%s_0" % random.choice(
@@ -227,32 +228,39 @@ NEW_COMBOS = '''    combos = []
     _raw_above = os.environ.get("TRAINER_PEOPLE_ABOVE_TYPES", "") or ""
     _above_filter = [x.strip() for x in _raw_above.split(",") if x.strip()]
     _aboves = [t for t in _lm_types if _marc_is_above_ok(t)]
-    if _above_filter:
-        _want = [t for t in _above_filter if _marc_is_above_ok(t)]
-        if _above_mode:
-            # An explicit type list is a coverage contract in above mode:
-            # inject any requested class that landmark subsampling dropped.
-            for _t in _want:
-                if _t not in _lm_types:
-                    landmarks.append({"name": "%s_0" % _t})
-        _aboves = list(_want)
-        if not _above_mode:
-            _aboves = [t for t in _lm_types if t in set(_want)]
-    if _above_mode and not _aboves:
+    if _above_mode:
+        # One target per scene avoids four elevated people occluding each
+        # other. Cycle deterministically so vending/postbox cannot be starved.
         _pool = [
             t for t in _above_filter if _marc_is_above_ok(t)
         ] or ["vending_machine", "trash_can", "hydrant",
               "postbox", "bicycle", "kick_scooter"]
-        _pick = random.choice(_pool)
-        landmarks.append({"name": "%s_0" % _pick})
-        _aboves = [_pick]
+        global _marc_above_type_cursor
+        try:
+            _cursor = int(_marc_above_type_cursor)
+        except (NameError, TypeError, ValueError):
+            _cursor = 0
+        _target = _pool[_cursor % len(_pool)]
+        _marc_above_type_cursor = _cursor + 1
+        _target_specs = [
+            s for s in landmarks if _marc_lm_typ(s) == _target
+        ]
+        # Focused mode: retain one target landmark only. This puts the target
+        # first in the cell layout and removes large occluding distractors.
+        landmarks = (
+            [_target_specs[0]] if _target_specs
+            else [{"name": "%s_0" % _target}]
+        )
+        _lm_types = [_target]
+        _aboves = [_target]
+    elif _above_filter:
+        _want = set(t for t in _above_filter if _marc_is_above_ok(t))
+        _aboves = [t for t in _lm_types if t in _want]
     _seats = [t for t in _lm_types if _marc_is_seat(t)]
     _wrongs = [t for t in _lm_types if t in _WRONG or _marc_people_is_vehicle(t)]
     _pose_set = set(all_poses)
     if _above_mode:
-        # One unique pose/identity pair per eligible landmark type. This makes
-        # above mode a deterministic data-production mode rather than a 45%
-        # augmentation of otherwise-normal scenes.
+        # Focused above mode has one target and one person.
         _above_pairs = [
             (p, ch) for ch in all_chars for p in _ON_ABOVE_POSES
             if p in _pose_set
@@ -270,9 +278,8 @@ NEW_COMBOS = '''    combos = []
                 lm_typ = _aboves[_i % len(_aboves)]
                 spec["placement"] = {
                     "on_landmark_type": lm_typ,
-                    "z_offset_from_top": 0.02,
                     "above": True,
-                    "z_offset_from_origin": _marc_above_z(),
+                    "contact_clearance": _marc_above_clearance(),
                 }
         elif random.random() < _marc_frac("TRAINER_PEOPLE_ON_LANDMARK_PROB", 0.45):
             want_wrong = random.random() < _marc_frac(
@@ -354,10 +361,10 @@ def _log_people():
     mode = os.environ.get("TRAINER_PEOPLE_ALL_CHARS", "1")
     on_p = os.environ.get("TRAINER_PEOPLE_ON_LANDMARK_PROB", "0.45")
     above = os.environ.get("TRAINER_PEOPLE_ABOVE", "0")
-    z = os.environ.get("TRAINER_PEOPLE_ABOVE_Z", "2.55")
+    clearance = os.environ.get("TRAINER_PEOPLE_ABOVE_CLEARANCE", "0.01")
     print(f"[people-patch] all identities per scene "
           f"(TRAINER_PEOPLE_ALL_CHARS={mode}); on-landmark p={on_p}; "
-          f"above={above} z={z}")
+          f"above={above} clearance={clearance}")
 
 
 if __name__ == "__main__":

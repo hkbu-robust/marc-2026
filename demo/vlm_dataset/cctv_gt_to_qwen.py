@@ -238,18 +238,10 @@ def _sar_situation_for(person: dict, lm: dict, rel: Optional[str],
     family = _sar_pose_family(pose)
     on_top = rel in ("on", "above")
     if on_top and _is_wrong_place(lm_cls):
-        # Dataset-gen above mode intentionally authors landmark-origin XY with
-        # a large positive Z offset. Keep those climbed-above examples in the
-        # abnormal category instead of randomly diluting them into emergency
-        # or accident.
-        if rel == "above":
-            return "abnormal"
-        roll = rng.random()
-        if roll < 0.62:
-            return "abnormal"
-        if roll < 0.85:
-            return "emergency"
-        return "accident"
+        # Being on any non-seat support is the abnormal class regardless of
+        # whether root geometry resolves to "on" or "above". Keeping this
+        # deterministic avoids pose/asset-height differences changing labels.
+        return "abnormal"
     if on_top and _is_seat(lm_cls):
         if family in ("lying", "prone"):
             return "normal" if lm_cls in ("picnic_table", "picnic_table") else "abnormal"

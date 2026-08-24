@@ -140,11 +140,10 @@ services:
       TRAINER_PEOPLE_ON_LANDMARK_PROB: "${TRAINER_PEOPLE_ON_LANDMARK_PROB:-0.45}"
       TRAINER_PEOPLE_WRONG_PLACE_PROB: "${TRAINER_PEOPLE_WRONG_PLACE_PROB:-0.55}"
       TRAINER_FORCE_CLIMB_LANDMARK_PROB: "${TRAINER_FORCE_CLIMB_LANDMARK_PROB:-0.35}"
-      # 1 = abnormal mode: one person per eligible non-seat landmark type
-      # (vending/trash/hydrant/postbox/bicycle/scooter/cars), at landmark XY
-      # lifted by TRAINER_PEOPLE_ABOVE_Z metres (default 2.55).
+      # 1 = focused abnormal mode: cycle one requested non-seat landmark type
+      # per scene and snap the posed person's bounds onto the landmark bounds.
       TRAINER_PEOPLE_ABOVE: "${TRAINER_PEOPLE_ABOVE:-0}"
-      TRAINER_PEOPLE_ABOVE_Z: "${TRAINER_PEOPLE_ABOVE_Z:-2.55}"
+      TRAINER_PEOPLE_ABOVE_CLEARANCE: "${TRAINER_PEOPLE_ABOVE_CLEARANCE:-0.01}"
       TRAINER_PEOPLE_ABOVE_TYPES: "${TRAINER_PEOPLE_ABOVE_TYPES:-}"
     # Boot wrapper (same asset patches as the platform), then the dataset generator entry.
     command: ["/marc-patches/boot.py", "/metacom2026/simulation_app/marc2026/trainer.py"]

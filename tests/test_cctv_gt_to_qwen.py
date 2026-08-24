@@ -65,6 +65,18 @@ class SarLabelTests(unittest.TestCase):
             self.assertEqual(relation, "above")
             self.assertEqual(situation, "abnormal")
 
+    def test_on_wrong_place_is_always_abnormal(self):
+        person = _det("person_crouching", "object", [600, 200, 700, 420],
+                      xyz=(-62.81, 135.53, 16.70))
+        trash = _det("trash_can", "landmark", [580, 280, 720, 500],
+                     xyz=(-62.81, 135.53, 16.20))
+        for seed in range(20):
+            rows = q._sar_pairs_for_payload(
+                _payload([person, trash]), random.Random(seed), 1)
+            _, _, _, situation, _, relation = rows[0]
+            self.assertEqual(relation, "on")
+            self.assertEqual(situation, "abnormal")
+
     def test_sitting_on_bench_is_normal(self):
         person = _det("person_sitting", "object", [100, 300, 180, 500],
                       xyz=(0.0, 0.0, 16.75))

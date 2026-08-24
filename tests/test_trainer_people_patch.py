@@ -23,7 +23,7 @@ def _load_patch():
 
 
 class AboveModePatchTests(unittest.TestCase):
-    def test_one_person_per_eligible_landmark_type(self):
+    def test_cycles_one_focused_target_per_scene(self):
         patch = _load_patch()
         source = (
             "def build(landmarks, all_chars, all_poses):\n"
@@ -43,27 +43,29 @@ class AboveModePatchTests(unittest.TestCase):
         try:
             os.environ["TRAINER_PEOPLE_ABOVE"] = "1"
             os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
-            landmarks = [
-                {"name": "bench_0"},
-                {"name": "hydrant_0"},
-                {"name": "postbox_0"},
-                {"name": "vending_machine_0"},
-            ]
-            _, people = namespace["build"](
-                landmarks,
-                ["female_student_01", "male_student_01", "professor_01"],
-                ["person_reaching", "person_crouching", "person_sitting"],
+            os.environ["TRAINER_PEOPLE_ABOVE_TYPES"] = (
+                "vending_machine,trash_can,hydrant,postbox"
             )
+            targets = []
+            for _ in range(4):
+                landmarks, people = namespace["build"](
+                    [{"name": "bench_0"}],
+                    ["female_student_01", "male_student_01", "professor_01"],
+                    ["person_reaching", "person_crouching", "person_sitting"],
+                )
+                self.assertEqual(len(landmarks), 1)
+                self.assertEqual(len(people), 1)
+                placement = people[0]["placement"]
+                targets.append(placement["on_landmark_type"])
+                self.assertTrue(placement["above"])
+                self.assertEqual(placement["contact_clearance"], 0.01)
         finally:
             os.environ.clear()
             os.environ.update(old)
 
-        self.assertEqual(len(people), 3)
-        targets = {p["placement"]["on_landmark_type"] for p in people}
-        self.assertEqual(targets, {"hydrant", "postbox", "vending_machine"})
-        self.assertTrue(all(p["placement"]["above"] for p in people))
-        self.assertTrue(
-            all(p["placement"]["z_offset_from_origin"] == 2.55 for p in people)
+        self.assertEqual(
+            targets,
+            ["vending_machine", "trash_can", "hydrant", "postbox"],
         )
 
 

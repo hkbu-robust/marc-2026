@@ -13,9 +13,9 @@
 #   1. sets place_on_landmark=True in trainer.py
 #   2. lets an object spec's placement overlay the pose YAML
 #   3. re-seats those people after landmark ground-snap (trash cans tip)
-#   4. if placement.above is set, snaps the person to the landmark origin XY
-#      plus placement.z_offset_from_origin (default 2.55 m) so they read as
-#      climbed-above in GT (same geometry as the drink-machine hover samples)
+#   4. if placement.above is set, aligns world bounding boxes after ground
+#      snap: person XY center to landmark XY center, and person bottom to
+#      landmark top plus a small clearance. This is pose/asset-height aware.
 #
 # boot.py runs this before dataset-gen. Idempotent via MARKER. Pair with
 # patch_trainer_people.py, which actually stamps placement onto people specs.
@@ -88,17 +88,18 @@ NEW_SNAP_V1 = '''        _snap_landmarks_to_ground([mission])
 ABOVE_HELPER = r'''
 
 def _marc_place_above_people(mission_id, objects, configurations=None):
-    """[marc-patch] _marc_place_above_people: landmark XY + origin Z lift."""
+    """[marc-patch] Pose-aware world-bounds contact for abnormal climbers."""
     jobs = []
     for spec in objects or []:
         pl = spec.get("placement") or {}
         if not pl.get("above"):
             continue
         try:
-            z = float(pl.get("z_offset_from_origin", 2.55) or 2.55)
+            clearance = float(pl.get("contact_clearance", 0.01) or 0.01)
         except (TypeError, ValueError):
-            z = 2.55
-        jobs.append((spec, str(pl.get("on_landmark_type") or ""), z))
+            clearance = 0.01
+        jobs.append((
+            spec, str(pl.get("on_landmark_type") or ""), clearance))
     if not jobs:
         return
     try:
@@ -116,6 +117,22 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             return None
         t = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()
         return [float(t[0]), float(t[1]), float(t[2])]
+
+    bounds = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(), [UsdGeom.Tokens.default_],
+        useExtentsHint=False,
+    )
+
+    def _world_range(prim):
+        try:
+            r = bounds.ComputeWorldBound(prim).ComputeAlignedRange()
+            lo, hi = r.GetMin(), r.GetMax()
+            return (
+                [float(lo[0]), float(lo[1]), float(lo[2])],
+                [float(hi[0]), float(hi[1]), float(hi[2])],
+            )
+        except Exception:
+            return None
 
     def _set_xyz(prim, xyz):
         path = str(prim.GetPath())
@@ -142,17 +159,25 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         root = stage.GetPrimAtPath(scope)
         if not root or not root.IsValid():
             return []
-        hits = [
-            prim for prim in root.GetChildren()
-            if prim.IsValid() and prim.IsActive()
-            and all(token in prim.GetName() for token in tokens)
-        ]
-        hits.sort(key=lambda p: str(p.GetPath()))
-        return hits
+        hits = []
+        for prim in Usd.PrimRange(root):
+            if prim == root or not prim.IsValid() or not prim.IsActive():
+                continue
+            if all(token in prim.GetName() for token in tokens):
+                hits.append(prim)
+        hits.sort(key=lambda p: (len(str(p.GetPath())), str(p.GetPath())))
+        roots, seen = [], []
+        for prim in hits:
+            path = str(prim.GetPath())
+            if any(path.startswith(parent + "/") for parent in seen):
+                continue
+            roots.append(prim)
+            seen.append(path)
+        return roots
 
     used_people, used_lms = set(), set()
     n = 0
-    for spec, typ, z in jobs:
+    for spec, typ, clearance in jobs:
         lms = [
             p for p in _roots_matching("/world/landmarks", typ)
             if str(p.GetPath()) not in used_lms
@@ -166,16 +191,29 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         if not lms or not people:
             continue
         lm, person = lms[0], people[0]
-        xyz = _world_xyz(lm)
-        if xyz is None:
+        person_range = _world_range(person)
+        landmark_range = _world_range(lm)
+        person_xyz = _world_xyz(person)
+        if person_range is None or landmark_range is None or person_xyz is None:
             continue
-        _set_xyz(person, [xyz[0], xyz[1], xyz[2] + z])
+        p_lo, p_hi = person_range
+        l_lo, l_hi = landmark_range
+        p_cx = 0.5 * (p_lo[0] + p_hi[0])
+        p_cy = 0.5 * (p_lo[1] + p_hi[1])
+        l_cx = 0.5 * (l_lo[0] + l_hi[0])
+        l_cy = 0.5 * (l_lo[1] + l_hi[1])
+        desired = [
+            person_xyz[0] + (l_cx - p_cx),
+            person_xyz[1] + (l_cy - p_cy),
+            person_xyz[2] + (l_hi[2] + clearance - p_lo[2]),
+        ]
+        _set_xyz(person, desired)
         used_lms.add(str(lm.GetPath()))
         used_people.add(str(person.GetPath()))
         n += 1
     print(
         "[on-landmark-patch] above-mode: placed %d/%d person(s) "
-        "at landmark origin + z" % (n, len(jobs))
+        "with bounds contact" % (n, len(jobs))
     )
 '''
 
