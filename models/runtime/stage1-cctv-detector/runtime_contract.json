@@ -1,0 +1,80 @@
+{
+  "checkpoint": "model.pt",
+  "checkpoint_sha256": "06a0abac38a897c0d3c72392154699305a0855bbc12779c6a7bdfff7fe803e2f",
+  "selected_training_checkpoint": {
+    "name": "last.pt",
+    "sha256": "cf1d3b7975af147b9406c12baf7dbb64333ef1d5af5620e114325af99a90b55f"
+  },
+  "ordered_classes": [
+    "tumbler",
+    "cracker_box",
+    "cola_can",
+    "disposable_cup",
+    "juice",
+    "tissue",
+    "mug",
+    "sunblock",
+    "pencilcase",
+    "bench",
+    "bicycle",
+    "hydrant",
+    "kick_scooter",
+    "picnic_table",
+    "postbox",
+    "vending_machine",
+    "trash_can",
+    "police_car",
+    "normal_car_1",
+    "normal_car_2",
+    "sports_car",
+    "sports_car_2",
+    "suv",
+    "taxi",
+    "person_walking",
+    "person_reaching",
+    "person_crouching",
+    "person_prone",
+    "person_sitting",
+    "person_walking_away",
+    "person_reclining",
+    "person_bending",
+    "person_lying_down"
+  ],
+  "ignored_classes": [
+    "master_chef_can",
+    "wood_block",
+    "umbrella",
+    "long_umbrella"
+  ],
+  "preprocessing": {
+    "input": "full-frame PIL.Image RGB (NumPy callers must provide OpenCV BGR uint8 HWC)",
+    "resize": "Ultralytics letterbox to imgsz=1920",
+    "internal": "BGR to RGB, HWC to CHW, FP16/FP32, divide by 255"
+  },
+  "inference": {
+    "full_frame": true,
+    "imgsz": 1920,
+    "end2end": false,
+    "nms_iou": 0.5,
+    "confidence": 0.3,
+    "candidate_limit": 50,
+    "quantize": "fp16"
+  },
+  "local_checkpoint_load_verified": true,
+  "offline_bundle_load_verified": true,
+  "framework": {
+    "loader": "ultralytics.YOLO",
+    "ultralytics_distribution": "ultralytics-opencv-headless==8.4.118",
+    "torch": "2.13.0+cu130"
+  },
+  "output": {
+    "type": "detections",
+    "fields": [
+      "class_id",
+      "class_name",
+      "confidence",
+      "xyxy"
+    ],
+    "coordinates": "pixel xyxy in the original image"
+  }
+}

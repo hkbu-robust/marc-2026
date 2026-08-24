@@ -1,0 +1,17 @@
+imgsz: 1920
+rect: true
+batch: 4
+epochs: 100
+patience: 20
+amp: true
+optimizer: auto
+scale: 0.2
+mosaic: 0.0
+mixup: 0.0
+cutmix: 0.0
+multi_scale: 0.0
+seed: 0
+deterministic: true
+workers: 8
+cache: ram
+save_period: 10
