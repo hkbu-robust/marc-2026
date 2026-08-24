@@ -111,11 +111,46 @@ services:
       <<: *marc-env
       # N>0 generates N scenes without the GUI and exits (batch dataset generation).
       # 0 (default) keeps the interactive panel: New Scene / New Camera.
+      # Stock trainer caps each run at 200; boot patch honors N (optional
+      # TRAINER_AUTO_SCENES_MAX restores a ceiling, e.g. 200).
       TRAINER_AUTO_SCENES: "${TRAINER_AUTO_SCENES:-0}"
-      # Copies of each selected class per scene (lost objects + landmarks). People unchanged.
-      # Set both to 1 to restore the stock one-instance catalogue.
+      TRAINER_AUTO_SCENES_MAX: "${TRAINER_AUTO_SCENES_MAX:-0}"
+      # Lost-object copies per selected class (default 4-6). People unchanged.
       TRAINER_MIN_INSTANCES: "${TRAINER_MIN_INSTANCES:-4}"
       TRAINER_MAX_INSTANCES: "${TRAINER_MAX_INSTANCES:-6}"
+      # Landmark copies per kept type. Lower than objects so benches/tables do not
+      # bury small targets. Set both to 1 for the stock one-instance catalogue.
+      TRAINER_LANDMARK_MIN_INSTANCES: "${TRAINER_LANDMARK_MIN_INSTANCES:-1}"
+      TRAINER_LANDMARK_MAX_INSTANCES: "${TRAINER_LANDMARK_MAX_INSTANCES:-2}"
+      # Probability each checked non-vehicle landmark type is kept this scene.
+      # 0.35 = subset per frame (Qwen referring expressions); 1 = every type.
+      TRAINER_CLASS_INCLUSION_PROBABILITY: "${TRAINER_CLASS_INCLUSION_PROBABILITY:-0.35}"
+      # Cars / SUVs / taxis: at most one type, one copy, rarely included.
+      TRAINER_VEHICLE_MIN_INSTANCES: "${TRAINER_VEHICLE_MIN_INSTANCES:-1}"
+      TRAINER_VEHICLE_MAX_INSTANCES: "${TRAINER_VEHICLE_MAX_INSTANCES:-1}"
+      TRAINER_VEHICLE_INCLUSION_PROBABILITY: "${TRAINER_VEHICLE_INCLUSION_PROBABILITY:-0.15}"
+      TRAINER_VEHICLE_MAX_TYPES: "${TRAINER_VEHICLE_MAX_TYPES:-1}"
+      # Lost objects never spawned (umbrella / long_umbrella / *umbrella*).
+      TRAINER_SKIP_CLASSES: "${TRAINER_SKIP_CLASSES:-umbrella,long_umbrella}"
+      # 1 = one of each person identity per scene (female/professor/weight/male),
+      # random pose. 0 = stock radio (one character x all poses).
+      TRAINER_PEOPLE_ALL_CHARS: "${TRAINER_PEOPLE_ALL_CHARS:-1}"
+      # Seat a fraction of people on landmark tops (vending machine, trash can,
+      # bench, picnic table). Needed for SAR "climbed on the drink machine".
+      TRAINER_PEOPLE_ON_LANDMARK_PROB: "${TRAINER_PEOPLE_ON_LANDMARK_PROB:-0.45}"
+      TRAINER_PEOPLE_WRONG_PLACE_PROB: "${TRAINER_PEOPLE_WRONG_PLACE_PROB:-0.55}"
+      TRAINER_FORCE_CLIMB_LANDMARK_PROB: "${TRAINER_FORCE_CLIMB_LANDMARK_PROB:-0.35}"
+      # 1 = keep normal object/landmark density, cycle one climb target per
+      # scene, place that landmark where the roof stays in frame, and drop
+      # posed joints onto the raycasted top. Extra people stay on the ground.
+      TRAINER_PEOPLE_ABOVE: "${TRAINER_PEOPLE_ABOVE:-0}"
+      TRAINER_PEOPLE_ABOVE_CLEARANCE: "${TRAINER_PEOPLE_ABOVE_CLEARANCE:-0.03}"
+      TRAINER_PEOPLE_ABOVE_TYPES: "${TRAINER_PEOPLE_ABOVE_TYPES:-}"
+      # Repeat counts in the climb-target cycle. Default 3x vending machines.
+      TRAINER_PEOPLE_ABOVE_WEIGHTS: "${TRAINER_PEOPLE_ABOVE_WEIGHTS:-vending_machine:3}"
+      # Render fresh frames after redeploy/contact before GT capture, clearing
+      # RTX temporal after-images from the previous scene.
+      TRAINER_RENDER_WARMUP_FRAMES: "${TRAINER_RENDER_WARMUP_FRAMES:-12}"
     # Boot wrapper (same asset patches as the platform), then the dataset generator entry.
     command: ["/marc-patches/boot.py", "/metacom2026/simulation_app/marc2026/trainer.py"]
     volumes:

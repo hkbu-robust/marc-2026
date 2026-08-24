@@ -4,17 +4,56 @@ Host-side converter. **Does not** start Isaac. `dataset-gen` writes detector GT
 (`scene_XXXXX/{camera}.png` + `.json`); this turns that into chat turns for
 Qwen2-VL-Instruct / LLaMA-Factory.
 
+Generate with a Qwen-oriented mix (object copies 4-6, ~35% of non-vehicle
+landmark types per scene, vehicles rare). From `simulation-platform/`:
+
 ```bash
-# after dataset-gen (with TRAINER_MIN/MAX_INSTANCES 4-6) has finished:
+TRAINER_CLASS_INCLUSION_PROBABILITY=0.35 TRAINER_AUTO_SCENES=100 HEADLESS=true \
+  docker compose --profile dataset-gen up --force-recreate
+```
+
+Then from the repo root:
+
+```bash
 python3 demo/vlm_dataset/cctv_gt_to_qwen.py \
   --in trainer_output/marc2026_chungmu \
   --out trainer_output/qwen2vl_cctv
 ```
 
+The converter prints `hard=` / `hard_frac=` (same-class object clones),
+SAR situation counts, and per-class landmark/object histograms.
+
+SAR rows use `target_type: person` and `situation` from **pose + support**,
+not pose alone. Sitting on a bench is `normal`; sitting or standing on a
+vending machine / trash can is `abnormal` (prompts include “climbed on top of
+the drink machine”). Object rows still use `relation` (`beside` / `near`, and
+`on` / `above` when `world_xyz` says so).
+
+dataset-gen must actually put some people **on** those landmarks or the
+converter cannot invent the visual. Recreate with the boot patches (people
+identities + on-landmark seating):
+
+```bash
+TRAINER_CLASS_INCLUSION_PROBABILITY=0.35 TRAINER_PEOPLE_ALL_CHARS=1 \
+  TRAINER_PEOPLE_ON_LANDMARK_PROB=0.45 TRAINER_AUTO_SCENES=100 HEADLESS=true \
+  docker compose --profile dataset-gen up --force-recreate
+```
+
+Same dump also converts to YOLO:
+
+```bash
+python3 demo/vlm_dataset/cctv_gt_to_yolo.py \
+  --in trainer_output/marc2026_chungmu \
+  --out trainer_output/yolo_cctv
+```
+
+Use the same `--val-frac` on both so train/val scenes match. YOLO classes are
+poses (`person_crouching`), not identity meshes. Do **not** mix ego-cam frames.
+
 Assistant text is a `GroundingResult` JSON (`camera_id`, `target_type`,
 `landmark`, `relation`, `anchor_coord`, `target_coord`) so it matches
-`client.submit_grounding`. Same-class clones in one frame are preferred
-(hard / disambiguation rows).
+`client.submit_grounding`. Same-class object clones in one frame are preferred
+(hard / disambiguation rows). Landmark copies are not required for that signal.
 
 New `dataset-gen` runs also stamp `world_xyz` on each detection (boot patch
 `patch_gt_world_xyz.py`). Older dumps without that field use a ground-plane
