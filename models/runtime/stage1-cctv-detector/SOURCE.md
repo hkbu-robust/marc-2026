@@ -23,7 +23,7 @@ object, landmark, and person/pose candidates.
 - Private Hugging Face model repository:
   <https://huggingface.co/roBUst-marc-2026/stage1-cctv-detector>
 - Immutable release revision:
-  `abd289eded79510cd1ffaa5abad6633c30cf5943`
+  `9227ecd11069d103c7dabdd287c6fc20a83eb6c1`
 
 ## Upstream
 
