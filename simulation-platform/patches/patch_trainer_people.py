@@ -15,12 +15,19 @@
 # of those prefer a non-seat landmark. TRAINER_FORCE_CLIMB_LANDMARK_PROB
 # (default 0.35) injects vending_machine or trash_can when the scene has none.
 #
+# TRAINER_PEOPLE_ABOVE=1 switches to abnormal "climbed above" mode: every
+# person is parked on a non-seat landmark at that landmark's XY, lifted by
+# TRAINER_PEOPLE_ABOVE_Z metres (default 2.55 — same origin-aligned hover as
+# the drink-machine samples). Benches / picnic tables are skipped. Optional
+# TRAINER_PEOPLE_ABOVE_TYPES is a comma list of landmark classes; default is
+# vending / trash / hydrant / postbox / bicycle / kick scooter / cars.
+#
 # boot.py runs this before dataset-gen (trainer.py). Idempotent via MARKER.
 import os
 import sys
 
 TARGET = "/metacom2026/simulation_app/marc2026/trainer.py"
-MARKER = "_marc_people_on_landmark"
+MARKER = "_marc_people_above"
 
 OLD_COMBOS = '''    combos = []
     if not people_state.get("enabled", True):
@@ -61,7 +68,7 @@ V1_COMBOS = '''    combos = []
         objects.append({"type": pose, "character": ch, "count": 1})
 '''
 
-NEW_COMBOS = '''    combos = []
+V2_COMBOS = '''    combos = []
     if not people_state.get("enabled", True):
         # "Add people" 해제 → 사람 미배치.
         return landmarks, objects
@@ -137,6 +144,160 @@ NEW_COMBOS = '''    combos = []
         objects.append(spec)
 '''
 
+NEW_COMBOS = '''    combos = []
+    if not people_state.get("enabled", True):
+        # "Add people" 해제 → 사람 미배치.
+        return landmarks, objects
+    def _marc_people_all_chars():
+        """[marc-patch] One of each identity, random pose (covers female/professor/weight)."""
+        raw = os.environ.get("TRAINER_PEOPLE_ALL_CHARS", "1")
+        return str(raw).strip().lower() not in ("0", "false", "no", "off")
+    def _marc_frac(name, default):
+        """[marc-patch] Clamp an env probability into [0, 1]."""
+        try:
+            v = float(os.environ.get(name, str(default)) or str(default))
+        except (TypeError, ValueError):
+            v = float(default)
+        return max(0.0, min(1.0, v))
+    def _marc_flag(name, default="0"):
+        raw = os.environ.get(name, default)
+        return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
+    def _marc_people_on_landmark():
+        """[marc-patch] Marker: people may sit/climb on landmark tops."""
+        return True
+    def _marc_people_above():
+        """[marc-patch] Marker: abnormal climbed-above (landmark XY + Z lift)."""
+        return _marc_flag("TRAINER_PEOPLE_ABOVE", "0")
+    def _marc_above_z():
+        try:
+            return float(os.environ.get("TRAINER_PEOPLE_ABOVE_Z", "2.55") or "2.55")
+        except (TypeError, ValueError):
+            return 2.55
+    def _marc_lm_typ(spec):
+        import re as _re_lm
+        return _re_lm.sub(r"_[0-9]+$", "", str((spec or {}).get("name") or ""))
+    def _marc_is_seat(typ):
+        return (typ or "").lower() in ("bench", "picnic_table")
+    def _marc_people_is_vehicle(typ):
+        t = (typ or "").lower()
+        return ("car" in t) or t in ("suv", "taxi")
+    def _marc_is_above_ok(typ):
+        t = (typ or "").lower()
+        if _marc_is_seat(t):
+            return False
+        if _marc_people_is_vehicle(t):
+            return True
+        return t in (
+            "vending_machine", "trash_can", "hydrant", "postbox",
+            "bicycle", "kick_scooter",
+        )
+    if _marc_people_all_chars() and all_chars and all_poses:
+        for ch in all_chars:
+            combos.append((random.choice(all_poses), ch))
+    elif people_state.get("mode") == "pose":
+        pose = pose_by_key.get(people_state.get("pose"))
+        if pose:
+            combos = [(pose, ch) for ch in all_chars]
+    else:
+        ch = char_by_key.get(people_state.get("person"))
+        if ch:
+            combos = [(pose, ch) for pose in all_poses]
+    _marc_people_on_landmark()
+    _SEAT = ("bench", "picnic_table")
+    _CLIMB = ("vending_machine", "trash_can", "hydrant", "postbox")
+    _VEH = ("police_car", "normal_car_1", "normal_car_2",
+            "sports_car", "sports_car_2", "suv", "taxi")
+    _RIDE = ("bicycle", "kick_scooter")
+    _WRONG = _CLIMB + _VEH
+    _ABOVE_DEFAULT = _CLIMB + _VEH + _RIDE
+    _ON_WRONG_POSES = ("person_sitting", "person_crouching", "person_reaching")
+    _ON_SEAT_POSES = ("person_sitting", "person_reclining", "person_lying_down")
+    _ON_ABOVE_POSES = ("person_reaching", "person_crouching", "person_sitting")
+    _above_mode = _marc_people_above()
+    if random.random() < _marc_frac("TRAINER_FORCE_CLIMB_LANDMARK_PROB", 0.35):
+        _have = {_marc_lm_typ(s) for s in landmarks}
+        if not (_have & set(_CLIMB)):
+            landmarks.append({"name": "%s_0" % random.choice(
+                ("vending_machine", "trash_can", "hydrant", "postbox"))})
+    _lm_types = []
+    for _s in landmarks:
+        _t = _marc_lm_typ(_s)
+        if _t and _t not in _lm_types:
+            _lm_types.append(_t)
+    _raw_above = os.environ.get("TRAINER_PEOPLE_ABOVE_TYPES", "") or ""
+    _above_filter = [x.strip() for x in _raw_above.split(",") if x.strip()]
+    _aboves = [t for t in _lm_types if _marc_is_above_ok(t)]
+    if _above_filter:
+        _want = [t for t in _above_filter if _marc_is_above_ok(t)]
+        if _above_mode:
+            # An explicit type list is a coverage contract in above mode:
+            # inject any requested class that landmark subsampling dropped.
+            for _t in _want:
+                if _t not in _lm_types:
+                    landmarks.append({"name": "%s_0" % _t})
+        _aboves = list(_want)
+        if not _above_mode:
+            _aboves = [t for t in _lm_types if t in set(_want)]
+    if _above_mode and not _aboves:
+        _pool = [
+            t for t in _above_filter if _marc_is_above_ok(t)
+        ] or ["vending_machine", "trash_can", "hydrant",
+              "postbox", "bicycle", "kick_scooter"]
+        _pick = random.choice(_pool)
+        landmarks.append({"name": "%s_0" % _pick})
+        _aboves = [_pick]
+    _seats = [t for t in _lm_types if _marc_is_seat(t)]
+    _wrongs = [t for t in _lm_types if t in _WRONG or _marc_people_is_vehicle(t)]
+    _pose_set = set(all_poses)
+    if _above_mode:
+        # One unique pose/identity pair per eligible landmark type. This makes
+        # above mode a deterministic data-production mode rather than a 45%
+        # augmentation of otherwise-normal scenes.
+        _above_pairs = [
+            (p, ch) for ch in all_chars for p in _ON_ABOVE_POSES
+            if p in _pose_set
+        ]
+        random.shuffle(_above_pairs)
+        if _above_pairs:
+            combos = [
+                _above_pairs[i % len(_above_pairs)]
+                for i in range(len(_aboves))
+            ]
+    for _i, (pose, ch) in enumerate(combos):
+        spec = {"type": pose, "character": ch, "count": 1}
+        if _above_mode:
+            if _aboves:
+                lm_typ = _aboves[_i % len(_aboves)]
+                spec["placement"] = {
+                    "on_landmark_type": lm_typ,
+                    "z_offset_from_top": 0.02,
+                    "above": True,
+                    "z_offset_from_origin": _marc_above_z(),
+                }
+        elif random.random() < _marc_frac("TRAINER_PEOPLE_ON_LANDMARK_PROB", 0.45):
+            want_wrong = random.random() < _marc_frac(
+                "TRAINER_PEOPLE_WRONG_PLACE_PROB", 0.55)
+            lm_typ = None
+            if want_wrong and _wrongs:
+                lm_typ = random.choice(_wrongs)
+            elif _seats:
+                lm_typ = random.choice(_seats)
+            elif _wrongs:
+                lm_typ = random.choice(_wrongs)
+            if lm_typ:
+                spec["placement"] = {
+                    "on_landmark_type": lm_typ,
+                    "z_offset_from_top": 0.02,
+                }
+                pool = _ON_WRONG_POSES if (
+                    lm_typ in _WRONG or _marc_people_is_vehicle(lm_typ)
+                ) else _ON_SEAT_POSES
+                fit = [p for p in pool if p in _pose_set]
+                if fit:
+                    spec["type"] = random.choice(fit)
+        objects.append(spec)
+'''
+
 
 def _write(src):
     try:
@@ -160,11 +321,20 @@ def main():
         print("[people-patch] already applied, skipping")
         return 0
 
+    if V2_COMBOS in src:
+        src = src.replace(V2_COMBOS, NEW_COMBOS, 1)
+        if not _write(src):
+            return 0
+        print("[people-patch] upgraded: identities + on-landmark + above-mode")
+        _log_people()
+        return 0
+
     if V1_COMBOS in src:
         src = src.replace(V1_COMBOS, NEW_COMBOS, 1)
         if not _write(src):
             return 0
         print("[people-patch] upgraded: identities + on-landmark seating")
+        _log_people()
         return 0
 
     if OLD_COMBOS not in src:
@@ -176,11 +346,18 @@ def main():
     if not _write(src):
         return 0
 
+    _log_people()
+    return 0
+
+
+def _log_people():
     mode = os.environ.get("TRAINER_PEOPLE_ALL_CHARS", "1")
     on_p = os.environ.get("TRAINER_PEOPLE_ON_LANDMARK_PROB", "0.45")
+    above = os.environ.get("TRAINER_PEOPLE_ABOVE", "0")
+    z = os.environ.get("TRAINER_PEOPLE_ABOVE_Z", "2.55")
     print(f"[people-patch] all identities per scene "
-          f"(TRAINER_PEOPLE_ALL_CHARS={mode}); on-landmark p={on_p}")
-    return 0
+          f"(TRAINER_PEOPLE_ALL_CHARS={mode}); on-landmark p={on_p}; "
+          f"above={above} z={z}")
 
 
 if __name__ == "__main__":

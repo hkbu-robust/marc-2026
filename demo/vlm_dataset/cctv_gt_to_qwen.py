@@ -238,6 +238,12 @@ def _sar_situation_for(person: dict, lm: dict, rel: Optional[str],
     family = _sar_pose_family(pose)
     on_top = rel in ("on", "above")
     if on_top and _is_wrong_place(lm_cls):
+        # Dataset-gen above mode intentionally authors landmark-origin XY with
+        # a large positive Z offset. Keep those climbed-above examples in the
+        # abnormal category instead of randomly diluting them into emergency
+        # or accident.
+        if rel == "above":
+            return "abnormal"
         roll = rng.random()
         if roll < 0.62:
             return "abnormal"

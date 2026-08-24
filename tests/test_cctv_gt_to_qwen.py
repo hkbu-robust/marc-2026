@@ -52,6 +52,19 @@ class SarLabelTests(unittest.TestCase):
         )
         self.assertTrue("climbed" in low or "on top" in low, instruction)
 
+    def test_above_wrong_place_is_always_abnormal(self):
+        person = _det("person_reaching", "object", [600, 100, 700, 420],
+                      xyz=(-62.81, 135.53, 18.75))
+        vendor = _det("vending_machine", "landmark", [580, 280, 720, 500],
+                      xyz=(-62.81, 135.53, 16.20))
+        for seed in range(20):
+            rows = q._sar_pairs_for_payload(
+                _payload([person, vendor]), random.Random(seed), 1)
+            self.assertTrue(rows)
+            _, _, _, situation, _, relation = rows[0]
+            self.assertEqual(relation, "above")
+            self.assertEqual(situation, "abnormal")
+
     def test_sitting_on_bench_is_normal(self):
         person = _det("person_sitting", "object", [100, 300, 180, 500],
                       xyz=(0.0, 0.0, 16.75))
