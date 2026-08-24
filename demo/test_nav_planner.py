@@ -15,6 +15,7 @@ import numpy as np
 from mock_agent_navigation import (
     OccupancyGridPlanner,
     LIDAR_CLUSTER_M,
+    OVERLAY_TTL_S,
     frontal_hit,
     lidar_xyz_to_obstacles,
     path_is_blocked,
@@ -140,6 +141,69 @@ def test_pointcloud2_xyz():
     _check(abs(float(xyz[0, 0]) - 1.0) < 1e-5 and abs(float(xyz[1, 1]) - 0.5) < 1e-5, "pointcloud values")
 
 
+def test_overlay_persists_across_occupancy_reload():
+    p, grid = _planner()
+    hit = _cell_xy(p, 20, 40)
+    p.stamp_overlay([(hit[0], hit[1], 0.4)], now_s=1.0)
+    r, c = p._w2c(hit[0], hit[1])
+    _check(bool(p._overlay[r, c]), "stamp should block overlay cell")
+    grid2 = grid.copy()
+    _check(p.update_from_array(grid2, 0.05, 0.0, 0.0), "reload same origin")
+    _check(bool(p._overlay[r, c]), "overlay should survive same-origin occupancy reload")
+    _check(p.update_from_array(grid2, 0.05, 10.0, 10.0), "reload new origin")
+    _check(not bool(p._overlay[r, c]), "overlay should reset when origin changes")
+
+
+def test_overlay_goal_hole():
+    p, _ = _planner()
+    goal = _cell_xy(p, 20, 40)
+    p.stamp_overlay([(goal[0], goal[1], 0.4)], now_s=1.0)
+    gr, gc = p._w2c(goal[0], goal[1])
+    _check(bool(p._overlay[gr, gc]), "goal cell stamped")
+    p.clear_goal_hole(goal, exclude_m=0.6)
+    _check(not bool(p._overlay[gr, gc]), "goal hole should free the goal cell")
+
+
+def test_overlay_expiry():
+    p, _ = _planner()
+    hit = _cell_xy(p, 12, 12)
+    p.stamp_overlay([(hit[0], hit[1], 0.4)], now_s=0.0)
+    r, c = p._w2c(hit[0], hit[1])
+    p.expire_overlay(now_s=OVERLAY_TTL_S)
+    _check(bool(p._overlay[r, c]), "should still be blocked at TTL boundary")
+    p.expire_overlay(now_s=OVERLAY_TTL_S + 0.1)
+    _check(not bool(p._overlay[r, c]), "stale overlay cell should expire")
+
+
+def test_no_path_status():
+    p, grid = _planner()
+    grid[:, 40] = 100
+    start = _cell_xy(p, 20, 5)
+    goal = _cell_xy(p, 20, 70)
+    path = p.plan(start, goal, inflation_m=0.0, margin_m=20.0, snap_m=1.0)
+    _check(path is None, "walled corridor should have no path")
+    _check(p.last_status == "no_path", "last_status=%s" % p.last_status)
+    empty = OccupancyGridPlanner()
+    _check(empty.plan((0.0, 0.0), (1.0, 0.0)) is None, "unready plan should be None")
+    _check(empty.last_status == "no_map", "unready last_status=%s" % empty.last_status)
+
+
+def test_overlay_blocks_plan():
+    p, _ = _planner()
+    start = _cell_xy(p, 20, 5)
+    goal = _cell_xy(p, 20, 70)
+    wall = _cell_xy(p, 20, 40)
+    p.stamp_overlay([(wall[0], wall[1], 0.6)], now_s=1.0)
+    path = p.plan(start, goal, inflation_m=0.0, margin_m=20.0, snap_m=1.0)
+    _check(path, "overlay wall should still leave a path around")
+    hits = 0
+    for wx, wy in path:
+        r, c = p._w2c(wx, wy)
+        if bool(p._overlay[r, c]):
+            hits += 1
+    _check(hits == 0, "path crossed overlay (%d cells)" % hits)
+
+
 def main():
     tests = [
         test_empty_corridor,
@@ -147,6 +211,11 @@ def main():
         test_lidar_xyz_to_world,
         test_path_blocked_and_frontal,
         test_pointcloud2_xyz,
+        test_overlay_persists_across_occupancy_reload,
+        test_overlay_goal_hole,
+        test_overlay_expiry,
+        test_no_path_status,
+        test_overlay_blocks_plan,
     ]
     failed = 0
     for fn in tests:

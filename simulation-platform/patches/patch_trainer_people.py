@@ -15,11 +15,11 @@
 # of those prefer a non-seat landmark. TRAINER_FORCE_CLIMB_LANDMARK_PROB
 # (default 0.35) injects vending_machine or trash_can when the scene has none.
 #
-# TRAINER_PEOPLE_ABOVE=1 switches to focused abnormal mode: each scene picks
-# one non-seat target type, round-robin, and spawns one climbing person on it.
-# TRAINER_PEOPLE_ABOVE_TYPES is the coverage cycle; the target is injected if
-# landmark subsampling dropped it. The deployer patch uses final world bounds
-# to put the posed person's bottom on the landmark top (pose-aware contact).
+# TRAINER_PEOPLE_ABOVE=1 keeps the normal object/landmark/people density, then
+# guarantees one climber: a non-seat target type is cycled per scene (injected
+# only if missing) and one person is snapped onto it. Other people and lost
+# objects stay in the usual cell layout. The deployer patch uses final world
+# bounds so the posed person's bottom meets the landmark top.
 #
 # boot.py runs this before dataset-gen (trainer.py). Idempotent via MARKER.
 import os
@@ -214,6 +214,7 @@ NEW_COMBOS = '''    combos = []
     _ON_SEAT_POSES = ("person_sitting", "person_reclining", "person_lying_down")
     _ON_ABOVE_POSES = ("person_reaching", "person_crouching", "person_sitting")
     _above_mode = _marc_people_above()
+    _target = None
     if (not _above_mode and
             random.random() < _marc_frac("TRAINER_FORCE_CLIMB_LANDMARK_PROB", 0.35)):
         _have = {_marc_lm_typ(s) for s in landmarks}
@@ -229,8 +230,8 @@ NEW_COMBOS = '''    combos = []
     _above_filter = [x.strip() for x in _raw_above.split(",") if x.strip()]
     _aboves = [t for t in _lm_types if _marc_is_above_ok(t)]
     if _above_mode:
-        # One target per scene avoids four elevated people occluding each
-        # other. Cycle deterministically so vending/postbox cannot be starved.
+        # Keep the usual landmark/object density. Cycle one climb target so
+        # coverage is even, and inject that type only when subsampling dropped it.
         _pool = [
             t for t in _above_filter if _marc_is_above_ok(t)
         ] or ["vending_machine", "trash_can", "hydrant",
@@ -242,16 +243,10 @@ NEW_COMBOS = '''    combos = []
             _cursor = 0
         _target = _pool[_cursor % len(_pool)]
         _marc_above_type_cursor = _cursor + 1
-        _target_specs = [
-            s for s in landmarks if _marc_lm_typ(s) == _target
-        ]
-        # Focused mode: retain one target landmark only. This puts the target
-        # first in the cell layout and removes large occluding distractors.
-        landmarks = (
-            [_target_specs[0]] if _target_specs
-            else [{"name": "%s_0" % _target}]
-        )
-        _lm_types = [_target]
+        if not any(_marc_lm_typ(s) == _target for s in landmarks):
+            landmarks.append({"name": "%s_0" % _target})
+        if _target not in _lm_types:
+            _lm_types.append(_target)
         _aboves = [_target]
     elif _above_filter:
         _want = set(t for t in _above_filter if _marc_is_above_ok(t))
@@ -259,28 +254,19 @@ NEW_COMBOS = '''    combos = []
     _seats = [t for t in _lm_types if _marc_is_seat(t)]
     _wrongs = [t for t in _lm_types if t in _WRONG or _marc_people_is_vehicle(t)]
     _pose_set = set(all_poses)
-    if _above_mode:
-        # Focused above mode has one target and one person.
-        _above_pairs = [
-            (p, ch) for ch in all_chars for p in _ON_ABOVE_POSES
-            if p in _pose_set
-        ]
-        random.shuffle(_above_pairs)
-        if _above_pairs:
-            combos = [
-                _above_pairs[i % len(_above_pairs)]
-                for i in range(len(_aboves))
-            ]
-    for _i, (pose, ch) in enumerate(combos):
+    _climber_placed = False
+    for pose, ch in combos:
         spec = {"type": pose, "character": ch, "count": 1}
-        if _above_mode:
-            if _aboves:
-                lm_typ = _aboves[_i % len(_aboves)]
-                spec["placement"] = {
-                    "on_landmark_type": lm_typ,
-                    "above": True,
-                    "contact_clearance": _marc_above_clearance(),
-                }
+        if _above_mode and _target and not _climber_placed:
+            spec["placement"] = {
+                "on_landmark_type": _target,
+                "above": True,
+                "contact_clearance": _marc_above_clearance(),
+            }
+            fit = [p for p in _ON_ABOVE_POSES if p in _pose_set]
+            if fit:
+                spec["type"] = random.choice(fit)
+            _climber_placed = True
         elif random.random() < _marc_frac("TRAINER_PEOPLE_ON_LANDMARK_PROB", 0.45):
             want_wrong = random.random() < _marc_frac(
                 "TRAINER_PEOPLE_WRONG_PLACE_PROB", 0.55)
@@ -291,7 +277,7 @@ NEW_COMBOS = '''    combos = []
                 lm_typ = random.choice(_seats)
             elif _wrongs:
                 lm_typ = random.choice(_wrongs)
-            if lm_typ:
+            if lm_typ and lm_typ != _target:
                 spec["placement"] = {
                     "on_landmark_type": lm_typ,
                     "z_offset_from_top": 0.02,

@@ -104,6 +104,33 @@ class SarLabelTests(unittest.TestCase):
         self.assertIsNone(rel)
         self.assertEqual(sit, "normal")
 
+    def test_standing_beside_hydrant_is_not_on(self):
+        # Old 1.6m XY / 0.12m Z window treated this pelvis-above-base pair as
+        # "on" the hydrant. Side-by-side boxes must stay beside, not abnormal.
+        person = _det("person_reaching", "object", [120, 200, 220, 520],
+                      xyz=(-62.0, 135.5, 17.10))
+        hydrant = _det("hydrant", "landmark", [400, 360, 460, 520],
+                       xyz=(-61.2, 135.4, 16.20))
+        rng = random.Random(8)
+        rows = q._sar_pairs_for_payload(_payload([person, hydrant]), rng, 1)
+        self.assertTrue(rows)
+        _, _, _, sit, _, rel = rows[0]
+        self.assertIsNone(rel)
+        self.assertNotEqual(sit, "abnormal")
+
+    def test_standing_in_front_of_vending_is_not_on(self):
+        # Overlapping x, shared ground line, pelvis higher than machine origin.
+        person = _det("person_walking", "object", [590, 240, 710, 500],
+                      xyz=(-62.85, 135.50, 17.05))
+        vendor = _det("vending_machine", "landmark", [580, 280, 720, 500],
+                      xyz=(-62.81, 135.53, 16.20))
+        rng = random.Random(9)
+        rows = q._sar_pairs_for_payload(_payload([person, vendor]), rng, 1)
+        self.assertTrue(rows)
+        _, _, _, sit, _, rel = rows[0]
+        self.assertIsNone(rel)
+        self.assertNotEqual(sit, "abnormal")
+
     def test_lying_on_picnic_table_is_normal(self):
         person = _det("person_lying_down", "object", [400, 200, 560, 320],
                       xyz=(-80.9, 96.5, 16.83))

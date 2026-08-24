@@ -33,6 +33,8 @@ LIDAR_RANGE_M = 20.0
 LIDAR_MIN_RANGE_M = 0.20
 LIDAR_HIT_RADIUS = 0.35
 LIDAR_CLUSTER_M = 0.25
+# Overlay cells not restamped for this long become free (moving people/ghosts).
+OVERLAY_TTL_S = 2.0
 
 
 def _wrap_pi(a: float) -> float:
@@ -284,6 +286,9 @@ def path_is_blocked(planner, waypoints, extra_obstacles=None, inflation_m=0.25):
     cmax = min(planner._w, max(c for _, c in cells) + pad + 1)
     sub = planner._grid[rmin:rmax, cmin:cmax]
     trav = sub == 0
+    if planner._overlay is not None:
+        trav = np.logical_and(
+            trav, np.logical_not(planner._overlay[rmin:rmax, cmin:cmax]))
     if extra_obstacles:
         planner._block_obstacles(trav, extra_obstacles, rmin, cmin)
     infl_c = int(round(float(inflation_m) / planner._res)) if planner._res else 0
@@ -499,7 +504,10 @@ class OccupancyGridPlanner:
         self._plan_goal_xy = None
         self._infl_c = None
         self._dstar_goal = None
+        self._overlay = None     # bool (H, W), True = lidar-blocked
+        self._overlay_t = None   # float64 last restamp time (sim s)
         self.last_method = None  # "dstar" | "astar"
+        self.last_status = None  # "ok" | "no_map" | "no_path"
 
     def update_from_msg(self, msg) -> bool:
         """Update the grid from a nav_msgs/OccupancyGrid message."""
@@ -518,11 +526,21 @@ class OccupancyGridPlanner:
         arr = np.asarray(grid, dtype=np.int8)
         if arr.ndim != 2 or arr.size == 0:
             return False
+        map_changed = (
+            self._grid is None
+            or arr.shape != getattr(self._grid, "shape", ())
+            or self._res != float(res)
+            or self._ox != float(ox)
+            or self._oy != float(oy)
+        )
         self._grid = arr
         self._res = float(res)
         self._ox = float(ox)
         self._oy = float(oy)
         self._h, self._w = arr.shape
+        if map_changed or self._overlay is None or self._overlay.shape != arr.shape:
+            self._overlay = np.zeros(arr.shape, dtype=bool)
+            self._overlay_t = np.zeros(arr.shape, dtype=np.float64)
         return True
 
     @property
@@ -557,9 +575,8 @@ class OccupancyGridPlanner:
             margin_m: search margin outside the start/goal bounding box (crop for planning speed).
             snap_m:  maximum radius to correct a start/goal cell to the nearest free
                      cell when it is not traversable.
-            extra_obstacles: [(x, y, radius_m), ...] static obstacles not in the
-                     occupancy map (lidar discs, optional yaml). Their disc is carved
-                     out as not traversable.
+            extra_obstacles: [(x, y, radius_m), ...] extra discs carved for this
+                     call only (tests / yaml). Live lidar should use stamp_overlay.
 
         Returns:
             [(x, y), ...] path waypoints. If the goal cell is traversable the last one is
@@ -568,7 +585,9 @@ class OccupancyGridPlanner:
         """
         self.last_method = None
         if not self.ready:
+            self.last_status = "no_map"
             return None
+        self.last_status = "no_path"
 
         sr, sc = self._w2c(*start_xy)
         gr, gc = self._w2c(*goal_xy)
@@ -601,6 +620,9 @@ class OccupancyGridPlanner:
 
         sub = self._grid[rmin:rmax, cmin:cmax]
         trav = sub == 0
+        if self._overlay is not None:
+            trav = np.logical_and(
+                trav, np.logical_not(self._overlay[rmin:rmax, cmin:cmax]))
         if extra_obstacles:
             self._block_obstacles(trav, extra_obstacles, rmin, cmin)
         if infl_c > 0:
@@ -648,8 +670,10 @@ class OccupancyGridPlanner:
         self._dstar_goal = lg
 
         if not cells:
+            self.last_status = "no_path"
             return None
 
+        self.last_status = "ok"
         cells = self._simplify(trav, cells)
         path = [self._c2w(r + rmin, c + cmin) for (r, c) in cells]
 
@@ -659,6 +683,54 @@ class OccupancyGridPlanner:
             if len(path) > 1:
                 path = path[1:]
         return path
+
+    def _disc_mask(self, wx, wy, rad):
+        """Slice + boolean disc on the full grid, or None if off-map."""
+        if not self.ready or self._res is None:
+            return None
+        r, c = self._w2c(wx, wy)
+        rad_c = int(round(float(rad) / self._res))
+        if rad_c <= 0:
+            return None
+        H, W = self._h, self._w
+        if r + rad_c < 0 or r - rad_c >= H or c + rad_c < 0 or c - rad_c >= W:
+            return None
+        r0, r1 = max(0, r - rad_c), min(H, r + rad_c + 1)
+        c0, c1 = max(0, c - rad_c), min(W, c + rad_c + 1)
+        yy, xx = np.ogrid[r0:r1, c0:c1]
+        disc = (yy - r) ** 2 + (xx - c) ** 2 <= rad_c ** 2
+        return r0, r1, c0, c1, disc
+
+    def stamp_overlay(self, obstacles, now_s=0.0):
+        """Union-stamp world discs onto the persistent lidar overlay."""
+        if not self.ready or self._overlay is None:
+            return
+        now = float(now_s)
+        for item in obstacles or []:
+            wx, wy, rad = float(item[0]), float(item[1]), float(item[2])
+            sl = self._disc_mask(wx, wy, rad)
+            if sl is None:
+                continue
+            r0, r1, c0, c1, disc = sl
+            self._overlay[r0:r1, c0:c1][disc] = True
+            self._overlay_t[r0:r1, c0:c1][disc] = now
+
+    def expire_overlay(self, now_s=0.0):
+        """Free overlay cells not restamped within OVERLAY_TTL_S."""
+        if self._overlay is None or self._overlay_t is None:
+            return
+        stale = self._overlay & ((float(now_s) - self._overlay_t) > OVERLAY_TTL_S)
+        self._overlay[stale] = False
+
+    def clear_goal_hole(self, goal_xy, exclude_m=0.6):
+        """Keep the goal reachable: drop overlay inside exclude_m of goal_xy."""
+        if not self.ready or self._overlay is None or exclude_m <= 0:
+            return
+        sl = self._disc_mask(float(goal_xy[0]), float(goal_xy[1]), float(exclude_m))
+        if sl is None:
+            return
+        r0, r1, c0, c1, disc = sl
+        self._overlay[r0:r1, c0:c1][disc] = False
 
     def _block_obstacles(self, trav, obstacles, rmin, cmin):
         """Mark each (x, y, radius) disc from extra_obstacles as not traversable in trav."""

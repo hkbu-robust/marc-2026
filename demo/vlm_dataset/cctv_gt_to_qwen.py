@@ -118,9 +118,13 @@ _VEHICLE_LANDMARKS = frozenset({
 })
 _WRONG_PLACE_LANDMARKS = _CLIMB_LANDMARKS | _VEHICLE_LANDMARKS
 
-_ON_XY_M = 1.6
-_ON_DZ_M = 0.12
+# Prim origins are not contact points (character root vs asset base), so a
+# loose XY/Z window flags people standing *beside* a hydrant as "on" it.
+# "On/above" is 2D stacking: the person/object box sits on the landmark box.
+# World Z is only used to split on vs above after stacking is confirmed.
 _ABOVE_DZ_M = 0.7
+_STACK_X_OVERLAP = 0.4
+_STACK_FEET_ABOVE_BASE = 0.22
 
 _LYING_POSES = ("person_prone", "person_lying_down")
 _SITTING_POSES = ("person_sitting", "person_reclining")
@@ -189,24 +193,54 @@ def _xyz(det: dict) -> Optional[List[float]]:
     return None
 
 
-def _has_authored_xyz(det: dict) -> bool:
-    xyz = det.get("world_xyz")
-    return isinstance(xyz, (list, tuple)) and len(xyz) >= 3
+def _bbox4(det: dict) -> Optional[Tuple[float, float, float, float]]:
+    b = det.get("bbox")
+    if not b or len(b) < 4:
+        return None
+    x0, y0, x1, y1 = (float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    if x1 - x0 < 1.0 or y1 - y0 < 1.0:
+        return None
+    return x0, y0, x1, y1
+
+
+def _stacked_on_top(obj: dict, lm: dict) -> bool:
+    """True when the object's 2D box sits on the landmark, not on the ground beside it."""
+    ob = _bbox4(obj)
+    lb = _bbox4(lm)
+    if ob is None or lb is None:
+        return False
+    ox0, oy0, ox1, oy1 = ob
+    lx0, ly0, lx1, ly1 = lb
+    overlap_x = min(ox1, lx1) - max(ox0, lx0)
+    min_w = min(ox1 - ox0, lx1 - lx0)
+    if min_w <= 1.0 or overlap_x < _STACK_X_OVERLAP * min_w:
+        return False
+    obj_cy = 0.5 * (oy0 + oy1)
+    lm_cy = 0.5 * (ly0 + ly1)
+    if obj_cy >= lm_cy:
+        return False
+    if str(lm.get("class") or "").lower() in _SEAT_LANDMARKS:
+        return True
+    # Non-seat: contact must be up on the body, not sharing the ground line.
+    lm_h = ly1 - ly0
+    if (ly1 - oy1) < _STACK_FEET_ABOVE_BASE * lm_h:
+        return False
+    return True
 
 
 def _support_rel(person: dict, lm: dict) -> Optional[str]:
-    """Return on/above when world_xyz says the person is on that landmark, else None."""
+    """Return on/above only when the person is stacked on the landmark in-frame."""
+    if not _stacked_on_top(person, lm):
+        return None
     p = _xyz(person)
     l = _xyz(lm)
-    if p is None or l is None:
-        return None
-    if not _has_authored_xyz(person) or not _has_authored_xyz(lm):
-        return None
-    dxy = math.hypot(p[0] - l[0], p[1] - l[1])
-    dz = p[2] - l[2]
-    if dxy > _ON_XY_M or dz < _ON_DZ_M:
-        return None
-    return "above" if dz >= _ABOVE_DZ_M else "on"
+    if p is not None and l is not None and (p[2] - l[2]) >= _ABOVE_DZ_M:
+        return "above"
+    return "on"
 
 
 def _is_wrong_place(lm_cls: str) -> bool:
@@ -323,11 +357,13 @@ def _pick_support_landmark(person: dict, landmarks: List[dict], payload: dict):
     best_key = None
     for lm in landmarks:
         rel = _support_rel(person, lm)
-        p = _xyz(person)
-        l = _xyz(lm)
-        if rel is not None and p is not None and l is not None:
-            dxy = math.hypot(p[0] - l[0], p[1] - l[1])
-            key = (0, dxy)
+        if rel is not None:
+            pc = _bbox_center(person.get("bbox"))
+            lc = _bbox_center(lm.get("bbox"))
+            dpx = 0.0
+            if pc is not None and lc is not None:
+                dpx = abs(pc[0] - lc[0])
+            key = (0, dpx)
         else:
             lc = _bbox_center(lm.get("bbox"))
             if pc is None or lc is None:
@@ -339,18 +375,12 @@ def _pick_support_landmark(person: dict, landmarks: List[dict], payload: dict):
 
 
 def _world_or_pixel_relation(obj: dict, lm: dict, pixel_rel: str) -> str:
-    """Prefer on/above from authored world_xyz; otherwise the 2D pixel relation."""
-    p = _xyz(obj)
-    l = _xyz(lm)
-    if p is None or l is None:
-        return pixel_rel
-    if not _has_authored_xyz(obj) or not _has_authored_xyz(lm):
-        return pixel_rel
-    dxy = math.hypot(p[0] - l[0], p[1] - l[1])
-    dz = p[2] - l[2]
-    if dxy <= _ON_XY_M and dz >= _ABOVE_DZ_M:
-        return "above"
-    if dxy <= _ON_XY_M and dz >= _ON_DZ_M:
+    """On/above only when the 2D boxes stack; otherwise the pixel beside/near label."""
+    if _stacked_on_top(obj, lm):
+        p = _xyz(obj)
+        l = _xyz(lm)
+        if p is not None and l is not None and (p[2] - l[2]) >= _ABOVE_DZ_M:
+            return "above"
         return "on"
     return pixel_rel
 

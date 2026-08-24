@@ -23,14 +23,14 @@ def _load_patch():
 
 
 class AboveModePatchTests(unittest.TestCase):
-    def test_cycles_one_focused_target_per_scene(self):
+    def test_cycles_one_climber_and_keeps_scene_density(self):
         patch = _load_patch()
         source = (
             "def build(landmarks, all_chars, all_poses):\n"
             "    catalog = {'persons': [], 'poses': []}\n"
             "    selected_keys = set()\n"
             "    people_state = {'enabled': True}\n"
-            "    objects = []\n"
+            "    objects = [{'type': 'mug', 'count': 6}]\n"
             "    char_by_key = {}\n"
             "    pose_by_key = {}\n"
             + patch.NEW_COMBOS
@@ -48,15 +48,25 @@ class AboveModePatchTests(unittest.TestCase):
             )
             targets = []
             for _ in range(4):
-                landmarks, people = namespace["build"](
+                landmarks, specs = namespace["build"](
                     [{"name": "bench_0"}],
                     ["female_student_01", "male_student_01", "professor_01"],
                     ["person_reaching", "person_crouching", "person_sitting"],
                 )
-                self.assertEqual(len(landmarks), 1)
-                self.assertEqual(len(people), 1)
-                placement = people[0]["placement"]
+                lost = [o for o in specs if o.get("type") == "mug"]
+                people = [o for o in specs if o.get("character")]
+                self.assertEqual(lost, [{"type": "mug", "count": 6}])
+                self.assertEqual(len(people), 3)
+                self.assertIn("bench_0", {s["name"] for s in landmarks})
+                climbers = [
+                    p for p in people
+                    if (p.get("placement") or {}).get("above")
+                ]
+                self.assertEqual(len(climbers), 1)
+                placement = climbers[0]["placement"]
                 targets.append(placement["on_landmark_type"])
+                self.assertIn("%s_0" % placement["on_landmark_type"],
+                              {s["name"] for s in landmarks})
                 self.assertTrue(placement["above"])
                 self.assertEqual(placement["contact_clearance"], 0.01)
         finally:

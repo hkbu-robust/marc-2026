@@ -26,7 +26,7 @@ from marc_sdk import MARCClient
 
 from mock_agent_vla import MockVLAGrounding
 from mock_agent_navigation import (
-    OccupancyGridPlanner, PathFollower, GoalSeekController,
+    OccupancyGridPlanner, PathFollower,
     load_obstacles, obstacles_excluding_goal, load_mock_data,
     lidar_cloud_to_obstacles, path_is_blocked, frontal_hit,
 )
@@ -47,6 +47,7 @@ STAGE2_NAV_DT = 1.0 / STAGE2_NAV_RATE_HZ
 STAGE2_INFLATION_M = 0.25      # erode free by the robot radius (avoids road<->grass step stalls)
 STAGE2_STUCK_TIME_S = 8.0      # if movement < threshold for this long, replan from the current pose
 STAGE2_STUCK_MOVE_M = 0.05
+STAGE2_REPLAN_CAP = 50         # fail closed if the crop stays sealed
 GOAL_TOLERANCE = 0.7           # reached test (m)
 # Opt-in yaml discs (unavailable in scoring). Live lidar is the default overlay.
 NAV_USE_MOCK_OBSTACLES = os.environ.get("NAV_USE_MOCK_OBSTACLES", "").strip().lower() in (
@@ -329,17 +330,20 @@ class DemoParticipant:
             exclude_m: drop overlay discs within this radius of the goal (keep it reachable).
             cruise: True -> pass-through waypoint, no near-goal deceleration.
         The deadline is a shared SIM-time budget across all Stage 2 legs.
+        Fail closed: no straight-line drive when D*/A* return no path.
         """
         c = self.client
         planner = OccupancyGridPlanner()
         follower = None
-        fallback_ctrl = GoalSeekController()
 
         last_xy = None
         last_progress_t = c.now_s()
         last_log_t = 0.0
         reached_goal = False
         last_lidar_n = 0
+        n_replan = 0
+        logged_no_map = False
+        prev_frontal = False
 
         while c.is_running and c.now_s() < deadline:
             pose = c.get_world_pose()
@@ -365,11 +369,16 @@ class DemoParticipant:
             cloud = c.get_lidar()
             lidar_obs = lidar_cloud_to_obstacles(cloud, pose) if cloud is not None else []
             last_lidar_n = len(lidar_obs)
-            merged = list(self._obstacles) + lidar_obs
-            leg_obstacles = obstacles_excluding_goal(merged, goal, exclude_m=exclude_m)
+            now_s = c.now_s()
+            planner.expire_overlay(now_s)
+            planner.stamp_overlay(list(self._obstacles) + lidar_obs, now_s)
+            planner.clear_goal_hole(goal, exclude_m=exclude_m)
 
-            hold_linear = frontal_hit(leg_obstacles, pose)
+            hold_linear = frontal_hit(list(self._obstacles) + lidar_obs, pose)
             need_replan = follower is None
+            if hold_linear and not prev_frontal:
+                need_replan = True
+            prev_frontal = hold_linear
 
             if last_xy is not None:
                 if math.hypot(x - last_xy[0], y - last_xy[1]) > STAGE2_STUCK_MOVE_M:
@@ -382,30 +391,44 @@ class DemoParticipant:
 
             if follower is not None and not need_replan:
                 remain = [(x, y)] + follower.path[follower.idx:]
-                if path_is_blocked(planner, remain, extra_obstacles=leg_obstacles,
-                                   inflation_m=inflation_m):
+                if path_is_blocked(planner, remain, inflation_m=inflation_m):
                     log.info("[Stage2] path blocked -> replanning")
                     need_replan = True
 
             if need_replan:
                 if not planner.ready:
-                    if not self._occ_logged:
-                        log.warning("[Stage2] occupancy not received -> straight-line fallback")
+                    if not logged_no_map:
+                        log.warning("[Stage2] NO_MAP -- occupancy not received, holding")
+                        logged_no_map = True
+                    follower = None
+                    c.send_cmd_vel(0.0, 0.0)
+                    c.sleep(STAGE2_NAV_DT)
+                    continue
+                n_replan += 1
+                if n_replan > STAGE2_REPLAN_CAP:
+                    log.error("[Stage2] ABORTED after %d replans", STAGE2_REPLAN_CAP)
+                    c.send_cmd_vel(0.0, 0.0)
+                    return False
+                path = planner.plan((x, y), goal, inflation_m=inflation_m, snap_m=8.0)
+                if path:
+                    follower = PathFollower(path, passthrough=cruise)
+                    log.info("[Stage2] occupancy %s path %d waypoints (%d lidar discs)",
+                             planner.last_method or "dstar", len(path), last_lidar_n)
                 else:
-                    path = planner.plan((x, y), goal, inflation_m=inflation_m,
-                                        snap_m=8.0, extra_obstacles=leg_obstacles)
-                    if path:
-                        follower = PathFollower(path, passthrough=cruise)
-                        log.info("[Stage2] occupancy %s path %d waypoints (%d lidar discs)",
-                                 planner.last_method or "dstar", len(path), last_lidar_n)
-                    else:
-                        sr, sc = planner._w2c(x, y)
-                        gr, gc = planner._w2c(*goal)
-                        sv = int(planner._grid[sr, sc]) if planner._in_bounds(sr, sc) else 99
-                        gv = int(planner._grid[gr, gc]) if planner._in_bounds(gr, gc) else 99
-                        log.warning("[Stage2] D* Lite failed -> straight-line fallback "
+                    follower = None
+                    sr, sc = planner._w2c(x, y)
+                    gr, gc = planner._w2c(*goal)
+                    sv = int(planner._grid[sr, sc]) if planner._in_bounds(sr, sc) else 99
+                    gv = int(planner._grid[gr, gc]) if planner._in_bounds(gr, gc) else 99
+                    if now_s - last_log_t >= 1.0:
+                        log.warning("[Stage2] NO_PATH (%s) -- holding "
                                     "(start cell=(%d,%d) val=%d, goal cell=(%d,%d) val=%d) "
-                                    "[0=free 100=occ -1=unknown]", sr, sc, sv, gr, gc, gv)
+                                    "[0=free 100=occ -1=unknown]",
+                                    planner.last_status, sr, sc, sv, gr, gc, gv)
+                        last_log_t = now_s
+                    c.send_cmd_vel(0.0, 0.0)
+                    c.sleep(STAGE2_NAV_DT)
+                    continue
 
             wp_str = ""
             if follower is not None:
@@ -417,20 +440,16 @@ class DemoParticipant:
                     log.info("[STAGE2] reached goal at (%.2f, %.2f)", x, y)
                     break
             else:
-                linear, angular, reached = fallback_ctrl.compute(pose, goal, cruise=cruise)
-                if reached:
-                    reached_goal = True
-                    log.info("[STAGE2] reached goal at (%.2f, %.2f)", x, y)
-                    break
+                linear, angular = 0.0, 0.0
 
             if hold_linear:
-                linear = 0.0
+                linear, angular = 0.0, 0.0
 
             c.send_cmd_vel(linear_x=linear, angular_z=angular)
 
             now = c.now_s()
             if now - last_log_t >= 1.0:
-                extra = " lidar=%d" % last_lidar_n
+                extra = " lidar=%d replan=%d" % (last_lidar_n, n_replan)
                 if hold_linear:
                     extra += " FRONTAL"
                 log.info("[STAGE2] pose=(%.2f, %.2f, yaw=%.0fdeg) dist=%.2fm%s%s v=%.2f w=%+.2f",
