@@ -3,14 +3,38 @@
 This module bundles the demo's navigation pieces (participants replace/extend them):
   - GoalSeekController / PathFollower -- P-control that returns ``(linear_x, angular_z)``
     scalars to publish with ``client.send_cmd_vel(...)``.
-  - OccupancyGridPlanner -- A* path planning over the runtime occupancy grid
-    (``MARCClient.get_occupancy_map()``).
-  - load_obstacles / obstacles_excluding_goal -- extra 3D obstructions the occupancy map
-    omits (vehicles/bicycles/people/objects), read from ``mock_demo_data.yaml``
-    (pre-extracted by ``tools/mock_data_builder/gen_mock_demo_data.py``).
+  - OccupancyGridPlanner -- D* Lite over the runtime occupancy grid
+    (``MARCClient.get_occupancy_map()``), with A* as a fallback.
+  - lidar_cloud_to_obstacles -- live PointCloud2 hits as extra discs (roads-only map
+    omits vehicles/people/objects).
+  - load_obstacles / obstacles_excluding_goal -- optional yaml discs for debugging
+    (``NAV_USE_MOCK_OBSTACLES=1``); scoring does not have ``mock_demo_data.yaml``.
 """
 
+from __future__ import annotations
+
+import heapq
+import logging
 import math
+import os
+
+import numpy as np
+import yaml
+
+log = logging.getLogger("participant_app")
+
+SQRT2 = math.sqrt(2.0)
+_INF = 1e18
+
+# Lidar overlay: drop ground / canopy, cap range, cluster hits to cell-sized discs.
+LIDAR_Z_MIN = 0.15
+LIDAR_Z_MAX = 1.5
+LIDAR_RANGE_M = 20.0
+LIDAR_MIN_RANGE_M = 0.20
+LIDAR_HIT_RADIUS = 0.35
+LIDAR_CLUSTER_M = 0.25
+# Overlay cells not restamped for this long become free (moving people/ghosts).
+OVERLAY_TTL_S = 2.0
 
 
 def _wrap_pi(a: float) -> float:
@@ -147,21 +171,324 @@ class PathFollower:
 
 
 # ---------------------------------------------------------------------------
-# Occupancy-grid A* path planning.
+# Lidar overlay: PointCloud2 (Base_LiDAR) -> world discs.
 # ---------------------------------------------------------------------------
-import heapq
-import math
 
-import numpy as np
+def pointcloud2_xyz(msg):
+    """Nx3 float32 XYZ from a sensor_msgs/PointCloud2, or None."""
+    if msg is None:
+        return None
+    fields = {f.name: f for f in (msg.fields or [])}
+    if not all(n in fields for n in ("x", "y", "z")):
+        return None
+    fx, fy, fz = fields["x"], fields["y"], fields["z"]
+    # FLOAT32 = 7
+    if int(fx.datatype) != 7 or int(fy.datatype) != 7 or int(fz.datatype) != 7:
+        return None
+    h = int(msg.height or 0)
+    w = int(msg.width or 0)
+    n = w * h if h > 0 else w
+    step = int(msg.point_step or 0)
+    if n <= 0 or step < 12:
+        return None
+    raw = msg.data
+    if isinstance(raw, np.ndarray):
+        raw = raw.tobytes()
+    elif not isinstance(raw, (bytes, bytearray, memoryview)):
+        raw = bytes(raw)
+    nbytes = n * step
+    if len(raw) < nbytes:
+        n = len(raw) // step
+        nbytes = n * step
+        if n <= 0:
+            return None
+    be = bool(getattr(msg, "is_bigendian", False))
+    fmt = ">" if be else "<"
+    dtype = np.dtype({
+        "names": ["x", "y", "z"],
+        "formats": [f"{fmt}f4", f"{fmt}f4", f"{fmt}f4"],
+        "offsets": [int(fx.offset), int(fy.offset), int(fz.offset)],
+        "itemsize": step,
+    })
+    arr = np.frombuffer(raw, dtype=dtype, count=n)
+    return np.stack((arr["x"], arr["y"], arr["z"]), axis=1).astype(np.float32, copy=False)
 
-SQRT2 = math.sqrt(2.0)
+
+def lidar_xyz_to_obstacles(xyz, pose, radius_m=LIDAR_HIT_RADIUS, cell_m=LIDAR_CLUSTER_M):
+    """Robot-frame XYZ hits -> world discs ``[(x, y, radius_m), ...]``.
+
+    ``pose`` is chassis ``(x, y, yaw)``. Lidar +X is forward, +Y left (REP-103).
+    Hits are height-gated, range-capped, and clustered to ``cell_m`` centres.
+    """
+    if xyz is None:
+        return []
+    pts = np.asarray(xyz, dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[1] < 3 or pts.shape[0] == 0:
+        return []
+    z = pts[:, 2]
+    rng = np.hypot(pts[:, 0], pts[:, 1])
+    finite = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]) & np.isfinite(z)
+    mask = (
+        finite
+        & (z >= LIDAR_Z_MIN) & (z <= LIDAR_Z_MAX)
+        & (rng <= LIDAR_RANGE_M) & (rng >= LIDAR_MIN_RANGE_M)
+    )
+    pts = pts[mask]
+    if pts.shape[0] == 0:
+        return []
+    x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
+    cc, ss = math.cos(yaw), math.sin(yaw)
+    wx = x + pts[:, 0] * cc - pts[:, 1] * ss
+    wy = y + pts[:, 0] * ss + pts[:, 1] * cc
+    qi = np.round(wx / cell_m).astype(np.int32)
+    qj = np.round(wy / cell_m).astype(np.int32)
+    uniq = np.unique(np.stack((qi, qj), axis=1), axis=0)
+    r = float(radius_m)
+    return [(float(i) * cell_m, float(j) * cell_m, r) for i, j in uniq]
+
+
+def lidar_cloud_to_obstacles(msg, pose, radius_m=LIDAR_HIT_RADIUS, cell_m=LIDAR_CLUSTER_M):
+    """``get_lidar()`` PointCloud2 + world pose -> world discs."""
+    xyz = pointcloud2_xyz(msg)
+    return lidar_xyz_to_obstacles(xyz, pose, radius_m=radius_m, cell_m=cell_m)
+
+
+def frontal_hit(obstacles, pose, x_max=1.2, y_half=0.4, x_min=0.15):
+    """True if any disc centre (expanded by its radius) sits in a box ahead of the bumper."""
+    if not obstacles:
+        return False
+    x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
+    cc, ss = math.cos(yaw), math.sin(yaw)
+    for ox, oy, rad in obstacles:
+        dx, dy = float(ox) - x, float(oy) - y
+        fwd = dx * cc + dy * ss
+        lat = -dx * ss + dy * cc
+        r = float(rad)
+        if (x_min - r) <= fwd <= (x_max + r) and abs(lat) <= (y_half + r):
+            return True
+    return False
+
+
+def path_is_blocked(planner, waypoints, extra_obstacles=None, inflation_m=0.25):
+    """True if any remaining polyline segment fails Bresenham LOS on the inflated grid."""
+    if planner is None or not planner.ready or waypoints is None or len(waypoints) < 2:
+        return False
+    cells = []
+    for wp in waypoints:
+        r, c = planner._w2c(float(wp[0]), float(wp[1]))
+        if not planner._in_bounds(r, c):
+            return True
+        cells.append((r, c))
+    pad = 4
+    rmin = max(0, min(r for r, _ in cells) - pad)
+    rmax = min(planner._h, max(r for r, _ in cells) + pad + 1)
+    cmin = max(0, min(c for _, c in cells) - pad)
+    cmax = min(planner._w, max(c for _, c in cells) + pad + 1)
+    sub = planner._grid[rmin:rmax, cmin:cmax]
+    trav = sub == 0
+    if planner._overlay is not None:
+        trav = np.logical_and(
+            trav, np.logical_not(planner._overlay[rmin:rmax, cmin:cmax]))
+    if extra_obstacles:
+        planner._block_obstacles(trav, extra_obstacles, rmin, cmin)
+    infl_c = int(round(float(inflation_m) / planner._res)) if planner._res else 0
+    if infl_c > 0:
+        trav = OccupancyGridPlanner._erode(trav, infl_c)
+    H, W = trav.shape
+    local = [(r - rmin, c - cmin) for r, c in cells]
+    for i in range(len(local) - 1):
+        a, b = local[i], local[i + 1]
+        if not (0 <= a[0] < H and 0 <= a[1] < W and 0 <= b[0] < H and 0 <= b[1] < W):
+            return True
+        if not OccupancyGridPlanner._los(trav, a, b):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Occupancy-grid D* Lite (A* fallback).
+# ---------------------------------------------------------------------------
+
+class _DStarLite:
+    """Koenig/Likhachev D* Lite on an 8-connected boolean grid (search from goal)."""
+
+    def __init__(self, trav, goal):
+        self.trav = np.asarray(trav, dtype=bool)
+        self.H, self.W = self.trav.shape
+        self.goal = (int(goal[0]), int(goal[1]))
+        self.start = self.goal
+        self.km = 0.0
+        self.g = {}
+        self.rhs = {}
+        self.U = []
+        self._stamp = {}
+        self._n = 0
+        self.rhs[self.goal] = 0.0
+        self._push(self.goal)
+
+    def _g(self, s):
+        return self.g.get(s, _INF)
+
+    def _rhs(self, s):
+        return self.rhs.get(s, _INF)
+
+    @staticmethod
+    def _h(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    def _key(self, s):
+        val = min(self._g(s), self._rhs(s))
+        return (val + self._h(self.start, s) + self.km, val)
+
+    def _in_bounds(self, r, c):
+        return 0 <= r < self.H and 0 <= c < self.W
+
+    def _succ(self, s):
+        r, c = s
+        if not (self._in_bounds(r, c) and self.trav[r, c]):
+            return
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if not self._in_bounds(nr, nc) or not self.trav[nr, nc]:
+                    continue
+                if dr != 0 and dc != 0 and not (self.trav[r + dr, c] and self.trav[r, c + dc]):
+                    continue
+                step = SQRT2 if (dr and dc) else 1.0
+                yield (nr, nc), step
+
+    def _adjacent(self, s):
+        r, c = s
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                nr, nc = r + dr, c + dc
+                if self._in_bounds(nr, nc):
+                    yield (nr, nc)
+
+    def _push(self, s):
+        self._n += 1
+        k1, k2 = self._key(s)
+        self._stamp[s] = self._n
+        heapq.heappush(self.U, (k1, k2, self._n, s))
+
+    def _invalidate(self, s):
+        self._stamp[s] = 0
+
+    def _pop_valid(self):
+        while self.U:
+            k1, k2, n, s = heapq.heappop(self.U)
+            if self._stamp.get(s) == n:
+                return k1, k2, s
+        return None
+
+    def _top_key(self):
+        while self.U:
+            k1, k2, n, s = self.U[0]
+            if self._stamp.get(s) == n:
+                return (k1, k2)
+            heapq.heappop(self.U)
+        return (_INF, _INF)
+
+    def _update_vertex(self, u):
+        if not self._in_bounds(*u):
+            return
+        if u != self.goal:
+            if not self.trav[u]:
+                self.rhs[u] = _INF
+            else:
+                best = _INF
+                for n, cost in self._succ(u):
+                    val = cost + self._g(n)
+                    if val < best:
+                        best = val
+                self.rhs[u] = best
+        else:
+            self.rhs[u] = 0.0
+        self._invalidate(u)
+        if abs(self._g(u) - self._rhs(u)) > 1e-6:
+            self._push(u)
+
+    def move_start(self, start):
+        start = (int(start[0]), int(start[1]))
+        if start == self.start:
+            return
+        self.km += self._h(self.start, start)
+        self.start = start
+
+    def update_cells(self, trav, changed_rc):
+        self.trav = np.asarray(trav, dtype=bool)
+        affected = set()
+        for rc in changed_rc:
+            s = (int(rc[0]), int(rc[1]))
+            affected.add(s)
+            affected.update(self._adjacent(s))
+        for s in affected:
+            self._update_vertex(s)
+
+    def compute(self, start):
+        start = (int(start[0]), int(start[1]))
+        self.move_start(start)
+        limit = max(64, self.H * self.W * 8)
+        for _ in range(limit):
+            tk = self._top_key()
+            sk = self._key(self.start)
+            if not (tk < sk or abs(self._rhs(self.start) - self._g(self.start)) > 1e-6):
+                return True
+            popped = self._pop_valid()
+            if popped is None:
+                break
+            k_old1, k_old2, u = popped
+            k_new = self._key(u)
+            if (k_old1, k_old2) < k_new:
+                self._push(u)
+            elif self._g(u) - self._rhs(u) > 1e-6:
+                self.g[u] = self._rhs(u)
+                for n in self._adjacent(u):
+                    self._update_vertex(n)
+            else:
+                self.g[u] = _INF
+                self._update_vertex(u)
+                for n in self._adjacent(u):
+                    self._update_vertex(n)
+        return abs(self._rhs(self.start) - self._g(self.start)) <= 1e-6
+
+    def extract_path(self, start):
+        start = (int(start[0]), int(start[1]))
+        if self._rhs(start) >= _INF * 0.5:
+            return None
+        if start == self.goal:
+            return [start]
+        path = [start]
+        cur = start
+        seen = {cur}
+        limit = self.H * self.W + 2
+        while cur != self.goal:
+            best, best_v = None, _INF
+            for n, cost in self._succ(cur):
+                val = cost + self._g(n)
+                if val < best_v:
+                    best_v = val
+                    best = n
+            if best is None or best in seen:
+                return None
+            cur = best
+            seen.add(cur)
+            path.append(cur)
+            if len(path) > limit:
+                return None
+        return path
 
 
 class OccupancyGridPlanner:
-    """A* planner over an occupancy grid.
+    """D* Lite planner over an occupancy grid (A* fallback).
 
-    Update the grid with ``update_from_msg()`` and get a list of world-coordinate
-    waypoints with ``plan()``. If there is no grid, ``ready == False``.
+    Update the grid with ``update_from_msg()`` / ``update_from_array()`` and get a
+    list of world-coordinate waypoints with ``plan()``. If there is no grid,
+    ``ready == False``.
     """
 
     def __init__(self):
@@ -171,8 +498,16 @@ class OccupancyGridPlanner:
         self._oy = None          # origin y (world)
         self._h = 0
         self._w = 0
-
-    # -- grid update --
+        self._dstar = None
+        self._crop = None        # (rmin, rmax, cmin, cmax)
+        self._last_trav = None
+        self._plan_goal_xy = None
+        self._infl_c = None
+        self._dstar_goal = None
+        self._overlay = None     # bool (H, W), True = lidar-blocked
+        self._overlay_t = None   # float64 last restamp time (sim s)
+        self.last_method = None  # "dstar" | "astar"
+        self.last_status = None  # "ok" | "no_map" | "no_path"
 
     def update_from_msg(self, msg) -> bool:
         """Update the grid from a nav_msgs/OccupancyGrid message."""
@@ -182,12 +517,30 @@ class OccupancyGridPlanner:
         if w == 0 or h == 0:
             return False
         grid = np.array(msg.data, dtype=np.int8).reshape(h, w)
-        self._grid = grid
-        self._res = float(info.resolution)
-        self._ox = float(info.origin.position.x)
-        self._oy = float(info.origin.position.y)
-        self._h = h
-        self._w = w
+        return self.update_from_array(
+            grid, float(info.resolution),
+            float(info.origin.position.x), float(info.origin.position.y))
+
+    def update_from_array(self, grid, res, ox, oy) -> bool:
+        """Update the grid from a numpy occupancy array (0=free, 100=occ, -1=unknown)."""
+        arr = np.asarray(grid, dtype=np.int8)
+        if arr.ndim != 2 or arr.size == 0:
+            return False
+        map_changed = (
+            self._grid is None
+            or arr.shape != getattr(self._grid, "shape", ())
+            or self._res != float(res)
+            or self._ox != float(ox)
+            or self._oy != float(oy)
+        )
+        self._grid = arr
+        self._res = float(res)
+        self._ox = float(ox)
+        self._oy = float(oy)
+        self._h, self._w = arr.shape
+        if map_changed or self._overlay is None or self._overlay.shape != arr.shape:
+            self._overlay = np.zeros(arr.shape, dtype=bool)
+            self._overlay_t = np.zeros(arr.shape, dtype=np.float64)
         return True
 
     @property
@@ -197,8 +550,6 @@ class OccupancyGridPlanner:
     @property
     def resolution(self):
         return self._res
-
-    # -- coordinate conversion --
 
     def _w2c(self, wx, wy):
         """world (x, y) -> cell (row, col)."""
@@ -212,8 +563,6 @@ class OccupancyGridPlanner:
         wy = self._oy + (row + 0.5) * self._res
         return wx, wy
 
-    # -- path planning --
-
     def plan(self, start_xy, goal_xy, inflation_m=0.25, margin_m=12.0,
              snap_m=1.5, extra_obstacles=None):
         """Return a detour path from start_xy -> goal_xy as a list of world waypoints.
@@ -226,67 +575,162 @@ class OccupancyGridPlanner:
             margin_m: search margin outside the start/goal bounding box (crop for planning speed).
             snap_m:  maximum radius to correct a start/goal cell to the nearest free
                      cell when it is not traversable.
-            extra_obstacles: [(x, y, radius_m), ...] static obstacles not in the
-                     occupancy map (vehicles etc.). Their disc is carved out as not traversable.
+            extra_obstacles: [(x, y, radius_m), ...] extra discs carved for this
+                     call only (tests / yaml). Live lidar should use stamp_overlay.
 
         Returns:
             [(x, y), ...] path waypoints. If the goal cell is traversable the last one is
             exactly goal_xy; if it is blocked (a vehicle etc.), up to the free cell nearest
             the goal. None on failure.
         """
+        self.last_method = None
         if not self.ready:
+            self.last_status = "no_map"
             return None
+        self.last_status = "no_path"
 
         sr, sc = self._w2c(*start_xy)
         gr, gc = self._w2c(*goal_xy)
         if not (self._in_bounds(sr, sc) and self._in_bounds(gr, gc)):
             return None
 
-        # 1) Crop only around start/goal -- avoid A*/erosion over the full grid (tens of millions of cells).
         margin_c = int(math.ceil(margin_m / self._res))
         rmin = max(0, min(sr, gr) - margin_c)
         rmax = min(self._h, max(sr, gr) + margin_c + 1)
         cmin = max(0, min(sc, gc) - margin_c)
         cmax = min(self._w, max(sc, gc) + margin_c + 1)
-        sub = self._grid[rmin:rmax, cmin:cmax]
+        infl_c = int(round(inflation_m / self._res))
 
-        # 2) traversable (free) mask. First carve out obstacles not in the occupancy
-        #    map (vehicles etc.), then erode (inflate) by the robot radius.
+        reuse = (
+            self._dstar is not None
+            and self._crop is not None
+            and self._infl_c == infl_c
+            and self._plan_goal_xy is not None
+            and math.hypot(goal_xy[0] - self._plan_goal_xy[0],
+                           goal_xy[1] - self._plan_goal_xy[1]) < 0.05
+        )
+        if reuse:
+            ormin, ormax, ocmin, ocmax = self._crop
+            if ormin <= sr < ormax and ocmin <= sc < ocmax:
+                rmin, rmax, cmin, cmax = self._crop
+            else:
+                rmin, rmax = min(rmin, ormin), max(rmax, ormax)
+                cmin, cmax = min(cmin, ocmin), max(cmax, ocmax)
+                reuse = False
+
+        sub = self._grid[rmin:rmax, cmin:cmax]
         trav = sub == 0
+        if self._overlay is not None:
+            trav = np.logical_and(
+                trav, np.logical_not(self._overlay[rmin:rmax, cmin:cmax]))
         if extra_obstacles:
             self._block_obstacles(trav, extra_obstacles, rmin, cmin)
-        infl_c = int(round(inflation_m / self._res))
         if infl_c > 0:
             trav = self._erode(trav, infl_c)
 
-        # crop-local coordinates. Record whether the goal cell is traversable (after
-        # carve/erosion) -- if it is blocked, do not overwrite the last waypoint with the
-        # exact goal (so the robot does not charge back into the vehicle).
         ls, lg = (sr - rmin, sc - cmin), (gr - rmin, gc - cmin)
         H, W = trav.shape
         goal_free = (0 <= lg[0] < H and 0 <= lg[1] < W and bool(trav[lg[0], lg[1]]))
         ls = self._snap(trav, ls, snap_m)
         lg = self._snap(trav, lg, snap_m)
         if ls is None or lg is None:
+            self._dstar = None
             return None
 
-        # 3) A*
-        cells = self._astar(trav, ls, lg)
+        if reuse and self._dstar_goal != lg:
+            reuse = False
+        if reuse and self._last_trav is not None and self._last_trav.shape != trav.shape:
+            reuse = False
+
+        cells = None
+        if reuse:
+            changed = np.argwhere(trav != self._last_trav)
+            self._dstar.update_cells(trav, changed)
+            if self._dstar.compute(ls):
+                cells = self._dstar.extract_path(ls)
+            if cells:
+                self.last_method = "dstar"
+        else:
+            self._dstar = _DStarLite(trav, lg)
+            if self._dstar.compute(ls):
+                cells = self._dstar.extract_path(ls)
+            if cells:
+                self.last_method = "dstar"
+
         if not cells:
+            cells = self._astar(trav, ls, lg)
+            if cells:
+                self.last_method = "astar"
+                self._dstar = None
+
+        self._last_trav = trav.copy()
+        self._crop = (rmin, rmax, cmin, cmax)
+        self._plan_goal_xy = (float(goal_xy[0]), float(goal_xy[1]))
+        self._infl_c = infl_c
+        self._dstar_goal = lg
+
+        if not cells:
+            self.last_status = "no_path"
             return None
 
-        # 4) line-of-sight simplification -> convert to world coordinates
+        self.last_status = "ok"
         cells = self._simplify(trav, cells)
         path = [self._c2w(r + rmin, c + cmin) for (r, c) in cells]
 
-        # Replace the last waypoint with the exact goal only when the goal cell is traversable.
-        # Remove the first waypoint (the current-position cell).
         if path:
             if goal_free:
                 path[-1] = (float(goal_xy[0]), float(goal_xy[1]))
             if len(path) > 1:
                 path = path[1:]
         return path
+
+    def _disc_mask(self, wx, wy, rad):
+        """Slice + boolean disc on the full grid, or None if off-map."""
+        if not self.ready or self._res is None:
+            return None
+        r, c = self._w2c(wx, wy)
+        rad_c = int(round(float(rad) / self._res))
+        if rad_c <= 0:
+            return None
+        H, W = self._h, self._w
+        if r + rad_c < 0 or r - rad_c >= H or c + rad_c < 0 or c - rad_c >= W:
+            return None
+        r0, r1 = max(0, r - rad_c), min(H, r + rad_c + 1)
+        c0, c1 = max(0, c - rad_c), min(W, c + rad_c + 1)
+        yy, xx = np.ogrid[r0:r1, c0:c1]
+        disc = (yy - r) ** 2 + (xx - c) ** 2 <= rad_c ** 2
+        return r0, r1, c0, c1, disc
+
+    def stamp_overlay(self, obstacles, now_s=0.0):
+        """Union-stamp world discs onto the persistent lidar overlay."""
+        if not self.ready or self._overlay is None:
+            return
+        now = float(now_s)
+        for item in obstacles or []:
+            wx, wy, rad = float(item[0]), float(item[1]), float(item[2])
+            sl = self._disc_mask(wx, wy, rad)
+            if sl is None:
+                continue
+            r0, r1, c0, c1, disc = sl
+            self._overlay[r0:r1, c0:c1][disc] = True
+            self._overlay_t[r0:r1, c0:c1][disc] = now
+
+    def expire_overlay(self, now_s=0.0):
+        """Free overlay cells not restamped within OVERLAY_TTL_S."""
+        if self._overlay is None or self._overlay_t is None:
+            return
+        stale = self._overlay & ((float(now_s) - self._overlay_t) > OVERLAY_TTL_S)
+        self._overlay[stale] = False
+
+    def clear_goal_hole(self, goal_xy, exclude_m=0.6):
+        """Keep the goal reachable: drop overlay inside exclude_m of goal_xy."""
+        if not self.ready or self._overlay is None or exclude_m <= 0:
+            return
+        sl = self._disc_mask(float(goal_xy[0]), float(goal_xy[1]), float(exclude_m))
+        if sl is None:
+            return
+        r0, r1, c0, c1, disc = sl
+        self._overlay[r0:r1, c0:c1][disc] = False
 
     def _block_obstacles(self, trav, obstacles, rmin, cmin):
         """Mark each (x, y, radius) disc from extra_obstacles as not traversable in trav."""
@@ -304,8 +748,6 @@ class OccupancyGridPlanner:
             yy, xx = np.ogrid[r0:r1, c0:c1]
             disc = (yy - lr) ** 2 + (xx - lc) ** 2 <= rad_c ** 2
             trav[r0:r1, c0:c1][disc] = False
-
-    # -- internal helpers --
 
     def _in_bounds(self, r, c):
         return 0 <= r < self._h and 0 <= c < self._w
@@ -431,13 +873,6 @@ class OccupancyGridPlanner:
 # Demo obstacles + Stage 2 answer, read from mock_demo_data.yaml
 # (data pre-extracted by tools/mock_data_builder instead of the scenario).
 # ---------------------------------------------------------------------------
-import os
-import logging
-
-import yaml
-
-log = logging.getLogger("participant_app")
-
 
 def _default_data_path() -> str:
     """demo/mock_demo_data.yaml next to this module."""
@@ -458,8 +893,9 @@ def load_mock_data(path: str | None = None) -> dict:
 def load_obstacles(path: str | None = None) -> list:
     """Return a list of obstacles [(x, y, radius_m), ...] from mock_demo_data.yaml.
 
-    The runtime occupancy map omits 3D obstructions (vehicles/bicycles/people/objects),
-    so the mock navigation injects these to route around them (demo only).
+    The runtime occupancy map omits 3D obstructions (vehicles/bicycles/people/objects).
+    Scoring does not ship this yaml -- use lidar discs instead. Opt in with
+    NAV_USE_MOCK_OBSTACLES=1 when debugging without a live cloud.
     """
     data = load_mock_data(path)
     obstacles = [(float(o["x"]), float(o["y"]), float(o["radius"]))
