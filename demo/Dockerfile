@@ -22,20 +22,26 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install h5py via pip (not apt python3-h5py): placo pulls a newer numpy that is
 # ABI-incompatible with Debian's h5py ("numpy.dtype size changed").
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3-numpy python3-yaml python3-pip \
+        python3-numpy python3-yaml python3-pip libgl1 libglib2.0-0 \
     && pip3 install --no-cache-dir placo h5py \
+    && pip3 install --no-cache-dir \
+        torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
+    && pip3 install --no-cache-dir "ultralytics-opencv-headless==8.4.118" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /agent
 
-# context = starter kit root -> copy marc_sdk, participant intelligence, and demo adapter
+# context = starter kit root -> copy marc_sdk, participant intelligence, demo adapter, models
 COPY marc_sdk /agent/marc_sdk
 COPY marc_agent /agent/marc_agent
 COPY demo     /agent/demo
+COPY models/runtime /agent/models/runtime
 
 # Same RMW as the runtime platform (FastDDS). Import paths for marc_sdk (/agent) + demo local modules (/agent/demo).
 ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ENV PYTHONPATH=/agent:/agent/demo
+ENV YOLO_OFFLINE=1
+ENV YOLO_CONFIG_DIR=/agent/demo/weights
 
 WORKDIR /agent/demo
 

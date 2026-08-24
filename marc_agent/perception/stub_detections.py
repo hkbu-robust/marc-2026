@@ -56,6 +56,19 @@ def _filter_camera_ids(items: Iterable, camera_ids: Optional[list[str]]):
     return [item for item in items if item.camera_id in allowed]
 
 
+def load_stub_sar(
+    path: Optional[str] = None,
+    *,
+    camera_ids: Optional[list[str]] = None,
+) -> list[SarCandidate]:
+    """Load SAR candidates only from the stub JSON fixture."""
+    stub_path = path or os.environ.get("MARC_STUB_DETECTIONS") or default_stub_path()
+    with open(stub_path, encoding="utf-8") as stream:
+        payload = json.load(stream)
+    sar = [_sar_candidate(raw) for raw in payload.get("sar") or []]
+    return _filter_camera_ids(sar, camera_ids)
+
+
 def load_stub_detections(
     path: Optional[str] = None,
     *,
