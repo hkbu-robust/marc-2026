@@ -17,9 +17,10 @@
 #
 # TRAINER_PEOPLE_ABOVE=1 keeps the normal object/landmark/people density, then
 # guarantees one climber: a non-seat target type is cycled per scene (injected
-# only if missing) and one person is snapped onto it. Other people and lost
-# objects stay in the usual cell layout. The deployer patch uses final world
-# bounds so the posed person's bottom meets the landmark top.
+# only if missing; vending machines are 3x by default), moved to the front of
+# the landmark list, and one person is co-located on that cell then dropped
+# onto the raycasted top surface using the posed skeleton (in contact AND on
+# top; seats/vehicles are never climb targets).
 #
 # boot.py runs this before dataset-gen (trainer.py). Idempotent via MARKER.
 import os
@@ -167,12 +168,34 @@ NEW_COMBOS = '''    combos = []
     def _marc_people_above():
         """[marc-patch] Marker: abnormal climbed-above (landmark XY + Z lift)."""
         return _marc_flag("TRAINER_PEOPLE_ABOVE", "0")
+    def _marc_above_type_weight(typ):
+        parsed = {}
+        raw = os.environ.get("TRAINER_PEOPLE_ABOVE_WEIGHTS", "") or ""
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if ":" in part:
+                key, val = part.split(":", 1)
+            elif "=" in part:
+                key, val = part.split("=", 1)
+            else:
+                continue
+            try:
+                parsed[key.strip()] = max(0.0, float(val))
+            except (TypeError, ValueError):
+                continue
+        if typ in parsed:
+            return parsed[typ]
+        if typ == "vending_machine":
+            return 3.0
+        return 1.0
     def _marc_above_clearance():
         try:
             return float(os.environ.get(
-                "TRAINER_PEOPLE_ABOVE_CLEARANCE", "0.01") or "0.01")
+                "TRAINER_PEOPLE_ABOVE_CLEARANCE", "0.03") or "0.03")
         except (TypeError, ValueError):
-            return 0.01
+            return 0.03
     def _marc_lm_typ(spec):
         import re as _re_lm
         return _re_lm.sub(r"_[0-9]+$", "", str((spec or {}).get("name") or ""))
@@ -186,7 +209,7 @@ NEW_COMBOS = '''    combos = []
         if _marc_is_seat(t):
             return False
         if _marc_people_is_vehicle(t):
-            return True
+            return False
         return t in (
             "vending_machine", "trash_can", "hydrant", "postbox",
             "bicycle", "kick_scooter",
@@ -230,12 +253,19 @@ NEW_COMBOS = '''    combos = []
     _above_filter = [x.strip() for x in _raw_above.split(",") if x.strip()]
     _aboves = [t for t in _lm_types if _marc_is_above_ok(t)]
     if _above_mode:
-        # Keep the usual landmark/object density. Cycle one climb target so
-        # coverage is even, and inject that type only when subsampling dropped it.
-        _pool = [
+        # Keep the usual landmark/object density. Cycle climb targets with a
+        # vending-machine bias (default 3x), injecting a type only when missing.
+        _base = [
             t for t in _above_filter if _marc_is_above_ok(t)
         ] or ["vending_machine", "trash_can", "hydrant",
               "postbox", "bicycle", "kick_scooter"]
+        _pool = []
+        for _t in _base:
+            _rep = int(round(_marc_above_type_weight(_t)))
+            if _rep > 0:
+                _pool.extend([_t] * _rep)
+        if not _pool:
+            _pool = list(_base)
         global _marc_above_type_cursor
         try:
             _cursor = int(_marc_above_type_cursor)
@@ -248,6 +278,11 @@ NEW_COMBOS = '''    combos = []
         if _target not in _lm_types:
             _lm_types.append(_target)
         _aboves = [_target]
+        # Target first so its cell is known and the climber can share it.
+        landmarks[:] = (
+            [s for s in landmarks if _marc_lm_typ(s) == _target][:1]
+            + [s for s in landmarks if _marc_lm_typ(s) != _target]
+        )
     elif _above_filter:
         _want = set(t for t in _above_filter if _marc_is_above_ok(t))
         _aboves = [t for t in _lm_types if t in _want]
@@ -264,10 +299,16 @@ NEW_COMBOS = '''    combos = []
                 "contact_clearance": _marc_above_clearance(),
             }
             fit = [p for p in _ON_ABOVE_POSES if p in _pose_set]
+            if _target in ("vending_machine", "postbox"):
+                _tall = [p for p in ("person_sitting", "person_crouching")
+                         if p in _pose_set]
+                if _tall:
+                    fit = _tall
             if fit:
                 spec["type"] = random.choice(fit)
             _climber_placed = True
-        elif random.random() < _marc_frac("TRAINER_PEOPLE_ON_LANDMARK_PROB", 0.45):
+        elif (not _above_mode) and random.random() < _marc_frac(
+                "TRAINER_PEOPLE_ON_LANDMARK_PROB", 0.45):
             want_wrong = random.random() < _marc_frac(
                 "TRAINER_PEOPLE_WRONG_PLACE_PROB", 0.55)
             lm_typ = None
@@ -347,10 +388,11 @@ def _log_people():
     mode = os.environ.get("TRAINER_PEOPLE_ALL_CHARS", "1")
     on_p = os.environ.get("TRAINER_PEOPLE_ON_LANDMARK_PROB", "0.45")
     above = os.environ.get("TRAINER_PEOPLE_ABOVE", "0")
-    clearance = os.environ.get("TRAINER_PEOPLE_ABOVE_CLEARANCE", "0.01")
+    clearance = os.environ.get("TRAINER_PEOPLE_ABOVE_CLEARANCE", "0.03")
+    weights = os.environ.get("TRAINER_PEOPLE_ABOVE_WEIGHTS", "vending_machine:3")
     print(f"[people-patch] all identities per scene "
           f"(TRAINER_PEOPLE_ALL_CHARS={mode}); on-landmark p={on_p}; "
-          f"above={above} clearance={clearance}")
+          f"above={above} clearance={clearance} weights={weights}")
 
 
 if __name__ == "__main__":
