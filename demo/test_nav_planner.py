@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Numpy-only checks for D* Lite repair, lidar XY transform, path-blocked, and SpeedGovernor.
+"""Numpy-only checks for D* Lite, lidar overlay, SpeedGovernor, and search-area nav.
 
 Run from repo root or demo/:
   python3 demo/test_nav_planner.py
@@ -21,7 +21,11 @@ from mock_agent_navigation import (
     lidar_xyz_to_obstacles,
     path_is_blocked,
     pointcloud2_xyz,
+    recovery_cmd,
+    resolve_xy,
 )
+
+from retrieval_state import RetrievalState
 
 
 class _Fail(Exception):
@@ -286,6 +290,46 @@ def test_governor_missing_sensors_never_raises():
     _check(held <= 0.30 + 1e-12, "governor must never raise linear (%s)" % held)
 
 
+def test_search_tol_uses_radius():
+    s = RetrievalState(hint_center=(1.0, 2.0), hint_radius=3.0)
+    _check(abs(s.search_tol(0.7) - 3.0) < 1e-12, "radius 3 should be the stop distance, got %s" % s.search_tol(0.7))
+    s2 = RetrievalState(grounding_xy=(0.0, 0.0))
+    _check(abs(s2.search_tol(0.7) - 0.7) < 1e-12, "no radius -> default tol")
+    s3 = RetrievalState(hint_center=(1.0, 2.0), hint_radius=0.4)
+    _check(abs(s3.search_tol(0.7) - 0.7) < 1e-12, "small radius still at least default, got %s" % s3.search_tol(0.7))
+    _check(s.search_xy() == (1.0, 2.0), "hint wins over grounding")
+    s4 = RetrievalState(grounding_xy=(8.0, 9.0))
+    _check(s4.search_xy() == (8.0, 9.0), "grounding fallback")
+    s4.hint_center = (3.0, 4.0)
+    _check(s4.search_xy() == (3.0, 4.0), "late reveal replaces grounding")
+
+
+def test_callable_goal_retarget():
+    box = {"xy": (1.0, 2.0)}
+    def goal():
+        return box["xy"]
+    _check(resolve_xy(goal) == (1.0, 2.0), "first goal")
+    box["xy"] = (9.0, 8.0)
+    _check(resolve_xy(goal) == (9.0, 8.0), "updated callable goal")
+    st = RetrievalState(grounding_xy=(1.0, 1.0))
+    _check(resolve_xy(st.search_xy) == (1.0, 1.0), "bound search_xy")
+    st.hint_center = (5.0, 6.0)
+    _check(resolve_xy(st.search_xy) == (5.0, 6.0), "reveal retarget via bound method")
+    _check(resolve_xy(None) is None, "missing goal")
+    _check(resolve_xy((2.5, 3.5)) == (2.5, 3.5), "plain tuple")
+
+
+def test_recovery_cmd_zeros_on_frontal():
+    pose = (0.0, 0.0, 0.0)
+    hit = [(0.6, 0.0, 0.2)]
+    _check(frontal_hit(hit, pose), "bumper disc should be a frontal hit")
+    lin, ang = recovery_cmd(True)
+    _check(lin == 0.0, "recovery must command zero linear, got lin=%s" % lin)
+    _check(ang == 0.0, "recovery has no yaw")
+    lin2, ang2 = recovery_cmd(False)
+    _check(lin2 == 0.0 and ang2 == 0.0, "no hit -> zero cmd")
+
+
 def main():
     tests = [
         test_empty_corridor,
@@ -304,6 +348,9 @@ def main():
         test_governor_curb_lidar_slower_than_high_z,
         test_governor_az_spike_latches,
         test_governor_missing_sensors_never_raises,
+        test_search_tol_uses_radius,
+        test_callable_goal_retarget,
+        test_recovery_cmd_zeros_on_frontal,
     ]
     failed = 0
     for fn in tests:

@@ -1,0 +1,157 @@
+# Hand-reviewed Stage 2 search-area navigation fixtures.
+# approach_cases / runtime_steps are geometric. drive_cases use a synthetic unicycle client.
+
+approach_cases:
+  - id: far_east_edge
+    hint_center: [10.0, 0.0]
+    hint_radius: 2.0
+    pose: [0.0, 0.0]
+    expected: [8.0, 0.0]
+  - id: far_north_edge
+    hint_center: [0.0, 10.0]
+    hint_radius: 3.0
+    pose: [0.0, 0.0]
+    expected: [0.0, 7.0]
+  - id: far_west_edge
+    hint_center: [-10.0, 0.0]
+    hint_radius: 2.0
+    pose: [0.0, 0.0]
+    expected: [-8.0, 0.0]
+  - id: diagonal_half
+    hint_center: [6.0, 8.0]
+    hint_radius: 5.0
+    pose: [0.0, 0.0]
+    expected: [3.0, 4.0]
+  - id: already_inside
+    hint_center: [0.0, 0.0]
+    hint_radius: 5.0
+    pose: [1.0, 1.0]
+    expected: [1.0, 1.0]
+  - id: at_center
+    hint_center: [4.0, 4.0]
+    hint_radius: 2.0
+    pose: [4.0, 4.0]
+    expected: [4.0, 4.0]
+  - id: zero_radius_uses_center
+    hint_center: [5.0, 5.0]
+    hint_radius: 0.0
+    pose: [0.0, 0.0]
+    expected: [5.0, 5.0]
+  - id: on_edge_is_inside
+    hint_center: [4.0, 0.0]
+    hint_radius: 4.0
+    pose: [0.0, 0.0]
+    expected: [0.0, 0.0]
+  - id: offset_not_on_axis
+    hint_center: [10.0, 0.0]
+    hint_radius: 2.0
+    pose: [0.0, 3.0]
+    expected: [8.084, 0.575]
+  - id: south_from_above
+    hint_center: [0.0, 0.0]
+    hint_radius: 1.5
+    pose: [0.0, 8.0]
+    expected: [0.0, 1.5]
+  - id: tiny_radius
+    hint_center: [3.0, 0.0]
+    hint_radius: 0.1
+    pose: [0.0, 0.0]
+    expected: [2.9, 0.0]
+  - id: already_at_goal_center
+    hint_center: [0.0, 0.0]
+    hint_radius: 0.0
+    pose: [0.0, 0.0]
+    expected: [0.0, 0.0]
+
+# 25 pose samples along +X toward a disk at x=20, r=4. Hand-reviewed:
+# outside -> near-edge x=16; on/inside the disk -> current pose.
+runtime_steps:
+  - {id: s01, pose: [0.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s02, pose: [1.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s03, pose: [2.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s04, pose: [3.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s05, pose: [4.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s06, pose: [5.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s07, pose: [6.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s08, pose: [7.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s09, pose: [8.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s10, pose: [9.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s11, pose: [10.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s12, pose: [11.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s13, pose: [12.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s14, pose: [13.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s15, pose: [14.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s16, pose: [15.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s17, pose: [16.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.0, 0.0]}
+  - {id: s18, pose: [16.5, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.5, 0.0]}
+  - {id: s19, pose: [17.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [17.0, 0.0]}
+  - {id: s20, pose: [18.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [18.0, 0.0]}
+  - {id: s21, pose: [19.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [19.0, 0.0]}
+  - {id: s22, pose: [20.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [20.0, 0.0]}
+  - {id: s23, pose: [21.0, 0.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [21.0, 0.0]}
+  - {id: s24, pose: [15.9, 0.2], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.002, 0.195]}
+  - {id: s25, pose: [0.0, 4.0], hint_center: [20.0, 0.0], hint_radius: 4.0, expected: [16.078, 0.785]}
+
+drive_cases:
+  - id: corridor_reach
+    kind: reach
+    res: 0.5
+    origin: [0.0, 0.0]
+    grid_hw: [20, 40]
+    start: [1.0, 5.0, 0.0]
+    goal: [8.0, 5.0]
+    deadline_s: 40.0
+    dt: 0.10
+    expect_status: reached
+    expect_replan_max: 8
+  - id: no_map
+    kind: no_map
+    start: [1.0, 5.0, 0.0]
+    goal: [8.0, 5.0]
+    deadline_s: 1.0
+    dt: 0.10
+    expect_status: no_map
+  - id: walled_no_path
+    kind: no_path
+    res: 0.5
+    origin: [0.0, 0.0]
+    grid_hw: [20, 40]
+    wall_col: 20
+    start: [2.0, 5.0, 0.0]
+    goal: [16.0, 5.0]
+    deadline_s: 2.0
+    dt: 0.10
+    expect_status: no_path
+  - id: timeout_far
+    kind: timeout
+    res: 0.5
+    origin: [0.0, 0.0]
+    grid_hw: [20, 40]
+    start: [1.0, 5.0, 0.0]
+    goal: [18.0, 5.0]
+    deadline_s: 0.25
+    dt: 0.10
+    expect_status: timeout
+  - id: aborted_stopped
+    kind: abort
+    res: 0.5
+    origin: [0.0, 0.0]
+    grid_hw: [20, 40]
+    start: [1.0, 5.0, 0.0]
+    goal: [18.0, 5.0]
+    deadline_s: 40.0
+    dt: 0.10
+    stop_after_s: 0.15
+    expect_status: aborted
+  - id: frontal_zero_cmd
+    kind: frontal
+    res: 0.5
+    origin: [0.0, 0.0]
+    grid_hw: [20, 40]
+    start: [1.0, 5.0, 0.0]
+    goal: [16.0, 5.0]
+    extra_obstacles: [[1.8, 5.0, 0.4]]
+    deadline_s: 1.5
+    dt: 0.10
+    expect_frontal_zero: true
+    expect_status_in: [no_path, timeout, aborted]

@@ -97,3 +97,31 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  # Practice Stage 2 with YOLO (torch lives in manip-probe). Graded `agent` stays torch-free.
+  #   MARC_TEAM_ID=... docker compose up --build agent-nearfield
+  agent-nearfield:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+      target: manip-probe
+    image: marc-agent-manip-probe:local
+    network_mode: host
+    working_dir: /agent/demo
+    environment:
+      MARC_TEAM_ID:  "${MARC_TEAM_ID:-robust}"
+      MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
+      PYTHONPATH: "/agent:/agent/demo"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./weights:/agent/demo/weights
+    command: ["python3", "/agent/demo/participant_app.py"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

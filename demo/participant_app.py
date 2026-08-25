@@ -20,22 +20,19 @@ Precondition: the simulation platform must be running first.
 import logging
 import math
 import os
-import time
 
 from marc_sdk import MARCClient
 
+from marc_agent.navigation_runtime import Stage2Navigator
 from marc_agent.perception.cctv_dump import maybe_dump_cctv_round
 from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
     run_stage1_candidate_pipeline,
 )
+from marc_agent.retrieval_state import RetrievalState, search_area_approach_goal
 from mock_agent_vla import MockVLAGrounding
-from mock_agent_navigation import (
-    OccupancyGridPlanner, PathFollower, SpeedGovernor,
-    load_obstacles, obstacles_excluding_goal, load_mock_data,
-    lidar_cloud_to_obstacles, path_is_blocked, frontal_hit,
-    pointcloud2_xyz,
-)
+from mock_agent_navigation import lidar_cloud_to_obstacles, frontal_hit
+from nearfield import NearFieldAcquire, make_detector
 # Closed-loop placo pick from the manipulation kit (arm_pick.py): grasp_yaw wrist-roll +
 # DLS servo, targeting the object position. Requires placo (installed in the demo image).
 # The fixed-keyframe mock in mock_agent_manipulation.py remains as a dependency-free
@@ -54,11 +51,7 @@ STAGE2_INFLATION_M = 0.25      # erode free by the robot radius (avoids road<->g
 STAGE2_STUCK_TIME_S = 8.0      # if movement < threshold for this long, replan from the current pose
 STAGE2_STUCK_MOVE_M = 0.05
 STAGE2_REPLAN_CAP = 50         # fail closed if the crop stays sealed
-GOAL_TOLERANCE = 0.7           # reached test (m)
-# Opt-in yaml discs (unavailable in scoring). Live lidar is the default overlay.
-NAV_USE_MOCK_OBSTACLES = os.environ.get("NAV_USE_MOCK_OBSTACLES", "").strip().lower() in (
-    "1", "true", "yes", "on",
-)
+GOAL_TOLERANCE = 0.7           # reached test (m) around the search-area approach goal
 
 # -- Pick approach --
 # Stop the chassis this far (m) in front of the object, then close the last stretch with a
@@ -71,17 +64,6 @@ ARM_BASE_FWD = 0.18
 # transit), tuned slightly forward for a secure grip.
 GRASP_FWD_BACKOFF = -0.01
 
-# -- Stage 2 delivery goal --
-# The Stage 2 task drives to the target object and then delivers it to the owner zone.
-# The pickup goal (target position) comes from the reveal (msg 411) at runtime, with the
-# Stage 2 grounding answer's target_coord as a fallback (see _wait_for_collect_goal). The
-# delivery goal comes from owner_position in the mission (msg 211), with delivery_coord from
-# mock_demo_data.yaml as a fallback. delivery_coord is pre-extracted from the scenario by
-# tools/mock_data_builder/gen_mock_demo_data.py; real participants do not have the scenario.
-_DELIVERY_COORD = load_mock_data().get("delivery_coord") or [-55.29138, 142.09763, 16.47326]
-DELIVERY_XY = (_DELIVERY_COORD[0], _DELIVERY_COORD[1])
-
-
 class DemoParticipant:
     """SDK-based demo participant -- connects the VLA/nav logic through handlers."""
 
@@ -90,22 +72,8 @@ class DemoParticipant:
         # Stage 1 never constructs or reads the scenario-backed mock. Keep the legacy
         # Stage 2 demo adapter lazy until that separate mission path is invoked.
         self._stage2_vla = None
-        #logging.info("Connected to MARC server: %s", self.client.connect())
-        # Stage 2 pickup goal -- filled from the approximate location hint in the reveal (msg 411).
-        # If not received, fall back to the Stage 2 answer target (_stage2_target_xy).
-        self._collect_xy = None
-        # Fallback pickup goal -- the Stage 2 grounding answer's target_coord (set in
-        # _on_stage2_mission), used only if the reveal does not arrive.
-        self._stage2_target_xy = None
-        # Stage 2 delivery goal (owner) -- filled from owner_position in mission (msg 211).
-        # If not included (older runtime), fall back to delivery_coord (DELIVERY_XY).
-        self._pickup_xy = None
-        self._occ_logged = False
-        # Yaml discs only when debugging without lidar. Scoring has no mock_demo_data.yaml.
-        self._obstacles = load_obstacles() if NAV_USE_MOCK_OBSTACLES else []
-        if NAV_USE_MOCK_OBSTACLES:
-            log.info("[Stage2] NAV_USE_MOCK_OBSTACLES=1 -- injecting %d yaml discs",
-                     len(self._obstacles))
+        self._state = RetrievalState()
+        self._reveal = None
         self._last_detections = None
         self._last_stage1_candidates = None
         self._register_handlers()
@@ -163,99 +131,100 @@ class DemoParticipant:
     def _on_stage2_mission(self, mission):
         log.info("[Stage2] task: \"%s\" (limit %.0fs)",
                  mission.task_description, mission.time_limit)
-        # Together with the VLA command, the platform provides the delivery goal (owner) coordinates (msg 211 owner_position).
-        op = getattr(mission, "owner_position", None)
-        if op and len(op) >= 2:
-            self._pickup_xy = (float(op[0]), float(op[1]))
-            log.info("[Stage2] owner_position(runtime-provided)=%s", self._pickup_xy)
-        # Grounding: look up the pre-extracted Stage 2 answer for this task (mock VLA).
+        # Store owner_position for the delivery leg (#14); this issue does not drive there.
+        self._state.adopt_mission(mission)
+        if self._state.owner_xy is not None:
+            log.info("[Stage2] owner_position(runtime-provided)=%s", self._state.owner_xy)
         if self._stage2_vla is None:
             self._stage2_vla = MockVLAGrounding()
         result = self._stage2_vla.process_stage2(mission.task_description)
         self.client.submit_stage2_grounding(result)
-        # Keep the answer's target as a fallback pickup goal (used if no reveal arrives).
-        tc = result.target_coord
-        if tc and len(tc) >= 2:
-            self._stage2_target_xy = (float(tc[0]), float(tc[1]))
-        log.info("[Stage2] submitted grounding target=%s, delivery point=%s",
-                 self._stage2_target_xy, self._pickup_xy or DELIVERY_XY)
+        self._state.adopt_grounding(result.target_coord)
+        log.info("[Stage2] submitted grounding target=%s (owner stored=%s)",
+                 self._state.grounding_xy, self._state.owner_xy)
 
     def _on_stage2_reveal(self, reveal):
-        """Stage 2 post-grounding reveal (msg 411) -- adopt the approximate location/type as the pick goal.
+        """Stage 2 post-grounding reveal (msg 411) -- search area, not the object.
 
-        Regardless of grounding accuracy, use the revealed approximate location
-        (hint_center) as the goal of the pickup leg. There may be distractors within the
-        radius, so use the type (target_type) to decide which object to pick up (the demo
-        only demonstrates reaching the location).
+        ``hint_center`` + ``hint_radius`` bound reacquisition (#12). ``target_type``
+        selects among distractors inside the disc. A late reveal retargets the live nav leg.
         """
         log.info("[Stage2] reveal received -- score=%s, type=%s, center=%s, r=%.1f",
                  reveal.grounding_score, reveal.target_type,
                  reveal.hint_center, reveal.hint_radius)
-        if reveal.hint_center and len(reveal.hint_center) >= 2:
-            self._collect_xy = (float(reveal.hint_center[0]), float(reveal.hint_center[1]))
+        self._reveal = reveal
+        self._state.adopt_reveal(reveal)
 
     def _drive(self):
-        """Called once in a separate thread on entering STAGE2_RUN -- pick up the object then deliver it.
+        """Called once in a separate thread on entering STAGE2_RUN.
 
-        Flow: stow the arm to lower the CoG -> approach the object standoff -> straight final
-        approach into arm reach -> pick (read grip-hold) -> stow again if empty-handed ->
-        deliver to the owner zone -> task_complete. All legs share one sim-time budget.
+        Leg 1: D* to the reveal search-area approach goal. Pick (#12/#13) stays as-is
+        after arrival. Delivery to owner_position is #14 — stored, not driven here.
         """
         c = self.client
         # SIM-time deadline (via /clock) -- shared across all legs, robust to real-time factor < 1.
         deadline = c.now_s() + STAGE2_NAV_TIMEOUT_S
 
-        # Poll briefly until the reveal (approximate location) arrives after scoring -> pickup goal.
-        collect_xy = self._wait_for_collect_goal(timeout=5.0)
-        # Delivery goal = runtime-provided owner_position (msg 211); if not included, fall back to delivery_coord.
-        pickup_xy = self._pickup_xy if self._pickup_xy is not None else DELIVERY_XY
-        log.info("[Stage2] navigation start -- collect=%s deliver=%s (timeout %.0fs)",
-                 collect_xy, pickup_xy, STAGE2_NAV_TIMEOUT_S)
+        self._wait_for_search_goal(timeout=5.0)
+        search = self._state.search_xy()
+        log.info("[Stage2] navigation start -- search=%s r=%.1f type=%s (timeout %.0fs)",
+                 search, self._state.hint_radius, self._state.target_type or "-",
+                 STAGE2_NAV_TIMEOUT_S)
 
-        # Top-heavy robot tip-over prevention: fold the arm to HOME before driving -> lower CoG.
         self._stow_arm()
 
         picked = False
-        # -- leg 1: approach the object front standoff, then straight-approach into arm reach, then pick --
-        approach = self._standoff_goal(collect_xy, TUMBLER_STANDOFF_M)
-        log.info("[Stage2] leg1 -> object %s front standoff %s",
-                 tuple(round(v, 2) for v in collect_xy), tuple(round(v, 2) for v in approach))
-        # Aggressive planner tuning for the tight pick approach (low inflation + wide goal-exclusion).
-        self._navigate_to(approach, deadline, tol=0.45, inflation_m=0.10, exclude_m=1.0)
+        reached_search = False
+        if search is None:
+            log.warning("[Stage2] no search goal (no reveal, no grounding) -- skip nav and pick")
+        else:
+            pose = c.get_world_pose()
+            pose_xy = (pose[0], pose[1]) if pose is not None else search
+            approach = search_area_approach_goal(search, self._state.hint_radius, pose_xy)
+            log.info("[Stage2] leg1 -> search-area approach %s (center=%s r=%.2f)",
+                     tuple(round(v, 2) for v in approach),
+                     tuple(round(v, 2) for v in search), self._state.hint_radius)
+            result = self._navigate_to(
+                self._live_approach_goal,
+                deadline,
+                tol=GOAL_TOLERANCE,
+                inflation_m=STAGE2_INFLATION_M,
+                exclude_m=0.6,
+                leg="search",
+            )
+            reached_search = result.reached
+            log.info("[Stage2] leg1 result=%s reason=%s replans=%d",
+                     result.status.value, result.reason, result.replan_count)
         if not c.is_running:
             return
-        # Final straight approach: drive straight at the object until arm_base fwd reaches grasp reach.
-        self._approach_straight(collect_xy, deadline, target_fwd=0.40)
-        # Stop! the chassis driver keeps applying the last cmd_vel, so emit 0 before the pick
-        # (otherwise residual speed overshoots the object).
-        for _ in range(5):
-            c.send_cmd_vel(0.0, 0.0)
-            c.sleep(0.1)
-        log.info("[Stage2] standoff stop -- ready to pick")
-        try:
-            grasp_xy = self._object_arm_xy(collect_xy)   # actual object position in the arm_base frame
-            log.info("[Stage2] object pick sequence (object-position grasp=%s)",
-                     tuple(round(v, 3) for v in grasp_xy) if grasp_xy else None)
-            held = run_pick_sequence(c, log, grasp_xy)
-            c.send_cmd_vel(0.0, 0.0)
-            # Grip-hold feedback (participant style). None (no feedback) -> conservatively count
-            # the completed sequence as success.
-            picked = True if held is None else bool(held)
-            log.info("[Stage2] pick %s (grip held=%s)", "ok" if picked else "failed", held)
-        except Exception as e:
-            log.warning("[Stage2] pick failed: %s", e)
+        if not reached_search:
+            log.warning("[Stage2] search area not reached -- skip pick (fail closed)")
+        else:
+            reveal = self._reveal if self._reveal is not None else c.stage2_reveal
+            target = NearFieldAcquire(c, make_detector()).acquire(reveal, deadline)
+            for _ in range(5):
+                c.send_cmd_vel(0.0, 0.0)
+                c.sleep(0.1)
+            if not target.valid:
+                log.warning("[Stage2] near-field acquire failed (%s) -- skip pick (fail closed)",
+                            target.reason)
+            else:
+                log.info("[Stage2] localized %s grasp=(%.2f, %.2f, z=%.2f) conf=%.2f",
+                         target.name or "?", target.fwd, target.lat, target.z, target.conf)
+                try:
+                    held = run_pick_sequence(c, log, (target.fwd, target.lat))
+                    c.send_cmd_vel(0.0, 0.0)
+                    picked = True if held is None else bool(held)
+                    log.info("[Stage2] pick %s (grip held=%s)", "ok" if picked else "failed", held)
+                except Exception as e:
+                    log.warning("[Stage2] pick failed: %s", e)
 
-        # If the arm is left raised (front_high) without an object, driving the delivery leg with
-        # that top-heavy CoG can tip the robot over on turns. Empty-handed -> fold to HOME.
         if not picked:
             self._stow_arm()
 
-        # -- leg 2: deliver to the owner zone --
-        log.info("[Stage2] leg2 -> deliver to owner zone %s", pickup_xy)
-        reached = self._navigate_to(pickup_xy, deadline)
-
         c.stop()
-        log.info("[Stage2] driving finished (delivery_reached=%s) -> task_complete", reached)
+        log.info("[Stage2] search-area nav finished (reached=%s) -> task_complete",
+                 reached_search)
         c.task_complete()
 
     def _stow_arm(self):
@@ -325,9 +294,6 @@ class DemoParticipant:
             if pose is not None:
                 cloud = c.get_lidar()
                 obs = lidar_cloud_to_obstacles(cloud, pose) if cloud is not None else []
-                if self._obstacles:
-                    obs = list(self._obstacles) + obs
-                obs = obstacles_excluding_goal(obs, obj_xy, exclude_m=0.6)
                 if frontal_hit(obs, pose, x_max=0.8, y_half=0.35):
                     c.send_cmd_vel(0.0, 0.0)
                     log.info("[Stage2] straight approach stopped -- frontal lidar hit")
@@ -343,166 +309,43 @@ class DemoParticipant:
         log.info("[Stage2] straight approach done -- object arm coords %s",
                  tuple(round(v, 3) for v in gxy) if gxy else None)
 
-    def _wait_for_collect_goal(self, timeout: float = 5.0):
-        """Poll briefly until the reveal (msg 411) approximate position arrives, then return the pickup goal (x, y).
-
-        When the reveal arrives, _on_stage2_reveal fills self._collect_xy. If not received
-        within the timeout, fall back to the Stage 2 grounding answer's target (_stage2_target_xy).
-        """
+    def _wait_for_search_goal(self, timeout: float = 5.0):
+        """Poll until reveal fills hint_center, else keep grounding_xy as fallback."""
         c = self.client
         deadline = c.now_s() + timeout
         while c.now_s() < deadline:
-            if self._collect_xy is not None:
-                return self._collect_xy
+            if self._state.hint_center is not None:
+                return self._state.search_xy()
             c.sleep(0.1)
-        log.warning("[Stage2] reveal not received (%.0fs) -- falling back to grounding target %s",
-                    timeout, self._stage2_target_xy)
-        return self._stage2_target_xy
+        if self._state.hint_center is None:
+            log.warning("[Stage2] reveal not received (%.0fs) -- fallback grounding %s",
+                        timeout, self._state.grounding_xy)
+        return self._state.search_xy()
+
+    def _live_approach_goal(self):
+        """Near-edge search-area goal from current pose; retargets on a late reveal."""
+        center = self._state.search_xy()
+        if center is None:
+            return None
+        pose = self.client.get_world_pose()
+        pose_xy = (pose[0], pose[1]) if pose is not None else center
+        return search_area_approach_goal(center, self._state.hint_radius, pose_xy)
 
     def _navigate_to(self, goal, deadline, tol=GOAL_TOLERANCE,
-                     inflation_m=STAGE2_INFLATION_M, exclude_m=0.6, cruise=False):
-        """Drive to a single goal (x, y) by following occupancy D* Lite. True if reached, False on timeout.
-
-        Args:
-            tol: reached-test XY distance (m). Tighter for a tight pick approach.
-            inflation_m: erode the free area by this much (lower = enter tighter spots).
-            exclude_m: drop overlay discs within this radius of the goal (keep it reachable).
-            cruise: True -> pass-through waypoint, no near-goal deceleration.
-        The deadline is a shared SIM-time budget across all Stage 2 legs.
-        Fail closed: no straight-line drive when D*/A* return no path.
-        """
-        c = self.client
-        planner = OccupancyGridPlanner()
-        follower = None
-        governor = SpeedGovernor()
-
-        last_xy = None
-        last_progress_t = c.now_s()
-        last_log_t = 0.0
-        reached_goal = False
-        last_lidar_n = 0
-        n_replan = 0
-        logged_no_map = False
-        prev_frontal = False
-
-        while c.is_running and c.now_s() < deadline:
-            pose = c.get_world_pose()
-            if pose is None:
-                c.sleep(STAGE2_NAV_DT)
-                continue
-            x, y, yaw = pose
-            dist = math.hypot(goal[0] - x, goal[1] - y)
-            if dist < tol:
-                reached_goal = True
-                log.info("[STAGE2] reached goal at (%.2f, %.2f)", x, y)
-                break
-
-            occ = c.get_occupancy_map()
-            if occ is not None:
-                planner.update_from_msg(occ)
-                if not self._occ_logged:
-                    self._occ_logged = True
-                    log.info("[Stage2] occupancy received: %dx%d res=%.3f origin=(%.1f, %.1f)",
-                             occ.info.width, occ.info.height, occ.info.resolution,
-                             occ.info.origin.position.x, occ.info.origin.position.y)
-
-            cloud = c.get_lidar()
-            lidar_obs = lidar_cloud_to_obstacles(cloud, pose) if cloud is not None else []
-            last_lidar_n = len(lidar_obs)
-            now_s = c.now_s()
-            planner.expire_overlay(now_s)
-            planner.stamp_overlay(list(self._obstacles) + lidar_obs, now_s)
-            planner.clear_goal_hole(goal, exclude_m=exclude_m)
-
-            hold_linear = frontal_hit(list(self._obstacles) + lidar_obs, pose)
-            need_replan = follower is None
-            if hold_linear and not prev_frontal:
-                need_replan = True
-            prev_frontal = hold_linear
-
-            if last_xy is not None:
-                if math.hypot(x - last_xy[0], y - last_xy[1]) > STAGE2_STUCK_MOVE_M:
-                    last_progress_t = c.now_s()
-                elif c.now_s() - last_progress_t > STAGE2_STUCK_TIME_S:
-                    log.info("[Stage2] stall detected -> replanning")
-                    need_replan = True
-                    last_progress_t = c.now_s()
-            last_xy = (x, y)
-
-            if follower is not None and not need_replan:
-                remain = [(x, y)] + follower.path[follower.idx:]
-                if path_is_blocked(planner, remain, inflation_m=inflation_m):
-                    log.info("[Stage2] path blocked -> replanning")
-                    need_replan = True
-
-            if need_replan:
-                if not planner.ready:
-                    if not logged_no_map:
-                        log.warning("[Stage2] NO_MAP -- occupancy not received, holding")
-                        logged_no_map = True
-                    follower = None
-                    c.send_cmd_vel(0.0, 0.0)
-                    c.sleep(STAGE2_NAV_DT)
-                    continue
-                n_replan += 1
-                if n_replan > STAGE2_REPLAN_CAP:
-                    log.error("[Stage2] ABORTED after %d replans", STAGE2_REPLAN_CAP)
-                    c.send_cmd_vel(0.0, 0.0)
-                    return False
-                path = planner.plan((x, y), goal, inflation_m=inflation_m, snap_m=8.0)
-                if path:
-                    follower = PathFollower(path, passthrough=cruise)
-                    log.info("[Stage2] occupancy %s path %d waypoints (%d lidar discs)",
-                             planner.last_method or "dstar", len(path), last_lidar_n)
-                else:
-                    follower = None
-                    sr, sc = planner._w2c(x, y)
-                    gr, gc = planner._w2c(*goal)
-                    sv = int(planner._grid[sr, sc]) if planner._in_bounds(sr, sc) else 99
-                    gv = int(planner._grid[gr, gc]) if planner._in_bounds(gr, gc) else 99
-                    if now_s - last_log_t >= 1.0:
-                        log.warning("[Stage2] NO_PATH (%s) -- holding "
-                                    "(start cell=(%d,%d) val=%d, goal cell=(%d,%d) val=%d) "
-                                    "[0=free 100=occ -1=unknown]",
-                                    planner.last_status, sr, sc, sv, gr, gc, gv)
-                        last_log_t = now_s
-                    c.send_cmd_vel(0.0, 0.0)
-                    c.sleep(STAGE2_NAV_DT)
-                    continue
-
-            wp_str = ""
-            if follower is not None:
-                linear, angular, done, info = follower.compute(pose)
-                wp_str = " wp %d/%d=(%.1f, %.1f)" % (
-                    info["idx"], info["total"], info["waypoint"][0], info["waypoint"][1])
-                if done:
-                    reached_goal = True
-                    log.info("[STAGE2] reached goal at (%.2f, %.2f)", x, y)
-                    break
-            else:
-                linear, angular = 0.0, 0.0
-
-            if hold_linear:
-                linear, angular = 0.0, 0.0
-            elif linear > 1e-6:
-                xyz = pointcloud2_xyz(cloud) if cloud is not None else None
-                linear, angular = governor.limit(
-                    linear, angular, imu=c.get_imu(), xyz=xyz, dt=STAGE2_NAV_DT)
-
-            c.send_cmd_vel(linear_x=linear, angular_z=angular)
-
-            now = c.now_s()
-            if now - last_log_t >= 1.0:
-                extra = " lidar=%d replan=%d" % (last_lidar_n, n_replan)
-                if hold_linear:
-                    extra += " FRONTAL"
-                log.info("[STAGE2] pose=(%.2f, %.2f, yaw=%.0fdeg) dist=%.2fm%s%s v=%.2f w=%+.2f",
-                         x, y, math.degrees(yaw), dist, wp_str, extra, linear, angular)
-                last_log_t = now
-
-            c.sleep(STAGE2_NAV_DT)
-
-        return reached_goal
+                     inflation_m=STAGE2_INFLATION_M, exclude_m=0.6, cruise=False,
+                     leg="search"):
+        """Drive to a goal (x, y) or callable via live occupancy D* Lite."""
+        nav = Stage2Navigator(
+            self.client,
+            dt=STAGE2_NAV_DT,
+            inflation_m=inflation_m,
+            exclude_m=exclude_m,
+            stuck_time_s=STAGE2_STUCK_TIME_S,
+            stuck_move_m=STAGE2_STUCK_MOVE_M,
+            replan_cap=STAGE2_REPLAN_CAP,
+            cruise=cruise,
+        )
+        return nav.navigate_to(goal, deadline, leg=leg, tol=tol)
 
     # -- notifications --
 

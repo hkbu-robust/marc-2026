@@ -4,12 +4,13 @@ This module bundles the demo's navigation pieces (participants replace/extend th
   - GoalSeekController / PathFollower -- P-control that returns ``(linear_x, angular_z)``
     scalars to publish with ``client.send_cmd_vel(...)``.
   - SpeedGovernor -- IMU + low-Z lidar cap on those scalars (rollover / curb bounce).
+  - run_nav_leg -- live occupancy/D* execution with lidar overlay and backup recovery.
   - OccupancyGridPlanner -- D* Lite over the runtime occupancy grid
     (``MARCClient.get_occupancy_map()``), with A* as a fallback.
-  - lidar_cloud_to_obstacles -- live PointCloud2 hits as extra discs (roads-only map
-    omits vehicles/people/objects).
+  - lidar overlay helpers re-exported from ``marc_agent.lidar_overlay``.
+  - run_nav_leg -- thin wrapper around ``marc_agent.navigation_runtime.Stage2Navigator``.
   - load_obstacles / obstacles_excluding_goal -- optional yaml discs for debugging
-    (``NAV_USE_MOCK_OBSTACLES=1``); scoring does not have ``mock_demo_data.yaml``.
+    only; the production navigator in ``participant_app.py`` never reads them.
 """
 
 from __future__ import annotations
@@ -18,22 +19,33 @@ import heapq
 import logging
 import math
 import os
+import sys
 
 import numpy as np
 import yaml
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from marc_agent.lidar_overlay import (  # noqa: E402
+    LIDAR_CLUSTER_M,
+    LIDAR_HIT_RADIUS,
+    LIDAR_MIN_RANGE_M,
+    LIDAR_RANGE_M,
+    LIDAR_Z_MAX,
+    LIDAR_Z_MIN,
+    frontal_hit,
+    lidar_cloud_to_obstacles,
+    lidar_xyz_to_obstacles,
+    pointcloud2_xyz,
+)
 
 log = logging.getLogger("participant_app")
 
 SQRT2 = math.sqrt(2.0)
 _INF = 1e18
 
-# Lidar overlay: drop ground / canopy, cap range, cluster hits to cell-sized discs.
-LIDAR_Z_MIN = 0.15
-LIDAR_Z_MAX = 1.5
-LIDAR_RANGE_M = 20.0
-LIDAR_MIN_RANGE_M = 0.20
-LIDAR_HIT_RADIUS = 0.35
-LIDAR_CLUSTER_M = 0.25
 # Overlay cells not restamped for this long become free (moving people/ghosts).
 OVERLAY_TTL_S = 2.0
 
@@ -338,103 +350,69 @@ class SpeedGovernor:
         return out_lin, out_ang
 
 
-# ---------------------------------------------------------------------------
-# Lidar overlay: PointCloud2 (Base_LiDAR) -> world discs.
-# ---------------------------------------------------------------------------
-
-def pointcloud2_xyz(msg):
-    """Nx3 float32 XYZ from a sensor_msgs/PointCloud2, or None."""
-    if msg is None:
-        return None
-    fields = {f.name: f for f in (msg.fields or [])}
-    if not all(n in fields for n in ("x", "y", "z")):
-        return None
-    fx, fy, fz = fields["x"], fields["y"], fields["z"]
-    # FLOAT32 = 7
-    if int(fx.datatype) != 7 or int(fy.datatype) != 7 or int(fz.datatype) != 7:
-        return None
-    h = int(msg.height or 0)
-    w = int(msg.width or 0)
-    n = w * h if h > 0 else w
-    step = int(msg.point_step or 0)
-    if n <= 0 or step < 12:
-        return None
-    raw = msg.data
-    if isinstance(raw, np.ndarray):
-        raw = raw.tobytes()
-    elif not isinstance(raw, (bytes, bytearray, memoryview)):
-        raw = bytes(raw)
-    nbytes = n * step
-    if len(raw) < nbytes:
-        n = len(raw) // step
-        nbytes = n * step
-        if n <= 0:
-            return None
-    be = bool(getattr(msg, "is_bigendian", False))
-    fmt = ">" if be else "<"
-    dtype = np.dtype({
-        "names": ["x", "y", "z"],
-        "formats": [f"{fmt}f4", f"{fmt}f4", f"{fmt}f4"],
-        "offsets": [int(fx.offset), int(fy.offset), int(fz.offset)],
-        "itemsize": step,
-    })
-    arr = np.frombuffer(raw, dtype=dtype, count=n)
-    return np.stack((arr["x"], arr["y"], arr["z"]), axis=1).astype(np.float32, copy=False)
+# Lidar overlay lives in marc_agent.lidar_overlay; re-exported above.
+# Frontal recovery: command zero, then replan (no reverse/open-loop).
+RECOVERY_LINEAR_X = 0.0
+RECOVERY_HOLD_S = 0.50
+GOAL_RETARGET_M = 0.50
 
 
-def lidar_xyz_to_obstacles(xyz, pose, radius_m=LIDAR_HIT_RADIUS, cell_m=LIDAR_CLUSTER_M):
-    """Robot-frame XYZ hits -> world discs ``[(x, y, radius_m), ...]``.
+def recovery_cmd(frontal: bool) -> tuple:
+    """cmd_vel on a frontal lidar hit: zero linear and yaw, then replan."""
+    return 0.0, 0.0
 
-    ``pose`` is chassis ``(x, y, yaw)``. Lidar +X is forward, +Y left (REP-103).
-    Hits are height-gated, range-capped, and clustered to ``cell_m`` centres.
+
+def resolve_xy(goal):
+    """``(x, y)`` from a tuple or zero-arg callable; None if missing."""
+    if goal is None:
+        return None
+    if callable(goal):
+        goal = goal()
+    if goal is None or len(goal) < 2:
+        return None
+    return (float(goal[0]), float(goal[1]))
+
+
+def resolve_tol(tol, default=0.7) -> float:
+    if callable(tol):
+        tol = tol()
+    if tol is None:
+        return float(default)
+    return float(tol)
+
+
+def run_nav_leg(
+    client,
+    goal,
+    deadline,
+    tol=0.7,
+    inflation_m=0.25,
+    exclude_m=0.6,
+    cruise=False,
+    extra_obstacles=None,
+    dt=0.10,
+    stuck_time_s=8.0,
+    stuck_move_m=0.05,
+    replan_cap=50,
+):
+    """Follow occupancy D* Lite to ``goal`` until inside ``tol``. True if reached.
+
+    Thin wrapper around ``Stage2Navigator`` so older demo call sites keep working.
     """
-    if xyz is None:
-        return []
-    pts = np.asarray(xyz, dtype=np.float32)
-    if pts.ndim != 2 or pts.shape[1] < 3 or pts.shape[0] == 0:
-        return []
-    z = pts[:, 2]
-    rng = np.hypot(pts[:, 0], pts[:, 1])
-    finite = np.isfinite(pts[:, 0]) & np.isfinite(pts[:, 1]) & np.isfinite(z)
-    mask = (
-        finite
-        & (z >= LIDAR_Z_MIN) & (z <= LIDAR_Z_MAX)
-        & (rng <= LIDAR_RANGE_M) & (rng >= LIDAR_MIN_RANGE_M)
+    from marc_agent.navigation_runtime import Stage2Navigator
+    nav = Stage2Navigator(
+        client,
+        dt=dt,
+        inflation_m=inflation_m,
+        exclude_m=exclude_m,
+        stuck_time_s=stuck_time_s,
+        stuck_move_m=stuck_move_m,
+        replan_cap=replan_cap,
+        cruise=cruise,
     )
-    pts = pts[mask]
-    if pts.shape[0] == 0:
-        return []
-    x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
-    cc, ss = math.cos(yaw), math.sin(yaw)
-    wx = x + pts[:, 0] * cc - pts[:, 1] * ss
-    wy = y + pts[:, 0] * ss + pts[:, 1] * cc
-    qi = np.round(wx / cell_m).astype(np.int32)
-    qj = np.round(wy / cell_m).astype(np.int32)
-    uniq = np.unique(np.stack((qi, qj), axis=1), axis=0)
-    r = float(radius_m)
-    return [(float(i) * cell_m, float(j) * cell_m, r) for i, j in uniq]
-
-
-def lidar_cloud_to_obstacles(msg, pose, radius_m=LIDAR_HIT_RADIUS, cell_m=LIDAR_CLUSTER_M):
-    """``get_lidar()`` PointCloud2 + world pose -> world discs."""
-    xyz = pointcloud2_xyz(msg)
-    return lidar_xyz_to_obstacles(xyz, pose, radius_m=radius_m, cell_m=cell_m)
-
-
-def frontal_hit(obstacles, pose, x_max=1.2, y_half=0.4, x_min=0.15):
-    """True if any disc centre (expanded by its radius) sits in a box ahead of the bumper."""
-    if not obstacles:
-        return False
-    x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
-    cc, ss = math.cos(yaw), math.sin(yaw)
-    for ox, oy, rad in obstacles:
-        dx, dy = float(ox) - x, float(oy) - y
-        fwd = dx * cc + dy * ss
-        lat = -dx * ss + dy * cc
-        r = float(rad)
-        if (x_min - r) <= fwd <= (x_max + r) and abs(lat) <= (y_half + r):
-            return True
-    return False
+    result = nav.navigate_to(
+        goal, deadline, leg="search", tol=tol, extra_obstacles=extra_obstacles)
+    return result.reached
 
 
 def path_is_blocked(planner, waypoints, extra_obstacles=None, inflation_m=0.25):
