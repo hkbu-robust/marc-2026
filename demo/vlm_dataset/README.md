@@ -24,18 +24,24 @@ The converter prints `hard=` / `hard_frac=` (same-class object clones),
 SAR situation counts, and per-class landmark/object histograms.
 
 SAR rows use `target_type: person` and `situation` from **pose + support**,
-not pose alone. Sitting on a bench is `normal`; sitting or standing on a
-vending machine / trash can is `abnormal` (prompts include “climbed on top of
-the drink machine”). Object rows still use `relation` (`beside` / `near`, and
-`on` / `above` when `world_xyz` says so).
+not pose alone. Sitting on a bench is `normal`; sitting, reaching, or standing
+on a vending machine / trash can / hydrant / postbox is `abnormal` (prompts
+include “climbed on top of the drink machine” and pose-specific variants).
+Hanging-leg and full-frame sitters are labelled from `world_xyz` when the 2D
+box shares the landmark’s ground line. Object rows use `relation`
+(`beside` / `near` / `on` / `above` / `left` / `right` / `front` / `behind`).
 
-dataset-gen must actually put some people **on** those landmarks or the
-converter cannot invent the visual. Recreate with the boot patches (people
-identities + on-landmark seating):
+At runtime: train YOLO on the same dump (`cctv_gt_to_yolo.py`, pose/object
+class names). Qwen returns a `GroundingResult`; match `target_type` /
+`landmark` to YOLO boxes of those classes and use the coords.
+
+dataset-gen must actually put a climber **on** the landmark (`TRAINER_PEOPLE_ABOVE=1`)
+or the converter cannot invent the visual:
 
 ```bash
-TRAINER_CLASS_INCLUSION_PROBABILITY=0.35 TRAINER_PEOPLE_ALL_CHARS=1 \
-  TRAINER_PEOPLE_ON_LANDMARK_PROB=0.45 TRAINER_AUTO_SCENES=100 HEADLESS=true \
+TRAINER_PEOPLE_ABOVE=1 TRAINER_PEOPLE_ABOVE_TYPES=vending_machine,trash_can,hydrant,postbox \
+  TRAINER_CLASS_INCLUSION_PROBABILITY=0.35 TRAINER_PEOPLE_ALL_CHARS=1 \
+  TRAINER_AUTO_SCENES=100 HEADLESS=true \
   docker compose --profile dataset-gen up --force-recreate
 ```
 

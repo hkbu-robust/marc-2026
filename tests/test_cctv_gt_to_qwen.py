@@ -197,6 +197,50 @@ class SarLabelTests(unittest.TestCase):
         self.assertEqual(rel, "on")
         self.assertIn(" on ", instruction.lower())
 
+    def test_hanging_leg_vending_sitter_is_on(self):
+        # Full-frame crop: person box shares the vending ground line, so the
+        # 2D feet-above-base test fails. World Z still says they are on the roof.
+        person = _det("person_sitting", "object", [219, 0, 1019, 719],
+                      xyz=(-72.60, 135.18, 17.57))
+        vendor = _det("vending_machine", "landmark", [0, 276, 1019, 719],
+                      xyz=(-72.06, 134.99, 16.01))
+        self.assertFalse(q._stacked_on_top(person, vendor))
+        rows = q._sar_pairs_for_payload(
+            _payload([person, vendor]), random.Random(0), 1)
+        self.assertTrue(rows)
+        _, _, lm, sit, _, rel = rows[0]
+        self.assertEqual(lm["class"], "vending_machine")
+        self.assertIn(rel, ("on", "above"))
+        self.assertNotEqual(sit, "normal")
+
+    def test_reaching_on_vending_does_not_say_sitting(self):
+        person = _det("person_reaching", "object", [600, 100, 700, 420],
+                      xyz=(-62.81, 135.53, 18.75))
+        vendor = _det("vending_machine", "landmark", [580, 280, 720, 500],
+                      xyz=(-62.81, 135.53, 16.20))
+        for seed in range(40):
+            rows = q._sar_pairs_for_payload(
+                _payload([person, vendor]), random.Random(seed), 1)
+            instruction = rows[0][0].lower()
+            self.assertNotIn("sitting", instruction, instruction)
+
+    def test_object_left_of_landmark(self):
+        cup = _det("cola_can", "object", [200, 400, 240, 450],
+                   xyz=(-1.0, 0.0, 16.5))
+        bench = _det("bench", "landmark", [400, 400, 560, 500],
+                     xyz=(0.0, 0.0, 16.5))
+        payload = {
+            "image": {"width": 1280, "height": 720},
+            "camera": {"position": [0.0, -10.0, 20.0]},
+            "detections": [cup, bench],
+        }
+        rows = q._pairs_for_payload(payload, random.Random(0), 2)
+        self.assertTrue(rows)
+        instruction, _, lm, rel, _ = rows[0]
+        self.assertEqual(lm["class"], "bench")
+        self.assertEqual(rel, "left")
+        self.assertIn("left", instruction.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

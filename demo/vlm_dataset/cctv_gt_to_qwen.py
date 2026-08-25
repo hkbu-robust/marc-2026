@@ -6,13 +6,19 @@ and writes LLaMA-Factory / official Qwen2-VL JSONL.
 
 Each row is one referring-expression grounded in a GroundingResult payload
 (camera_id, target_type, landmark, relation, target_coord, anchor_coord).
+At inference a separate YOLO detector names classes (poses, objects,
+landmarks); Qwen maps the command onto that vocabulary and returns coords.
+
 SAR (person) rows use target_type "person" and interpretation.situation
 (accident / emergency / abnormal / normal). Situation is pose + support:
-sitting on a bench is normal; sitting or standing on a vending machine /
-trash can is abnormal (competition: "climbed on top of the drink machine").
+sitting on a bench is normal; sitting / reaching / standing on a vending
+machine / trash can / hydrant / postbox is abnormal (competition: "climbed
+on top of the drink machine"). Climbers are labelled from world XYZ when
+hanging legs or a tight crop break the 2D feet-above-base test.
 
-When several instances of the same class are in frame, the landmark is what
-disambiguates — that is the VLM signal YOLO does not need.
+When several instances of the same class are in frame, the landmark (and
+left/right/front/behind) is what disambiguates — that is the VLM signal
+YOLO boxes alone do not provide.
 
 Usage (from repo root or demo/):
 
@@ -76,6 +82,24 @@ TEMPLATES = {
         "Find the {obj} above the {lm}.",
         "Locate the {obj} above the {lm}.",
     ),
+    "left": (
+        "Find the {obj} to the left of the {lm}.",
+        "Locate the {obj} on the left of the {lm}.",
+        "Find the {obj} left of the {lm}.",
+    ),
+    "right": (
+        "Find the {obj} to the right of the {lm}.",
+        "Locate the {obj} on the right of the {lm}.",
+        "Find the {obj} right of the {lm}.",
+    ),
+    "front": (
+        "Find the {obj} in front of the {lm}.",
+        "Locate the {obj} in front of the {lm}.",
+    ),
+    "behind": (
+        "Find the {obj} behind the {lm}.",
+        "Locate the {obj} behind the {lm}.",
+    ),
 }
 
 # Skip people / pose types in the lost-object family — SAR is a second row type.
@@ -107,7 +131,7 @@ _SAR_SITUATION = {
     "person_walking_away": "normal",
 }
 
-_SEAT_LANDMARKS = frozenset({"bench", "picnic_table", "picnic_table"})
+_SEAT_LANDMARKS = frozenset({"bench", "picnic_table"})
 _CLIMB_LANDMARKS = frozenset({
     "vending_machine", "trash_can", "hydrant", "postbox",
     "bicycle", "kick_scooter",
@@ -120,11 +144,30 @@ _WRONG_PLACE_LANDMARKS = _CLIMB_LANDMARKS | _VEHICLE_LANDMARKS
 
 # Prim origins are not contact points (character root vs asset base), so a
 # loose XY/Z window flags people standing *beside* a hydrant as "on" it.
-# "On/above" is 2D stacking: the person/object box sits on the landmark box.
-# World Z is only used to split on vs above after stacking is confirmed.
+# "On/above" prefers 2D stacking (box on the landmark, not sharing the
+# ground line). dataset-gen sitters often hang legs or fill the frame, so
+# a world-XYZ rescue (roof-height Z + tight XY) still counts as on/above.
 _ABOVE_DZ_M = 0.7
 _STACK_X_OVERLAP = 0.4
 _STACK_FEET_ABOVE_BASE = 0.22
+# Min person-minus-landmark Z (m) to count as on a climb landmark when 2D
+# feet fail. Standing in front of a vending is ~0.85 m (pelvis vs base).
+_CLIMB_DZ_M = {
+    "vending_machine": 1.15,
+    "trash_can": 0.40,
+    "hydrant": 0.28,
+    "postbox": 0.40,
+    "bicycle": 0.35,
+    "kick_scooter": 0.35,
+}
+_CLIMB_DXY_M = {
+    "vending_machine": 0.95,
+    "trash_can": 0.60,
+    "hydrant": 0.45,
+    "postbox": 0.55,
+    "bicycle": 0.50,
+    "kick_scooter": 0.50,
+}
 
 _LYING_POSES = ("person_prone", "person_lying_down")
 _SITTING_POSES = ("person_sitting", "person_reclining")
@@ -232,9 +275,44 @@ def _stacked_on_top(obj: dict, lm: dict) -> bool:
     return True
 
 
+def _climb_from_world(person: dict, lm: dict) -> bool:
+    """True when world XYZ says the person is on a climb landmark roof.
+
+    2D stacking misses hanging-leg sits, corner sits, and full-frame crops
+    where the person box shares the landmark's ground line.
+    """
+    typ = str(lm.get("class") or "").lower()
+    if typ not in _CLIMB_DZ_M:
+        return False
+    p = _xyz(person)
+    l = _xyz(lm)
+    if p is None or l is None:
+        return False
+    dxy = math.hypot(p[0] - l[0], p[1] - l[1])
+    dz = p[2] - l[2]
+    if dxy > float(_CLIMB_DXY_M.get(typ, 0.5)):
+        return False
+    if dz < float(_CLIMB_DZ_M.get(typ, 0.8)):
+        return False
+    ob = _bbox4(person)
+    lb = _bbox4(lm)
+    if ob is None or lb is None:
+        return True
+    ox0, oy0, ox1, oy1 = ob
+    lx0, ly0, lx1, ly1 = lb
+    overlap_x = min(ox1, lx1) - max(ox0, lx0)
+    min_w = min(ox1 - ox0, lx1 - lx0)
+    weak_x = min_w > 1.0 and overlap_x > 0.08 * min_w
+    obj_cy = 0.5 * (oy0 + oy1)
+    lm_cy = 0.5 * (ly0 + ly1)
+    if not weak_x and obj_cy >= lm_cy:
+        return False
+    return True
+
+
 def _support_rel(person: dict, lm: dict) -> Optional[str]:
-    """Return on/above only when the person is stacked on the landmark in-frame."""
-    if not _stacked_on_top(person, lm):
+    """Return on/above when the person is stacked on the landmark in-frame."""
+    if not (_stacked_on_top(person, lm) or _climb_from_world(person, lm)):
         return None
     p = _xyz(person)
     l = _xyz(lm)
@@ -278,7 +356,7 @@ def _sar_situation_for(person: dict, lm: dict, rel: Optional[str],
         return "abnormal"
     if on_top and _is_seat(lm_cls):
         if family in ("lying", "prone"):
-            return "normal" if lm_cls in ("picnic_table", "picnic_table") else "abnormal"
+            return "normal" if lm_cls == "picnic_table" else "abnormal"
         if family in ("sitting", "reclining"):
             return "normal"
         return "abnormal"
@@ -294,19 +372,45 @@ def _sar_instruction(person: dict, lm: dict, rel: Optional[str], situation: str,
     on_top = rel in ("on", "above")
     if on_top and lm_cls == "vending_machine":
         drink = _speak_landmark(lm_cls, rng, drink=True)
-        return rng.choice((
+        generic = [
             f"Someone is up where people should not be; find the person who climbed on top of the {drink}.",
             f"Find the person who climbed on top of the {drink}.",
-            f"Find the person sitting on top of the vending machine.",
             f"Find the person who climbed up onto the {drink}.",
-        ))
+            f"Find the person in an abnormal situation on the {drink}.",
+        ]
+        pose_bits = []
+        if family == "sitting":
+            pose_bits.extend((
+                f"Find the person sitting on top of the {drink}.",
+                "Find the person sitting on top of the vending machine.",
+            ))
+        elif family == "crouching":
+            pose_bits.append(
+                f"Find the person crouched on top of the {drink}.")
+        elif str(pose).lower() == "person_reaching":
+            pose_bits.extend((
+                f"Find the person reaching on top of the {drink}.",
+                f"Find the person reaching out on the {drink}.",
+            ))
+        elif str(pose).lower() in ("person_walking", "person_walking_away"):
+            pose_bits.append(
+                f"Find the person standing on top of the {drink}.")
+        return rng.choice(generic + pose_bits)
     if on_top and lm_cls == "trash_can":
         can = _speak_landmark(lm_cls, rng)
-        return rng.choice((
-            f"In the parking lot, find the person who climbed up and is sitting on top of the {can}.",
-            f"Find the person sitting on top of the {can}.",
-            f"Find the person sitting on top of the trash can in the parking lot.",
-        ))
+        generic = [
+            f"Find the person who climbed up onto the {can}.",
+            f"Find the person in an abnormal situation on the {can}.",
+        ]
+        if family == "sitting":
+            generic.extend((
+                f"In the parking lot, find the person who climbed up and is sitting on top of the {can}.",
+                f"Find the person sitting on top of the {can}.",
+                f"Find the person sitting on top of the trash can in the parking lot.",
+            ))
+        else:
+            generic.append(f"Find the person {speak} on top of the {can}.")
+        return rng.choice(generic)
     if on_top and _is_wrong_place(lm_cls):
         name = _speak_landmark(lm_cls, rng)
         return rng.choice((
@@ -314,7 +418,7 @@ def _sar_instruction(person: dict, lm: dict, rel: Optional[str], situation: str,
             f"Find the person who climbed on top of the {name}.",
             f"Find the person sitting on top of the {name}.",
         ))
-    if on_top and lm_cls in ("picnic_table", "picnic_table") and family in ("lying", "prone"):
+    if on_top and lm_cls in ("picnic_table",) and family in ("lying", "prone"):
         return rng.choice((
             "Find the person lying on top of the picnic table.",
             "Find the person lying on the picnic table.",
@@ -374,15 +478,65 @@ def _pick_support_landmark(person: dict, landmarks: List[dict], payload: dict):
     return best
 
 
-def _world_or_pixel_relation(obj: dict, lm: dict, pixel_rel: str) -> str:
-    """On/above only when the 2D boxes stack; otherwise the pixel beside/near label."""
+def _world_or_pixel_relation(obj: dict, lm: dict, pixel_rel: str,
+                             payload: Optional[dict] = None) -> str:
+    """On/above when stacked; else camera-relative left/right/front/behind."""
     if _stacked_on_top(obj, lm):
         p = _xyz(obj)
         l = _xyz(lm)
         if p is not None and l is not None and (p[2] - l[2]) >= _ABOVE_DZ_M:
             return "above"
         return "on"
+    specific = _camera_relative_rel(obj, lm, payload)
+    if specific and pixel_rel == "beside":
+        return specific
     return pixel_rel
+
+
+def _camera_xy(payload: Optional[dict]) -> Optional[Tuple[float, float]]:
+    if not payload:
+        return None
+    pos = (payload.get("camera") or {}).get("position")
+    if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+        return float(pos[0]), float(pos[1])
+    return None
+
+
+def _camera_relative_rel(obj: dict, lm: dict,
+                         payload: Optional[dict]) -> Optional[str]:
+    """left/right/front/behind from camera→landmark vs landmark→object."""
+    p = _xyz(obj)
+    l = _xyz(lm)
+    cam = _camera_xy(payload)
+    if p is not None and l is not None and cam is not None:
+        fx = l[0] - cam[0]
+        fy = l[1] - cam[1]
+        n = math.hypot(fx, fy)
+        if n < 1e-3:
+            return None
+        fx, fy = fx / n, fy / n
+        leftx, lefty = -fy, fx
+        ox, oy = p[0] - l[0], p[1] - l[1]
+        if math.hypot(ox, oy) < 0.18:
+            return None
+        along = ox * fx + oy * fy
+        lat = ox * leftx + oy * lefty
+        if abs(lat) > abs(along) * 1.15:
+            return "left" if lat > 0.0 else "right"
+        if abs(along) > abs(lat) * 1.15:
+            return "behind" if along > 0.0 else "front"
+        return None
+    oc = _bbox_center(obj.get("bbox"))
+    lc = _bbox_center(lm.get("bbox"))
+    if oc is None or lc is None:
+        return None
+    dx = oc[0] - lc[0]
+    dy = oc[1] - lc[1]
+    if abs(dx) < 36.0 and abs(dy) < 36.0:
+        return None
+    if abs(dx) > abs(dy) * 1.25:
+        return "left" if dx < 0.0 else "right"
+    return None
 
 
 def _sar_situation(cls: str) -> str:
@@ -575,7 +729,8 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
         if best is None:
             continue
         rel = _world_or_pixel_relation(
-            obj, best, _relation(oc, _bbox_center(best["bbox"]), width))
+            obj, best, _relation(oc, _bbox_center(best["bbox"]), width),
+            payload)
         hard = counts.get(obj["class"], 1) > 1
         scored.append((hard, rng.random(), obj, best, rel))
 
@@ -645,6 +800,8 @@ def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int
         distress = sit in ("accident", "emergency")
         hard = n_people > 1
         # Prefer climbed-wrong-place, then collapsed, then other abnormal.
+        # Always keep at least one climber when dataset-gen put someone on a
+        # vending / trash / hydrant / postbox.
         scored.append((
             0 if on_wrong else 1 if distress else 2 if sit == "abnormal" else 3,
             0 if hard else 1,
@@ -792,11 +949,17 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
         "assistant": "GroundingResult JSON (camera_id, interpretation, grounding)",
         "notes": (
             "Fine-tune Qwen2-VL-Instruct with these JSONL files. "
-            "Object rows use relation (beside/near/on/above). "
-            "SAR rows use target_type=person and situation from pose + support: "
-            "sitting on a bench is normal; sitting/standing on a vending machine "
-            "or trash can is abnormal (drink machine / climbed-on-top paraphrases). "
-            "Do not mix ego-cam or OpenVLA pick frames into this set."
+            "Pair at runtime with a YOLO detector trained on the same dump "
+            "(demo/vlm_dataset/cctv_gt_to_yolo.py): YOLO names classes "
+            "(person_sitting, cola_can, vending_machine, …); Qwen returns "
+            "GroundingResult (target_type, landmark, relation, situation, "
+            "coords). Object target_type matches the YOLO class; SAR uses "
+            "target_type=person and situation. Object rows use relation "
+            "(beside/near/on/above/left/right/front/behind). "
+            "SAR rows: sitting on a bench is normal; sitting/reaching/"
+            "standing on a vending machine, trash can, hydrant, or postbox "
+            "is abnormal. Climbers use world_xyz when hanging legs break "
+            "the 2D stack test. Do not mix ego-cam or OpenVLA pick frames."
         ),
     }
     info_path = os.path.join(out_dir, "dataset_info.json")
