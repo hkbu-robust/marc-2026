@@ -2,11 +2,14 @@
 """Convert CCTV dataset-gen GT (PNG + JSON) into Qwen3-VL instruction rows.
 
 Does not run Isaac. Reads trainer_output/<scenario>/scene_XXXXX/{camera}.png|.json
-and writes LLaMA-Factory JSONL.
+and writes LLaMA-Factory JSONL (``train_sar.jsonl`` / ``val_sar.jsonl`` and
+``train_obj.jsonl`` / ``val_obj.jsonl`` — two grammars, two files).
 
 SAR rows use the R03 pose×support matrix (marc_agent.perception.situation_rules)
 and the runtime grammar ``{camera_id}:person:{n}|{situation}`` with no coordinates.
-Object rows keep eight-relation referring expressions without grounding xyz.
+The SAR user turn matches ``format_sar_verifier_prompt`` in
+``marc_agent.perception.sar_selection``. Object rows keep eight-relation
+referring expressions without grounding xyz.
 
 Usage (from repo root or demo/):
 
@@ -33,7 +36,31 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from marc_agent.perception.pose_to_situation import situation_for_pose  # noqa: E402
-from marc_agent.perception.situation_rules import RULES_VERSION  # noqa: E402
+from marc_agent.perception.sar_selection import format_sar_verifier_prompt  # noqa: E402
+from marc_agent.perception.situation_rules import (  # noqa: E402
+    RULES_VERSION,
+    support_class as r03_support_class,
+)
+
+_RECIPES_PATH = os.path.join(_ROOT, "simulation-platform", "patches", "sar_recipes.yaml")
+_RECIPE_BY_ID: Dict[str, dict] = {}
+
+
+def _load_recipes() -> Dict[str, dict]:
+    global _RECIPE_BY_ID
+    if _RECIPE_BY_ID:
+        return _RECIPE_BY_ID
+    try:
+        import yaml  # type: ignore
+        with open(_RECIPES_PATH, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        for rec in data.get("recipes") or []:
+            rid = str(rec.get("id") or "")
+            if rid:
+                _RECIPE_BY_ID[rid] = rec
+    except Exception:
+        _RECIPE_BY_ID = {}
+    return _RECIPE_BY_ID
 
 SCENE_RE = re.compile(r"^scene_(\d+)$")
 
@@ -375,13 +402,42 @@ def _speak_landmark(cls: str, rng: random.Random, drink: bool = False) -> str:
     return _display(cls)
 
 
+def _xy_m(a: dict, b: dict) -> Optional[float]:
+    pa, pb = _xyz(a), _xyz(b)
+    if pa is None or pb is None:
+        return None
+    return math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+
+
+def _gt_support_ok(person: dict, landmarks: List[dict]) -> bool:
+    gt_support = person.get("support_class")
+    if not gt_support:
+        return True
+    kind = r03_support_class(str(gt_support))
+    if kind not in ("seating", "non_mount", "fallen_vehicle"):
+        return True
+    for lm in landmarks:
+        if str(lm.get("class") or "") != str(gt_support):
+            continue
+        d = _xy_m(person, lm)
+        if d is not None and d <= 2.5:
+            return True
+        pc = _bbox_center(person.get("bbox"))
+        lc = _bbox_center(lm.get("bbox"))
+        if pc is not None and lc is not None and math.hypot(
+                pc[0] - lc[0], pc[1] - lc[1]) < 180.0:
+            return True
+    return False
+
+
 def _sar_situation_for(person: dict, lm: dict, rel: Optional[str],
-                       rng: random.Random) -> str:
+                       rng: random.Random,
+                       landmarks: Optional[List[dict]] = None) -> str:
     del rng  # labels are deterministic
     pose = str(person.get("class") or "")
     gt_support = person.get("support_class")
     gt_surface = person.get("surface_class")
-    if gt_support or gt_surface:
+    if (gt_support or gt_surface) and _gt_support_ok(person, landmarks or []):
         return situation_for_pose(pose, support=gt_support, surface=gt_surface)
     support = None
     if rel in ("on", "above") and lm:
@@ -822,8 +878,9 @@ def _payload_landmarks(dets, objects):
     return landmarks
 
 
-def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
-    """Person rows: situation from pose × support. No landmark is still a row."""
+def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int,
+                          require_recipe_target: bool = False):
+    """Person rows: situation from pose × support. Recipe frames emit the target only."""
     dets = list(payload.get("detections") or [])
     people = [
         d for d in dets
@@ -841,51 +898,136 @@ def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int
         and d.get("class")
     ]
     landmarks = _payload_landmarks(dets, objects)
+    recipe_targets = [p for p in people if p.get("recipe_id")]
+    if recipe_targets:
+        people_iter = recipe_targets
+        max_per_image = 1
+    elif require_recipe_target:
+        return []
+    else:
+        people_iter = people
 
     n_people = len(people)
     scored = []
-    for person in people:
+    for person in people_iter:
         best = _pick_support_landmark(person, landmarks, payload) if landmarks else None
         rel = _support_rel(person, best) if best is not None else None
         if rel is None and best is not None and _beside_fallen_vehicle(person, best):
             rel = "beside"
         if _is_unlabeled_lying(person, rel):
             continue
-        sit = _sar_situation_for(person, best, rel, rng)
+        sit = _sar_situation_for(person, best, rel, rng, landmarks=landmarks)
         lm_cls = str((best or {}).get("class") or "")
         on_wrong = rel in ("on", "above") and _is_wrong_place(lm_cls)
         distress = sit in ("accident", "emergency")
         hard = n_people > 1
+        rec = _load_recipes().get(str(person.get("recipe_id") or ""), {})
+        command = str(person.get("command") or rec.get("command") or "")
         scored.append((
             0 if on_wrong else 1 if distress else 2 if sit == "abnormal" else 3,
             0 if hard else 1,
             rng.random(),
-            person, best, sit, hard, rel,
+            person, best, sit, hard, rel, command,
         ))
 
     scored.sort()
     picked = scored[: max(1, max_per_image)]
     rows = []
-    for _, _, _, person, lm, sit, hard, rel in picked:
-        instruction = _sar_instruction(person, lm, rel, sit, rng)
+    for _, _, _, person, lm, sit, hard, rel, command in picked:
+        instruction = command or _sar_instruction(person, lm, rel, sit, rng)
         rows.append((instruction, person, lm, sit, hard, rel))
     return rows
 
 
-def _sar_user_prompt(instruction: str, candidate_ids: Iterable[str]) -> str:
-    listed = ", ".join(candidate_ids)
-    return f"<image>\n{instruction}\nCandidates: {listed}"
+def _box_overlap(a: dict, b: Optional[dict]) -> float:
+    if not b:
+        return 0.0
+    ab, bb = _bbox4(a), _bbox4(b)
+    if ab is None or bb is None:
+        return 0.0
+    overlap = max(0.0, min(ab[2], bb[2]) - max(ab[0], bb[0]))
+    width = max(1.0, min(ab[2] - ab[0], bb[2] - bb[0]))
+    return min(1.0, overlap / width)
+
+
+def _gt_candidate_rows(people: List[dict], camera_id: str, payload: dict) -> List[str]:
+    dets = list(payload.get("detections") or [])
+    objects = [
+        d for d in dets
+        if (d.get("kind") or "object") != "landmark"
+        and not _is_person(str(d.get("class") or ""))
+        and not _is_umbrella(str(d.get("class") or ""))
+        and d.get("class")
+    ]
+    landmarks = _payload_landmarks(dets, objects)
+    id_map = person_candidate_ids(people, camera_id)
+    ordered = sorted(people, key=_det_sort_key)
+    rows = []
+    for person in ordered:
+        cid = id_map.get(id(person), f"{camera_id}:person:0")
+        best = _pick_support_landmark(person, landmarks, payload) if landmarks else None
+        dist = _xy_m(person, best) if best else None
+        overlap = _box_overlap(person, best)
+        rows.append(
+            " | ".join(
+                (
+                    cid,
+                    f"camera={camera_id}",
+                    f"pose={person.get('class')}",
+                    "confidence=1.000",
+                    f"anchor={best.get('class') if best else 'none'}",
+                    "anchor_id=none",
+                    (
+                        f"distance={dist:.4f}"
+                        if dist is not None
+                        else "distance=none"
+                    ),
+                    f"overlap={overlap:.4f}",
+                )
+            )
+        )
+    return rows
+
+
+def _sar_user_prompt(instruction: str, candidate_ids: Iterable[str],
+                     camera_id: str = "cam",
+                     requested: Optional[str] = None,
+                     landmark: Optional[str] = None,
+                     scene_hint: Optional[str] = None,
+                     people: Optional[List[dict]] = None,
+                     payload: Optional[dict] = None) -> str:
+    if people and payload is not None:
+        rows = _gt_candidate_rows(people, camera_id, payload)
+    else:
+        rows = [
+            f"{cid} | camera={camera_id} | pose=unknown | confidence=1.000 | "
+            f"anchor=none | anchor_id=none | distance=none | overlap=0.0000"
+            for cid in candidate_ids
+        ]
+    return format_sar_verifier_prompt(
+        instruction, requested, landmark, scene_hint, rows)
 
 
 def _sample(png_path: str, payload: dict, camera_id: str, instruction: str,
             obj: dict, lm: dict, fmt: str, rel: Optional[str] = None,
             situation: Optional[str] = None, target_type: Optional[str] = None,
             candidate_id: Optional[str] = None,
-            candidate_ids: Optional[Iterable[str]] = None) -> dict:
+            candidate_ids: Optional[Iterable[str]] = None,
+            people: Optional[List[dict]] = None,
+            requested: Optional[str] = None,
+            scene_hint: Optional[str] = None) -> dict:
     image_rel = os.path.abspath(png_path)
     if situation is not None:
         ids = tuple(candidate_ids or ())
-        prompt = _sar_user_prompt(instruction, ids)
+        lm_name = str((lm or {}).get("class") or "") or None
+        rec = _load_recipes().get(str((obj or {}).get("recipe_id") or ""), {})
+        req = requested or obj.get("situation") or rec.get("situation") or situation
+        hint = scene_hint if scene_hint is not None else (
+            obj.get("scene_hint") or rec.get("scene_hint"))
+        prompt = "<image>\n" + _sar_user_prompt(
+            instruction, ids, camera_id=camera_id, requested=req,
+            landmark=lm_name or rec.get("support_landmark"),
+            scene_hint=hint, people=people, payload=payload)
         text = f"{candidate_id}|{situation}"
     else:
         interp = {
@@ -937,8 +1079,10 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
         raise SystemExit(f"no scene_* directories under {in_dir}")
 
     n_cut = max(1, int(round(len(scenes) * (1.0 - val_frac)))) if len(scenes) > 1 else len(scenes)
-    train_rows: List[dict] = []
-    val_rows: List[dict] = []
+    train_sar: List[dict] = []
+    val_sar: List[dict] = []
+    train_obj: List[dict] = []
+    val_obj: List[dict] = []
     n_hard = 0
     n_skip = 0
     n_sar = 0
@@ -952,7 +1096,17 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
             for n in os.listdir(scene_dir)
             if n.endswith(".json") and not n.endswith("_overlay.json")
         ]
-        bucket = train_rows if idx < n_cut else val_rows
+        recipe_scene = False
+        for stem in stems:
+            pair = _load_pair(scene_dir, stem)
+            if pair is None:
+                continue
+            _, pl = pair
+            if any(d.get("recipe_id") for d in (pl.get("detections") or [])):
+                recipe_scene = True
+                break
+        obj_bucket = train_obj if idx < n_cut else val_obj
+        sar_bucket = train_sar if idx < n_cut else val_sar
         for stem in sorted(stems):
             pair = _load_pair(scene_dir, stem)
             if pair is None:
@@ -969,12 +1123,14 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
             id_map = person_candidate_ids(people, camera_id)
             id_list = person_candidate_id_list(people, camera_id)
             obj_rows = _pairs_for_payload(payload, rng, max_per_image)
-            sar_rows = _sar_pairs_for_payload(payload, rng, max_sar_per_image)
+            sar_rows = _sar_pairs_for_payload(
+                payload, rng, max_sar_per_image,
+                require_recipe_target=recipe_scene)
             if not obj_rows and not sar_rows:
                 n_skip += 1
                 continue
             for instruction, obj, lm, rel, hard in obj_rows:
-                bucket.append(_sample(
+                obj_bucket.append(_sample(
                     png_path, payload, camera_id, instruction, obj, lm, fmt, rel=rel))
                 lm_counts[str(lm.get("class") or "?")] += 1
                 obj_counts[str(obj.get("class") or "?")] += 1
@@ -982,10 +1138,13 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                     n_hard += 1
             for instruction, person, lm, sit, hard, rel in sar_rows:
                 cid = id_map.get(id(person), f"{camera_id}:person:0")
-                bucket.append(_sample(
+                rec = _load_recipes().get(str(person.get("recipe_id") or ""), {})
+                sar_bucket.append(_sample(
                     png_path, payload, camera_id, instruction, person, lm, fmt,
                     rel=rel, situation=sit, target_type="person",
-                    candidate_id=cid, candidate_ids=id_list))
+                    candidate_id=cid, candidate_ids=id_list, people=people,
+                    requested=person.get("situation") or rec.get("situation"),
+                    scene_hint=person.get("scene_hint") or rec.get("scene_hint")))
                 lm_counts[str(lm.get("class") or "none") if lm else "none"] += 1
                 sit_counts[sit] += 1
                 n_sar += 1
@@ -999,14 +1158,18 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return path
 
-    train_path = _write("train.jsonl", train_rows)
-    val_path = _write("val.jsonl", val_rows)
-    n_total = len(train_rows) + len(val_rows)
+    train_sar_path = _write("train_sar.jsonl", train_sar)
+    val_sar_path = _write("val_sar.jsonl", val_sar)
+    train_obj_path = _write("train_obj.jsonl", train_obj)
+    val_obj_path = _write("val_obj.jsonl", val_obj)
+    n_total = (len(train_sar) + len(val_sar) + len(train_obj) + len(val_obj))
     info = {
         "format": fmt,
         "source": os.path.abspath(in_dir),
-        "num_train": len(train_rows),
-        "num_val": len(val_rows),
+        "num_train_sar": len(train_sar),
+        "num_val_sar": len(val_sar),
+        "num_train_obj": len(train_obj),
+        "num_val_obj": len(val_obj),
         "num_hard_same_class": n_hard,
         "num_sar": n_sar,
         "hard_frac": round(n_hard / n_total, 4) if n_total else 0.0,
@@ -1019,24 +1182,17 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
         "assistant": "SAR: {camera_id}:person:{n}|{situation}; objects: interpretation JSON without coords",
         "situation_rules": RULES_VERSION,
         "notes": (
-            "Fine-tune Qwen2-VL-Instruct with these JSONL files. "
-            "Pair at runtime with a YOLO detector trained on the same dump "
-            "(demo/vlm_dataset/cctv_gt_to_yolo.py). YOLO names classes; "
-            "SAR assistant text is only {candidate_id}|{situation} with "
-            "runtime IDs {camera_id}:person:{n}. Object rows keep eight-relation "
-            "referring expressions without grounding xyz, and only when the "
-            "relation uniquely identifies that instance. Unlabeled ground "
-            "lying_down (no surface_class) is dropped; person_prone is always "
-            "accident. Picnic-table lying is abnormal; crouch is abnormal. "
-            "No-landmark parking scenes still emit a SAR row. "
-            "Do not mix ego-cam or OpenVLA pick frames."
+            "Fine-tune the SAR LoRA on train_sar.jsonl / val_sar.jsonl only. "
+            "Object rows are a separate grammar (train_obj.jsonl). "
+            "SAR user text matches marc_agent.perception.sar_selection."
         ),
     }
     info_path = os.path.join(out_dir, "dataset_info.json")
     with open(info_path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
-    print(f"[qwen] train={len(train_rows)} val={len(val_rows)} "
-          f"hard={n_hard} hard_frac={info['hard_frac']} sar={n_sar} skipped_cam={n_skip}")
+    print(f"[qwen] sar_train={len(train_sar)} sar_val={len(val_sar)} "
+          f"obj_train={len(train_obj)} obj_val={len(val_obj)} "
+          f"hard={n_hard} hard_frac={info['hard_frac']} skipped_cam={n_skip}")
     if lm_counts:
         lm_txt = ", ".join(f"{k}={v}" for k, v in lm_counts.most_common())
         print(f"[qwen] landmarks: {lm_txt}")
@@ -1046,8 +1202,10 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
     if sit_counts:
         sit_txt = ", ".join(f"{k}={v}" for k, v in sit_counts.most_common())
         print(f"[qwen] sar situations: {sit_txt}")
-    print(f"[qwen] {train_path}")
-    print(f"[qwen] {val_path}")
+    print(f"[qwen] {train_sar_path}")
+    print(f"[qwen] {val_sar_path}")
+    print(f"[qwen] {train_obj_path}")
+    print(f"[qwen] {val_obj_path}")
     print(f"[qwen] {info_path}")
 
 

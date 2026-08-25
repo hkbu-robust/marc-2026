@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 from marc_agent.command_parser import ParsedCommand
 from marc_agent.perception.pose_to_situation import situation_for_pose
@@ -230,6 +230,28 @@ def _context_crop(frame, item: CandidateEvidence):
     return image
 
 
+def format_sar_verifier_prompt(
+    command_text: str,
+    requested: Optional[str],
+    landmark: Optional[str],
+    scene_hint: Optional[str],
+    rows: Iterable[str],
+) -> str:
+    """User text for the SAR verifier (training and runtime share this string)."""
+    req = requested or "unspecified"
+    return (
+        "Select the single numbered person candidate that best matches the request. "
+        "The request is language to satisfy, not visual ground truth. Use the images and "
+        "detector metadata together. Reply with exactly CANDIDATE_ID|SITUATION and nothing "
+        "else. SITUATION must be normal, abnormal, emergency, or accident.\n"
+        f"Original request: {command_text}\n"
+        f"Parsed requested situation: {req}\n"
+        f"Parsed requested landmark: {landmark or 'none'}\n"
+        f"Parsed scene hint: {scene_hint or 'none'}\n"
+        "Candidates:\n" + "\n".join(rows)
+    )
+
+
 def build_candidate_board(
     command_text: str,
     command: ParsedCommand,
@@ -269,16 +291,12 @@ def build_candidate_board(
             )
         )
     requested = command.situation.value if command.situation else "unspecified"
-    prompt = (
-        "Select the single numbered person candidate that best matches the request. "
-        "The request is language to satisfy, not visual ground truth. Use the images and "
-        "detector metadata together. Reply with exactly CANDIDATE_ID|SITUATION and nothing "
-        "else. SITUATION must be normal, abnormal, emergency, or accident.\n"
-        f"Original request: {command_text}\n"
-        f"Parsed requested situation: {requested}\n"
-        f"Parsed requested landmark: {command.landmark or 'none'}\n"
-        f"Parsed scene hint: {command.scene_hint or 'none'}\n"
-        "Candidates:\n" + "\n".join(rows)
+    prompt = format_sar_verifier_prompt(
+        command_text,
+        requested,
+        command.landmark,
+        command.scene_hint,
+        rows,
     )
     return CandidateBoard(tuple(images), prompt, evidence)
 

@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import random
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -504,6 +506,147 @@ class AboveModePatchTests(unittest.TestCase):
             self.assertTrue(any(recipe_ids))
             self.assertGreaterEqual(len(set(recipe_ids)), 2)
         finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_beside_recipes_set_beside_landmark_type(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-beside>", "exec"), namespace)
+        poses = [
+            "person_sitting", "person_walking", "person_lying_down",
+            "person_prone", "person_reaching", "person_bending",
+        ]
+        chars = ["female_student_01", "male_student_01", "professor_01"]
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            beside = set()
+            for _ in range(14):
+                _, specs = namespace["build"](
+                    [{"name": "bench_0"}], list(chars), list(poses),
+                )
+                people = [o for o in specs if o.get("character")]
+                for person in people:
+                    typ = (person.get("placement") or {}).get(
+                        "beside_landmark_type")
+                    if typ:
+                        beside.add(typ)
+            self.assertIn("taxi", beside)
+            self.assertIn("trash_can", beside)
+            self.assertIn("bicycle", beside)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_recipe_dump_has_character_and_post_fallback_pose(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-dump>", "exec"), namespace)
+        poses = [
+            "person_sitting", "person_walking", "person_lying_down",
+            "person_reaching",
+        ]
+        chars = ["female_student_01", "male_student_01", "professor_01"]
+        old = dict(os.environ)
+        dump_path = "/tmp/marc_sar_recipe.json"
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            dumped = None
+            target = None
+            for _ in range(8):
+                _, specs = namespace["build"](
+                    [{"name": "bench_0"}], list(chars), list(poses),
+                )
+                people = [o for o in specs if o.get("character")]
+                targets = [
+                    o for o in people
+                    if (o.get("placement") or {}).get("recipe_id")
+                ]
+                self.assertEqual(len(targets), 1, people)
+                target = targets[0]
+                with open(dump_path, encoding="utf-8") as f:
+                    dumped = json.load(f)
+                if str(dumped.get("recipe_id") or "").startswith("sar07"):
+                    break
+            self.assertIsNotNone(dumped)
+            self.assertEqual(dumped["target_character"], target["character"])
+            self.assertEqual(dumped["target_pose"], target["type"])
+            self.assertEqual(dumped["target_pose"], "person_lying_down")
+            self.assertNotEqual(dumped["target_pose"], "person_prone")
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_yaml_miss_does_not_use_three_recipe_fallback(self):
+        patch = _load_patch()
+        self.assertIn("recipes disabled", patch.NEW_COMBOS)
+        self.assertIn("return []", patch.NEW_COMBOS)
+        compact = patch.NEW_COMBOS.replace(" ", "")
+        self.assertNotIn('{"id":"sar01_trash_sit"', compact)
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-yaml-miss>", "exec"), namespace)
+        poses = ["person_sitting", "person_walking", "person_lying_down"]
+        chars = ["female_student_01", "male_student_01", "professor_01"]
+        old = dict(os.environ)
+        cwd = os.getcwd()
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            with tempfile.TemporaryDirectory() as tmp:
+                os.chdir(tmp)
+                _, specs = namespace["build"](
+                    [{"name": "bench_0"}], list(chars), list(poses),
+                )
+            people = [o for o in specs if o.get("character")]
+            recipe_ids = [
+                (o.get("placement") or {}).get("recipe_id") for o in people
+            ]
+            self.assertTrue(people)
+            self.assertTrue(all(rid is None for rid in recipe_ids), recipe_ids)
+        finally:
+            os.chdir(cwd)
             os.environ.clear()
             os.environ.update(old)
 
