@@ -4,6 +4,7 @@ This module bundles the demo's navigation pieces (participants replace/extend th
   - GoalSeekController / PathFollower -- P-control that returns ``(linear_x, angular_z)``
     scalars to publish with ``client.send_cmd_vel(...)``.
   - SpeedGovernor -- IMU + low-Z lidar cap on those scalars (rollover / curb bounce).
+  - run_nav_leg -- live occupancy/D* execution with lidar overlay and backup recovery.
   - OccupancyGridPlanner -- D* Lite over the runtime occupancy grid
     (``MARCClient.get_occupancy_map()``), with A* as a fallback.
   - lidar_cloud_to_obstacles -- live PointCloud2 hits as extra discs (roads-only map
@@ -435,6 +436,227 @@ def frontal_hit(obstacles, pose, x_max=1.2, y_half=0.4, x_min=0.15):
         if (x_min - r) <= fwd <= (x_max + r) and abs(lat) <= (y_half + r):
             return True
     return False
+
+
+RECOVERY_LINEAR_X = -0.12   # m/s reverse while a frontal lidar disc is in the bumper box
+RECOVERY_HOLD_S = 0.50
+GOAL_RETARGET_M = 0.50
+
+
+def recovery_cmd(frontal: bool) -> tuple:
+    """cmd_vel while recovering from a frontal lidar hit: reverse, no yaw."""
+    if frontal:
+        return RECOVERY_LINEAR_X, 0.0
+    return 0.0, 0.0
+
+
+def resolve_xy(goal):
+    """``(x, y)`` from a tuple or zero-arg callable; None if missing."""
+    if goal is None:
+        return None
+    if callable(goal):
+        goal = goal()
+    if goal is None or len(goal) < 2:
+        return None
+    return (float(goal[0]), float(goal[1]))
+
+
+def resolve_tol(tol, default=0.7) -> float:
+    if callable(tol):
+        tol = tol()
+    if tol is None:
+        return float(default)
+    return float(tol)
+
+
+def run_nav_leg(
+    client,
+    goal,
+    deadline,
+    tol=0.7,
+    inflation_m=0.25,
+    exclude_m=0.6,
+    cruise=False,
+    extra_obstacles=None,
+    dt=0.10,
+    stuck_time_s=8.0,
+    stuck_move_m=0.05,
+    replan_cap=50,
+):
+    """Follow occupancy D* Lite to ``goal`` until inside ``tol``. True if reached.
+
+    ``goal`` and ``tol`` may be callables so a late Stage 2 reveal can retarget.
+    Live lidar discs overlay the grid; a frontal hit reverses briefly then replans.
+    Fail closed: no open-loop drive when the map or path is missing.
+    """
+    extra = list(extra_obstacles or [])
+    planner = OccupancyGridPlanner()
+    follower = None
+    governor = SpeedGovernor()
+
+    last_xy = None
+    last_progress_t = client.now_s()
+    last_log_t = 0.0
+    last_goal = None
+    reached_goal = False
+    last_lidar_n = 0
+    n_replan = 0
+    logged_no_map = False
+    prev_frontal = False
+    recovery_t0 = None
+    occ_logged = False
+
+    while client.is_running and client.now_s() < deadline:
+        pose = client.get_world_pose()
+        if pose is None:
+            client.sleep(dt)
+            continue
+        x, y, yaw = pose
+        cur_goal = resolve_xy(goal)
+        cur_tol = resolve_tol(tol)
+        if cur_goal is None:
+            client.send_cmd_vel(0.0, 0.0)
+            client.sleep(dt)
+            continue
+        dist = math.hypot(cur_goal[0] - x, cur_goal[1] - y)
+        if dist < cur_tol:
+            reached_goal = True
+            log.info("[STAGE2] reached search/goal at (%.2f, %.2f) d=%.2f tol=%.2f",
+                     x, y, dist, cur_tol)
+            client.send_cmd_vel(0.0, 0.0)
+            break
+
+        occ = client.get_occupancy_map()
+        if occ is not None:
+            planner.update_from_msg(occ)
+            if not occ_logged:
+                occ_logged = True
+                log.info("[Stage2] occupancy received: %dx%d res=%.3f origin=(%.1f, %.1f)",
+                         occ.info.width, occ.info.height, occ.info.resolution,
+                         occ.info.origin.position.x, occ.info.origin.position.y)
+
+        cloud = client.get_lidar()
+        lidar_obs = lidar_cloud_to_obstacles(cloud, pose) if cloud is not None else []
+        last_lidar_n = len(lidar_obs)
+        now_s = client.now_s()
+        planner.expire_overlay(now_s)
+        hole = max(float(exclude_m), cur_tol)
+        planner.stamp_overlay(extra + lidar_obs, now_s)
+        planner.clear_goal_hole(cur_goal, exclude_m=hole)
+
+        hold_linear = frontal_hit(extra + lidar_obs, pose)
+        need_replan = follower is None
+        if last_goal is None or math.hypot(
+                cur_goal[0] - last_goal[0], cur_goal[1] - last_goal[1]) > GOAL_RETARGET_M:
+            need_replan = True
+        last_goal = cur_goal
+
+        recovering = False
+        if hold_linear:
+            if recovery_t0 is None:
+                recovery_t0 = now_s
+            if now_s - recovery_t0 < RECOVERY_HOLD_S:
+                recovering = True
+            else:
+                need_replan = True
+                recovery_t0 = None
+        else:
+            recovery_t0 = None
+        if hold_linear and not prev_frontal:
+            need_replan = True
+        prev_frontal = hold_linear
+
+        if last_xy is not None:
+            if math.hypot(x - last_xy[0], y - last_xy[1]) > stuck_move_m:
+                last_progress_t = client.now_s()
+            elif client.now_s() - last_progress_t > stuck_time_s:
+                log.info("[Stage2] stall detected -> replanning")
+                need_replan = True
+                last_progress_t = client.now_s()
+        last_xy = (x, y)
+
+        if follower is not None and not need_replan:
+            remain = [(x, y)] + follower.path[follower.idx:]
+            if path_is_blocked(planner, remain, inflation_m=inflation_m):
+                log.info("[Stage2] path blocked -> replanning")
+                need_replan = True
+
+        if recovering:
+            lin, ang = recovery_cmd(True)
+            client.send_cmd_vel(linear_x=lin, angular_z=ang)
+            client.sleep(dt)
+            continue
+
+        if need_replan:
+            if not planner.ready:
+                if not logged_no_map:
+                    log.warning("[Stage2] NO_MAP -- occupancy not received, holding")
+                    logged_no_map = True
+                follower = None
+                client.send_cmd_vel(0.0, 0.0)
+                client.sleep(dt)
+                continue
+            n_replan += 1
+            if n_replan > replan_cap:
+                log.error("[Stage2] ABORTED after %d replans", replan_cap)
+                client.send_cmd_vel(0.0, 0.0)
+                return False
+            path = planner.plan((x, y), cur_goal, inflation_m=inflation_m, snap_m=8.0)
+            if path:
+                follower = PathFollower(path, passthrough=cruise)
+                log.info("[Stage2] occupancy %s path %d waypoints (%d lidar discs)",
+                         planner.last_method or "dstar", len(path), last_lidar_n)
+            else:
+                follower = None
+                sr, sc = planner._w2c(x, y)
+                gr, gc = planner._w2c(*cur_goal)
+                sv = int(planner._grid[sr, sc]) if planner._in_bounds(sr, sc) else 99
+                gv = int(planner._grid[gr, gc]) if planner._in_bounds(gr, gc) else 99
+                if now_s - last_log_t >= 1.0:
+                    log.warning("[Stage2] NO_PATH (%s) -- holding "
+                                "(start cell=(%d,%d) val=%d, goal cell=(%d,%d) val=%d) "
+                                "[0=free 100=occ -1=unknown]",
+                                planner.last_status, sr, sc, sv, gr, gc, gv)
+                    last_log_t = now_s
+                client.send_cmd_vel(0.0, 0.0)
+                client.sleep(dt)
+                continue
+
+        wp_str = ""
+        if follower is not None:
+            linear, angular, done, info = follower.compute(pose)
+            wp_str = " wp %d/%d=(%.1f, %.1f)" % (
+                info["idx"], info["total"], info["waypoint"][0], info["waypoint"][1])
+            if done:
+                reached_goal = True
+                log.info("[STAGE2] reached goal at (%.2f, %.2f)", x, y)
+                client.send_cmd_vel(0.0, 0.0)
+                break
+        else:
+            linear, angular = 0.0, 0.0
+
+        if hold_linear:
+            linear, angular = recovery_cmd(True)
+        elif linear > 1e-6:
+            xyz = pointcloud2_xyz(cloud) if cloud is not None else None
+            imu = client.get_imu() if hasattr(client, "get_imu") else None
+            linear, angular = governor.limit(
+                linear, angular, imu=imu, xyz=xyz, dt=dt)
+
+        client.send_cmd_vel(linear_x=linear, angular_z=angular)
+
+        now = client.now_s()
+        if now - last_log_t >= 1.0:
+            extra_s = " lidar=%d replan=%d" % (last_lidar_n, n_replan)
+            if hold_linear:
+                extra_s += " FRONTAL"
+            log.info("[STAGE2] pose=(%.2f, %.2f, yaw=%.0fdeg) dist=%.2fm%s%s v=%.2f w=%+.2f",
+                     x, y, math.degrees(yaw), dist, wp_str, extra_s, linear, angular)
+            last_log_t = now
+
+        client.sleep(dt)
+
+    return reached_goal
 
 
 def path_is_blocked(planner, waypoints, extra_obstacles=None, inflation_m=0.25):
