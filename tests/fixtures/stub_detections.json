@@ -1,0 +1,38 @@
+{
+  "objects": [
+    {
+      "candidate_id": "rig_2_c:mug:0",
+      "class_name": "mug",
+      "bbox_xyxy": [820, 410, 910, 520],
+      "confidence": 0.91,
+      "camera_id": "rig_2_c",
+      "image_size": [1920, 1080]
+    },
+    {
+      "candidate_id": "rig_2_c:picnic_table:0",
+      "class_name": "picnic_table",
+      "bbox_xyxy": [600, 480, 1200, 900],
+      "confidence": 0.88,
+      "camera_id": "rig_2_c",
+      "image_size": [1920, 1080]
+    },
+    {
+      "candidate_id": "rig_1_a:tumbler:0",
+      "class_name": "tumbler",
+      "bbox_xyxy": [400, 300, 480, 420],
+      "confidence": 0.86,
+      "camera_id": "rig_1_a",
+      "image_size": [1920, 1080]
+    }
+  ],
+  "sar": [
+    {
+      "candidate_id": "rig_3_b:person:0",
+      "bbox_xyxy": [700, 220, 860, 760],
+      "situation": "accident",
+      "confidence": 0.84,
+      "camera_id": "rig_3_b",
+      "image_size": [1920, 1080]
+    }
+  ]
+}

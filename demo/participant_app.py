@@ -19,10 +19,16 @@ Precondition: the simulation platform must be running first.
 
 import logging
 import math
+import os
 
 from marc_sdk import MARCClient
 
 from marc_agent.navigation_runtime import Stage2Navigator
+from marc_agent.perception.cctv_dump import maybe_dump_cctv_round
+from marc_agent.perception.stage1_pipeline import (
+    append_stage1_record,
+    run_stage1_candidate_pipeline,
+)
 from marc_agent.retrieval_state import RetrievalState, search_area_approach_goal
 from mock_agent_vla import MockVLAGrounding
 from mock_agent_navigation import lidar_cloud_to_obstacles, frontal_hit
@@ -63,9 +69,13 @@ class DemoParticipant:
 
     def __init__(self):
         self.client = MARCClient.from_env()
-        self.vla = MockVLAGrounding()
+        # Stage 1 never constructs or reads the scenario-backed mock. Keep the legacy
+        # Stage 2 demo adapter lazy until that separate mission path is invoked.
+        self._stage2_vla = None
         self._state = RetrievalState()
         self._reveal = None
+        self._last_detections = None
+        self._last_stage1_candidates = None
         self._register_handlers()
 
     # -- handler registration --
@@ -85,9 +95,36 @@ class DemoParticipant:
     def _on_mission(self, mission):
         log.info("[Stage1] round %s/%s: \"%s\"",
                  mission.round, mission.total_rounds, mission.voice_command)
-        result = self.vla.process(mission.voice_command, self.client.list_cctv())
-        # result is a GroundingResult -- submit it directly.
-        self.client.submit_grounding(result)
+        self._last_stage1_candidates = run_stage1_candidate_pipeline(
+            self.client,
+            mission.voice_command,
+        )
+        self._last_detections = self._last_stage1_candidates.detections
+        maybe_dump_cctv_round(self._last_detections, round_num=mission.round)
+        log.info(
+                 "[Stage1] CCTV round: %d cameras, %d frames, %d objects, "
+                 "%d people, selected=%s reason=%s",
+                 len(self._last_detections.camera_ids),
+                 len(self._last_detections.frames),
+                 len(self._last_detections.objects),
+                 len(self._last_detections.people),
+                 self._last_stage1_candidates.selected_candidate_id,
+                 self._last_stage1_candidates.failure_reason)
+        metrics_path = os.environ.get(
+            "MARC_STAGE1_METRICS_PATH",
+            "artifacts/stage1_rounds.jsonl",
+        )
+        try:
+            append_stage1_record(self._last_stage1_candidates, metrics_path)
+        except OSError as exc:
+            log.warning("[Stage1] could not append metrics to %s: %s", metrics_path, exc)
+
+        # Issue #7 ends at a selected pixel-space candidate. Issues #8/#9 own object
+        # relation choice and projection into the GroundingResult world coordinate.
+        # Never submit the scenario-backed mock answer from the production Stage 1 path.
+        log.info(
+            "[Stage1] candidate handoff ready; awaiting #8/#9 projection before submission"
+        )
 
     # -- Stage 2: submit interpretation -> drive --
 
@@ -98,7 +135,9 @@ class DemoParticipant:
         self._state.adopt_mission(mission)
         if self._state.owner_xy is not None:
             log.info("[Stage2] owner_position(runtime-provided)=%s", self._state.owner_xy)
-        result = self.vla.process_stage2(mission.task_description)
+        if self._stage2_vla is None:
+            self._stage2_vla = MockVLAGrounding()
+        result = self._stage2_vla.process_stage2(mission.task_description)
         self.client.submit_stage2_grounding(result)
         self._state.adopt_grounding(result.target_coord)
         log.info("[Stage2] submitted grounding target=%s (owner stored=%s)",

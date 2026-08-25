@@ -35,6 +35,11 @@ services:
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"                     # same value as the platform machine
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent"
+      # Keep Qwen disabled until models/runtime/stage1-sar-qwen/model is complete.
+      MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-fallback}"
+      MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     # GPU for VLA inference (uses the participant machine's GPU). If no GPU is needed, the deploy block can be removed.
     # Requires: nvidia-container-toolkit installed on the participant machine.
     deploy:

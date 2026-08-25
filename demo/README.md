@@ -14,7 +14,7 @@ logic through callbacks.
 | File | Description |
 |---|---|
 | `participant_app.py` | Entry point -- registers `MARCClient` callbacks and wires the full Stage 1 / Stage 2 flow |
-| `mock_agent_vla.py` | Mock perception. Instead of analysing CCTV, it looks up the answer for the received voice_command in `mock_demo_data.yaml` and returns a `GroundingResult` |
+| `mock_agent_vla.py` | Legacy Stage 2-only demo lookup. The Stage 1 path does not construct or call it |
 | `mock_agent_navigation.py` | Stage 2 navigation: goal-seek control + occupancy-grid D* Lite + lidar overlay |
 | `mock_agent_manipulation.py` | Robot-arm pick motion (joint-angle keyframes) |
 | `mock_demo_data.yaml` | Demo-only data extracted from the scenario (per-problem answer coordinates + obstacles). Real participants do not have this |
@@ -62,10 +62,19 @@ Even without `pip install`ing `marc_sdk`, `launch.sh` adds the SDK path (the sta
 ## Behavior (non-interactive / automatic)
 
 1. **Registration** -> SESSION_ACK
-2. **Stage 1**: per-round `voice_command` -> mock VLA looks up the answer -> `submit_grounding()` (repeated)
+2. **Stage 1 candidate stage**: parse `voice_command` -> fetch every discovered CCTV once -> YOLO objects/people -> query-conditioned SAR selection. It records a pixel-space candidate handoff; #8/#9 still own object-relation choice, world projection, and submission.
 3. **Stage 2**: `task_description` -> mock VLA -> `submit_stage2_grounding()` -> on reveal, occupancy D* Lite + lidar to the
    target -> arm pick -> D* Lite to the owner zone -> `task_complete()`
 4. **End**: log the final score
+
+Stage 1 candidate settings:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MARC_STAGE1_DETECTOR` | bundled YOLO when present | `yolo` for live candidates; `stub` is test-only |
+| `MARC_SAR_DETECTOR` | `fallback` | `qwen` uses the bundled local verifier; fallback uses deterministic pose/anchor evidence |
+| `MARC_QWEN_MODEL_DIR` | `/agent/models/runtime/stage1-sar-qwen/model` | Complete pinned local Transformers snapshot |
+| `MARC_STAGE1_METRICS_PATH` | `artifacts/stage1_rounds.jsonl` | Per-round candidate counts, latency, selection method, and failures |
 
 ## Environment variables
 
