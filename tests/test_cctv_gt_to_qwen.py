@@ -131,7 +131,7 @@ class SarLabelTests(unittest.TestCase):
         self.assertIsNone(rel)
         self.assertNotEqual(sit, "abnormal")
 
-    def test_lying_on_picnic_table_is_normal(self):
+    def test_lying_on_picnic_table_is_abnormal(self):
         person = _det("person_lying_down", "object", [400, 200, 560, 320],
                       xyz=(-80.9, 96.5, 16.83))
         table = _det("picnic_table", "landmark", [380, 240, 580, 360],
@@ -140,7 +140,7 @@ class SarLabelTests(unittest.TestCase):
         rows = q._sar_pairs_for_payload(_payload([person, table]), rng, 2)
         _, _, lm, sit, _, rel = rows[0]
         self.assertEqual(lm["class"], "picnic_table")
-        self.assertEqual(sit, "normal")
+        self.assertEqual(sit, "abnormal")
         self.assertIn(rel, ("on", "above"))
 
     def test_lying_on_bench_is_abnormal(self):
@@ -163,7 +163,7 @@ class SarLabelTests(unittest.TestCase):
         rows = q._sar_pairs_for_payload(_payload([person, bike]), rng, 2)
         _, _, _, sit, _, rel = rows[0]
         self.assertIsNone(rel)
-        self.assertIn(sit, ("accident", "emergency"))
+        self.assertEqual(sit, "accident")
 
     def test_prefers_climber_over_ground_sitter(self):
         climber = _det("person_sitting", "object", [600, 200, 700, 420],
@@ -240,6 +240,100 @@ class SarLabelTests(unittest.TestCase):
         self.assertEqual(lm["class"], "bench")
         self.assertEqual(rel, "left")
         self.assertIn("left", instruction.lower())
+
+    def test_no_landmark_prone_is_accident(self):
+        person = _det("person_prone", "object", [200, 400, 360, 520],
+                      xyz=(-49.3, 125.7, 16.74))
+        rows = q._sar_pairs_for_payload(
+            _payload([person]), random.Random(0), 1)
+        self.assertTrue(rows)
+        _, target, lm, sit, _, rel = rows[0]
+        self.assertIs(target, person)
+        self.assertIsNone(lm)
+        self.assertIsNone(rel)
+        self.assertEqual(sit, "accident")
+
+    def test_crouch_is_abnormal(self):
+        person = _det("person_crouching", "object", [200, 300, 280, 520],
+                      xyz=(-64.5, 135.5, 16.20))
+        vendor = _det("vending_machine", "landmark", [580, 280, 720, 500],
+                      xyz=(-62.81, 135.53, 16.20))
+        rows = q._sar_pairs_for_payload(
+            _payload([person, vendor]), random.Random(0), 1)
+        self.assertTrue(rows)
+        _, _, _, sit, _, rel = rows[0]
+        self.assertIsNone(rel)
+        self.assertEqual(sit, "abnormal")
+
+    def test_unlabeled_lying_down_is_dropped(self):
+        person = _det("person_lying_down", "object", [200, 400, 360, 520],
+                      xyz=(-49.3, 125.7, 16.74))
+        walker = _det("person_walking", "object", [100, 300, 180, 500],
+                      xyz=(0.0, 0.0, 16.75))
+        rows = q._sar_pairs_for_payload(
+            _payload([person]), random.Random(0), 2)
+        self.assertEqual(rows, [])
+        rows = q._sar_pairs_for_payload(
+            _payload([person, walker]), random.Random(0), 2)
+        self.assertTrue(rows)
+        targets = [row[1]["class"] for row in rows]
+        self.assertNotIn("person_lying_down", targets)
+        self.assertIn("person_walking", targets)
+
+    def test_labeled_lying_down_on_parking_is_kept(self):
+        person = _det("person_lying_down", "object", [200, 400, 360, 520],
+                      xyz=(-49.3, 125.7, 16.74))
+        person["surface_class"] = "parking"
+        rows = q._sar_pairs_for_payload(
+            _payload([person]), random.Random(0), 1)
+        self.assertTrue(rows)
+        self.assertEqual(rows[0][3], "emergency")
+
+    def test_sar_assistant_is_id_pipe_situation_without_coords(self):
+        person = _det("person_prone", "object", [10, 20, 30, 40])
+        walker = _det("person_walking", "object", [100, 100, 200, 300])
+        people = [walker, person]
+        ids = q.person_candidate_id_list(people, "cam")
+        self.assertEqual(ids[0], "cam:person:0")
+        self.assertTrue(ids[1].startswith("cam:person:"))
+        cid = q.person_candidate_ids(people, "cam")[id(person)]
+        self.assertRegex(cid, r"^cam:person:\d+$")
+        row = q._sample(
+            "/tmp/fake.png", {}, "cam", "Find the person lying face-down.",
+            person, None, "llama-factory", situation="accident",
+            candidate_id=cid, candidate_ids=ids)
+        assistant = row["messages"][1]["content"]
+        user = row["messages"][0]["content"]
+        self.assertEqual(assistant, f"{cid}|accident")
+        self.assertNotIn("grounding", assistant)
+        self.assertNotIn("coord", assistant.lower())
+        self.assertIn(cid, user)
+        self.assertIn("Candidates:", user)
+
+    def test_object_assistant_has_no_grounding_xyz(self):
+        cup = _det("disposable_cup", "object", [400, 300, 440, 360],
+                   xyz=(1.0, 2.0, 16.9))
+        bench = _det("bench", "landmark", [360, 320, 500, 420],
+                     xyz=(1.05, 2.02, 16.5))
+        row = q._sample(
+            "/tmp/fake.png", {}, "cam", "Find the disposable cup on the bench.",
+            cup, bench, "llama-factory", rel="on")
+        assistant = row["messages"][1]["content"]
+        self.assertNotIn("grounding", assistant)
+        self.assertNotIn("target_coord", assistant)
+        self.assertNotIn("anchor_coord", assistant)
+        self.assertIn("disposable_cup", assistant)
+
+    def test_ambiguous_near_clones_are_skipped(self):
+        cup_a = _det("cola_can", "object", [200, 400, 240, 450],
+                     xyz=(-2.0, 0.0, 16.5))
+        cup_b = _det("cola_can", "object", [260, 400, 300, 450],
+                     xyz=(-1.5, 0.0, 16.5))
+        bench = _det("bench", "landmark", [400, 400, 560, 500],
+                     xyz=(0.0, 0.0, 16.5))
+        rows = q._pairs_for_payload(
+            _payload([cup_a, cup_b, bench]), random.Random(0), 4)
+        self.assertEqual(rows, [])
 
 
 if __name__ == "__main__":

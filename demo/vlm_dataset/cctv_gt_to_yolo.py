@@ -168,8 +168,9 @@ def convert(in_dir: str, out_dir: str, val_frac: float) -> None:
         "class_counts": dict(counts.most_common()),
         "names": names,
         "notes": (
-            "Ultralytics detect layout. Pose classes (person_*) not identity meshes. "
-            "Use the same --val-frac as cctv_gt_to_qwen.py. Do not mix ego-cam frames."
+            "Ultralytics detect layout. Canonical pose/object classes; no situation "
+            "labels. Scene-grouped split; use the same --val-frac as "
+            "cctv_gt_to_qwen.py. Do not mix ego-cam frames."
         ),
     }
     info_path = os.path.join(out_dir, "dataset_info.json")

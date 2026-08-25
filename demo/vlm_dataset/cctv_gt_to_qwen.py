@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
-"""Convert CCTV dataset-gen GT (PNG + JSON) into Qwen2-VL instruction rows.
+"""Convert CCTV dataset-gen GT (PNG + JSON) into Qwen3-VL instruction rows.
 
 Does not run Isaac. Reads trainer_output/<scenario>/scene_XXXXX/{camera}.png|.json
-and writes LLaMA-Factory / official Qwen2-VL JSONL.
+and writes LLaMA-Factory JSONL.
 
-Each row is one referring-expression grounded in a GroundingResult payload
-(camera_id, target_type, landmark, relation, target_coord, anchor_coord).
-At inference a separate YOLO detector names classes (poses, objects,
-landmarks); Qwen maps the command onto that vocabulary and returns coords.
-
-SAR (person) rows use target_type "person" and interpretation.situation
-(accident / emergency / abnormal / normal). Situation is pose + support:
-sitting on a bench is normal; sitting / reaching / standing on a vending
-machine / trash can / hydrant / postbox is abnormal (competition: "climbed
-on top of the drink machine"). Climbers are labelled from world XYZ when
-hanging legs or a tight crop break the 2D feet-above-base test.
-
-When several instances of the same class are in frame, the landmark (and
-left/right/front/behind) is what disambiguates — that is the VLM signal
-YOLO boxes alone do not provide.
+SAR rows use the R03 pose×support matrix (marc_agent.perception.situation_rules)
+and the runtime grammar ``{camera_id}:person:{n}|{situation}`` with no coordinates.
+Object rows keep eight-relation referring expressions without grounding xyz.
 
 Usage (from repo root or demo/):
 
@@ -38,6 +26,14 @@ import re
 import sys
 from collections import Counter
 from typing import Dict, Iterable, List, Optional, Tuple
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from marc_agent.perception.pose_to_situation import situation_for_pose  # noqa: E402
+from marc_agent.perception.situation_rules import RULES_VERSION  # noqa: E402
 
 SCENE_RE = re.compile(r"^scene_(\d+)$")
 
@@ -118,18 +114,7 @@ _SAR_POSE_SPEAK = {
     "person_walking_away": "walking away",
 }
 
-# Heuristic pose -> situation when the person is on the ground (not on a landmark).
-_SAR_SITUATION = {
-    "person_prone": "accident",
-    "person_lying_down": "accident",
-    "person_bending": "emergency",
-    "person_crouching": "emergency",
-    "person_reclining": "abnormal",
-    "person_sitting": "normal",
-    "person_reaching": "normal",
-    "person_walking": "normal",
-    "person_walking_away": "normal",
-}
+# Pose→situation lives in marc_agent.perception.situation_rules (R03 2026.1).
 
 _SEAT_LANDMARKS = frozenset({"bench", "picnic_table"})
 _CLIMB_LANDMARKS = frozenset({
@@ -223,10 +208,7 @@ def _sar_pose_family(cls: str) -> str:
 
 def _sar_ground_situation(cls: str) -> str:
     """Pose-only situation when the person is not on a landmark top."""
-    c = (cls or "").lower()
-    if c == "person_sitting" or c.startswith("person_sitting"):
-        return "normal"
-    return _SAR_SITUATION.get(c, "abnormal")
+    return situation_for_pose(cls)
 
 
 def _xyz(det: dict) -> Optional[List[float]]:
@@ -332,6 +314,56 @@ def _is_seat(lm_cls: str) -> bool:
     return (lm_cls or "").lower() in _SEAT_LANDMARKS
 
 
+_FALLEN_VEHICLE = frozenset({"bicycle", "kick_scooter"})
+_BESIDE_XY_M = 2.5
+
+
+def _is_fallen_vehicle(lm_cls: Optional[str]) -> bool:
+    return (lm_cls or "").lower() in _FALLEN_VEHICLE
+
+
+def _beside_fallen_vehicle(person: dict, lm: dict) -> bool:
+    if not lm or not _is_fallen_vehicle(lm.get("class")):
+        return False
+    p, l = _xyz(person), _xyz(lm)
+    if p is not None and l is not None:
+        return math.hypot(p[0] - l[0], p[1] - l[1]) <= _BESIDE_XY_M
+    pc = _bbox_center(person.get("bbox"))
+    lc = _bbox_center(lm.get("bbox"))
+    if pc is None or lc is None:
+        return False
+    return math.hypot(pc[0] - lc[0], pc[1] - lc[1]) < 180.0
+
+
+def _is_unlabeled_lying(person: dict, rel: Optional[str]) -> bool:
+    """Ground lying_down with no support/surface is dropped, not forced to accident."""
+    pose = str(person.get("class") or "").lower()
+    if pose.startswith("person_prone"):
+        return False
+    if not pose.startswith("person_lying"):
+        return False
+    if person.get("support_class") or person.get("surface_class"):
+        return False
+    return rel not in ("on", "above", "beside")
+
+
+def _det_sort_key(det: dict) -> Tuple[tuple, str]:
+    b = det.get("bbox") or (0.0, 0.0, 0.0, 0.0)
+    box = tuple(float(x) for x in list(b)[:4])
+    return (box, str(det.get("class") or ""))
+
+
+def person_candidate_ids(people: List[dict], camera_id: str) -> Dict[int, str]:
+    """Runtime-matching IDs: ``{camera_id}:person:{n}`` in bbox-then-class order."""
+    ordered = sorted(people, key=_det_sort_key)
+    return {id(p): f"{camera_id}:person:{i}" for i, p in enumerate(ordered)}
+
+
+def person_candidate_id_list(people: List[dict], camera_id: str) -> Tuple[str, ...]:
+    ordered = sorted(people, key=_det_sort_key)
+    return tuple(f"{camera_id}:person:{i}" for i in range(len(ordered)))
+
+
 def _speak_landmark(cls: str, rng: random.Random, drink: bool = False) -> str:
     c = (cls or "").lower()
     if c == "vending_machine":
@@ -345,22 +377,18 @@ def _speak_landmark(cls: str, rng: random.Random, drink: bool = False) -> str:
 
 def _sar_situation_for(person: dict, lm: dict, rel: Optional[str],
                        rng: random.Random) -> str:
+    del rng  # labels are deterministic
     pose = str(person.get("class") or "")
-    lm_cls = str((lm or {}).get("class") or "")
-    family = _sar_pose_family(pose)
-    on_top = rel in ("on", "above")
-    if on_top and _is_wrong_place(lm_cls):
-        # Being on any non-seat support is the abnormal class regardless of
-        # whether root geometry resolves to "on" or "above". Keeping this
-        # deterministic avoids pose/asset-height differences changing labels.
-        return "abnormal"
-    if on_top and _is_seat(lm_cls):
-        if family in ("lying", "prone"):
-            return "normal" if lm_cls == "picnic_table" else "abnormal"
-        if family in ("sitting", "reclining"):
-            return "normal"
-        return "abnormal"
-    return _sar_ground_situation(pose)
+    gt_support = person.get("support_class")
+    gt_surface = person.get("surface_class")
+    if gt_support or gt_surface:
+        return situation_for_pose(pose, support=gt_support, surface=gt_surface)
+    support = None
+    if rel in ("on", "above") and lm:
+        support = str(lm.get("class") or "") or None
+    elif rel == "beside" and lm and _is_fallen_vehicle(lm.get("class")):
+        support = str(lm.get("class") or "") or None
+    return situation_for_pose(pose, support=support)
 
 
 def _sar_instruction(person: dict, lm: dict, rel: Optional[str], situation: str,
@@ -370,13 +398,14 @@ def _sar_instruction(person: dict, lm: dict, rel: Optional[str], situation: str,
     family = _sar_pose_family(pose)
     speak = _sar_pose_speak(pose)
     on_top = rel in ("on", "above")
+    sit = (situation or "").strip().lower()
     if on_top and lm_cls == "vending_machine":
         drink = _speak_landmark(lm_cls, rng, drink=True)
         generic = [
             f"Someone is up where people should not be; find the person who climbed on top of the {drink}.",
             f"Find the person who climbed on top of the {drink}.",
             f"Find the person who climbed up onto the {drink}.",
-            f"Find the person in an abnormal situation on the {drink}.",
+            f"Find the person in an {sit or 'abnormal'} situation on the {drink}.",
         ]
         pose_bits = []
         if family == "sitting":
@@ -400,7 +429,7 @@ def _sar_instruction(person: dict, lm: dict, rel: Optional[str], situation: str,
         can = _speak_landmark(lm_cls, rng)
         generic = [
             f"Find the person who climbed up onto the {can}.",
-            f"Find the person in an abnormal situation on the {can}.",
+            f"Find the person in an {sit or 'abnormal'} situation on the {can}.",
         ]
         if family == "sitting":
             generic.extend((
@@ -435,24 +464,32 @@ def _sar_instruction(person: dict, lm: dict, rel: Optional[str], situation: str,
             f"Find the person sitting on the {name}.",
             f"Find the person sitting on top of the {name}.",
         ))
-    if not on_top and family in ("lying", "prone"):
-        name = _speak_landmark(lm_cls, rng)
+    if sit == "accident":
         return rng.choice((
-            f"Find the person collapsed on the floor near the {name}.",
-            f"Find the person lying face-down and motionless near the {name}.",
-            f"Several people are in view; one is completely face-down and immobile; find the most critical one.",
-            f"Find the person lying face-down and motionless.",
+            "Find the person lying face-down and motionless.",
+            "Several people are in view; one is completely face-down and immobile; find the most critical one.",
         ))
-    if not on_top and family in ("bending", "crouching"):
+    if sit == "emergency" and family in ("lying", "prone"):
+        if lm_cls:
+            name = _speak_landmark(lm_cls, rng)
+            return rng.choice((
+                f"Find the person collapsed on the floor near the {name}.",
+                f"Find the person lying face-down and motionless near the {name}.",
+            ))
+        return "Find the person collapsed on the parking floor."
+    if sit == "emergency" and family in ("bending", "crouching"):
+        if lm_cls:
+            name = _speak_landmark(lm_cls, rng)
+            return rng.choice((
+                f"Find the person bent over and motionless near the {name}.",
+                f"Find the person {speak} near the {name}.",
+            ))
+        return f"Find the person {speak} who needs help."
+    if lm_cls:
         name = _speak_landmark(lm_cls, rng)
-        return rng.choice((
-            f"Find the person bent over and motionless near the {name}.",
-            f"People are relaxing at the park and one is even lying on the grass; find the one near the {name} who is bent over and not moving and actually needs help.",
-            f"Find the person {speak} near the {name}.",
-        ))
-    name = _speak_landmark(lm_cls, rng)
-    tmpl = rng.choice(SAR_TEMPLATES)
-    return tmpl.format(pose=speak, lm=name)
+        tmpl = rng.choice(SAR_TEMPLATES)
+        return tmpl.format(pose=speak, lm=name)
+    return f"Find the person {speak}."
 
 
 def _pick_support_landmark(person: dict, landmarks: List[dict], payload: dict):
@@ -676,6 +713,54 @@ def _load_pair(scene_dir: str, stem: str) -> Optional[Tuple[str, dict]]:
     return png_path, payload
 
 
+def _nearest_object_landmark(obj: dict, landmarks: List[dict], payload: dict,
+                             width: float):
+    oc = _bbox_center(obj["bbox"])
+    if oc is None:
+        return None, None
+    best = None
+    best_d = None
+    for lm in landmarks:
+        if lm is obj:
+            continue
+        if lm.get("class") == obj.get("class"):
+            continue
+        lc = _bbox_center(lm["bbox"])
+        if lc is None:
+            continue
+        d = math.hypot(oc[0] - lc[0], oc[1] - lc[1])
+        if best_d is None or d < best_d:
+            best_d, best = d, lm
+    if best is None:
+        return None, None
+    rel = _world_or_pixel_relation(
+        obj, best, _relation(oc, _bbox_center(best["bbox"]), width), payload)
+    return best, rel
+
+
+def _object_relation_unique(obj: dict, lm: dict, rel: str, objects: List[dict],
+                            landmarks: List[dict], payload: dict,
+                            width: float) -> bool:
+    """Keep a row only when the referring expression uniquely IDs this instance."""
+    same = [
+        other for other in objects
+        if other.get("class") == obj.get("class") and other is not obj
+    ]
+    if not same:
+        return True
+    if rel in ("near", "beside"):
+        return False
+    lm_cls = lm.get("class")
+    for other in same:
+        other_lm, other_rel = _nearest_object_landmark(
+            other, landmarks, payload, width)
+        if other_lm is None:
+            continue
+        if other_rel == rel and other_lm.get("class") == lm_cls:
+            return False
+    return True
+
+
 def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
     dets = list(payload.get("detections") or [])
     objects = [
@@ -686,24 +771,7 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
         and d.get("class")
         and _bbox_center(d.get("bbox"))
     ]
-    landmarks = [
-        d for d in dets
-        if (d.get("kind") == "landmark" or str(d.get("class") or "") in DISPLAY)
-        and d.get("class")
-        and not _is_umbrella(str(d.get("class") or ""))
-        and _bbox_center(d.get("bbox"))
-        and (d.get("kind") == "landmark" or str(d.get("class")) not in {
-            o.get("class") for o in objects
-        })
-    ]
-    # Prefer explicit kind=landmark; fall back to leftover non-object dets.
-    if not landmarks:
-        landmarks = [
-            d for d in dets
-            if d not in objects and d.get("class") and _bbox_center(d.get("bbox"))
-            and not _is_person(str(d.get("class") or ""))
-            and not _is_umbrella(str(d.get("class") or ""))
-        ]
+    landmarks = _payload_landmarks(dets, objects)
     if not objects or not landmarks:
         return []
 
@@ -714,23 +782,12 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
     width = float((payload.get("image") or {}).get("width") or 1280)
     scored = []
     for obj in objects:
-        oc = _bbox_center(obj["bbox"])
-        best = None
-        best_d = None
-        for lm in landmarks:
-            if lm is obj:
-                continue
-            if lm.get("class") == obj.get("class"):
-                continue
-            lc = _bbox_center(lm["bbox"])
-            d = math.hypot(oc[0] - lc[0], oc[1] - lc[1])
-            if best_d is None or d < best_d:
-                best_d, best = d, lm
+        best, rel = _nearest_object_landmark(obj, landmarks, payload, width)
         if best is None:
             continue
-        rel = _world_or_pixel_relation(
-            obj, best, _relation(oc, _bbox_center(best["bbox"]), width),
-            payload)
+        if not _object_relation_unique(
+                obj, best, rel, objects, landmarks, payload, width):
+            continue
         hard = counts.get(obj["class"], 1) > 1
         scored.append((hard, rng.random(), obj, best, rel))
 
@@ -766,7 +823,7 @@ def _payload_landmarks(dets, objects):
 
 
 def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
-    """Person rows: target_type=person, situation from pose + on-landmark support."""
+    """Person rows: situation from pose × support. No landmark is still a row."""
     dets = list(payload.get("detections") or [])
     people = [
         d for d in dets
@@ -784,24 +841,21 @@ def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int
         and d.get("class")
     ]
     landmarks = _payload_landmarks(dets, objects)
-    if not landmarks:
-        return []
 
     n_people = len(people)
     scored = []
     for person in people:
-        best = _pick_support_landmark(person, landmarks, payload)
-        if best is None:
+        best = _pick_support_landmark(person, landmarks, payload) if landmarks else None
+        rel = _support_rel(person, best) if best is not None else None
+        if rel is None and best is not None and _beside_fallen_vehicle(person, best):
+            rel = "beside"
+        if _is_unlabeled_lying(person, rel):
             continue
-        rel = _support_rel(person, best)
         sit = _sar_situation_for(person, best, rel, rng)
-        lm_cls = str(best.get("class") or "")
+        lm_cls = str((best or {}).get("class") or "")
         on_wrong = rel in ("on", "above") and _is_wrong_place(lm_cls)
         distress = sit in ("accident", "emergency")
         hard = n_people > 1
-        # Prefer climbed-wrong-place, then collapsed, then other abnormal.
-        # Always keep at least one climber when dataset-gen put someone on a
-        # vending / trash / hydrant / postbox.
         scored.append((
             0 if on_wrong else 1 if distress else 2 if sit == "abnormal" else 3,
             0 if hard else 1,
@@ -818,28 +872,34 @@ def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int
     return rows
 
 
+def _sar_user_prompt(instruction: str, candidate_ids: Iterable[str]) -> str:
+    listed = ", ".join(candidate_ids)
+    return f"<image>\n{instruction}\nCandidates: {listed}"
+
+
 def _sample(png_path: str, payload: dict, camera_id: str, instruction: str,
             obj: dict, lm: dict, fmt: str, rel: Optional[str] = None,
-            situation: Optional[str] = None, target_type: Optional[str] = None) -> dict:
-    interp = {
-        "target_type": target_type or obj["class"],
-        "landmark": lm["class"] if lm else "",
-    }
-    if rel is not None:
-        interp["relation"] = rel
-    if situation is not None:
-        interp["situation"] = situation
-    answer = {
-        "camera_id": camera_id,
-        "interpretation": interp,
-        "grounding": {
-            "anchor_coord": _coord3(_det_xyz(lm, payload)) if lm else [0.0, 0.0, 0.0],
-            "target_coord": _coord3(_det_xyz(obj, payload)),
-        },
-    }
-    text = json.dumps(answer, ensure_ascii=False)
+            situation: Optional[str] = None, target_type: Optional[str] = None,
+            candidate_id: Optional[str] = None,
+            candidate_ids: Optional[Iterable[str]] = None) -> dict:
     image_rel = os.path.abspath(png_path)
-    prompt = f"<image>\n{instruction}"
+    if situation is not None:
+        ids = tuple(candidate_ids or ())
+        prompt = _sar_user_prompt(instruction, ids)
+        text = f"{candidate_id}|{situation}"
+    else:
+        interp = {
+            "target_type": target_type or obj["class"],
+            "landmark": lm["class"] if lm else "",
+        }
+        if rel is not None:
+            interp["relation"] = rel
+        answer = {
+            "camera_id": camera_id,
+            "interpretation": interp,
+        }
+        text = json.dumps(answer, ensure_ascii=False)
+        prompt = f"<image>\n{instruction}"
     if fmt == "sharegpt":
         return {
             "images": [image_rel],
@@ -900,6 +960,14 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 continue
             png_path, payload = pair
             camera_id = str(payload.get("frame_id") or stem)
+            people = [
+                d for d in (payload.get("detections") or [])
+                if _is_person(str(d.get("class") or ""))
+                and d.get("class")
+                and _bbox_center(d.get("bbox"))
+            ]
+            id_map = person_candidate_ids(people, camera_id)
+            id_list = person_candidate_id_list(people, camera_id)
             obj_rows = _pairs_for_payload(payload, rng, max_per_image)
             sar_rows = _sar_pairs_for_payload(payload, rng, max_sar_per_image)
             if not obj_rows and not sar_rows:
@@ -913,10 +981,12 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 if hard:
                     n_hard += 1
             for instruction, person, lm, sit, hard, rel in sar_rows:
+                cid = id_map.get(id(person), f"{camera_id}:person:0")
                 bucket.append(_sample(
                     png_path, payload, camera_id, instruction, person, lm, fmt,
-                    rel=rel, situation=sit, target_type="person"))
-                lm_counts[str(lm.get("class") or "?")] += 1
+                    rel=rel, situation=sit, target_type="person",
+                    candidate_id=cid, candidate_ids=id_list))
+                lm_counts[str(lm.get("class") or "none") if lm else "none"] += 1
                 sit_counts[sit] += 1
                 n_sar += 1
                 if hard:
@@ -946,20 +1016,20 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
         "landmark_class_counts": dict(lm_counts.most_common()),
         "object_class_counts": dict(obj_counts.most_common()),
         "sar_situation_counts": dict(sit_counts.most_common()),
-        "assistant": "GroundingResult JSON (camera_id, interpretation, grounding)",
+        "assistant": "SAR: {camera_id}:person:{n}|{situation}; objects: interpretation JSON without coords",
+        "situation_rules": RULES_VERSION,
         "notes": (
             "Fine-tune Qwen2-VL-Instruct with these JSONL files. "
             "Pair at runtime with a YOLO detector trained on the same dump "
-            "(demo/vlm_dataset/cctv_gt_to_yolo.py): YOLO names classes "
-            "(person_sitting, cola_can, vending_machine, …); Qwen returns "
-            "GroundingResult (target_type, landmark, relation, situation, "
-            "coords). Object target_type matches the YOLO class; SAR uses "
-            "target_type=person and situation. Object rows use relation "
-            "(beside/near/on/above/left/right/front/behind). "
-            "SAR rows: sitting on a bench is normal; sitting/reaching/"
-            "standing on a vending machine, trash can, hydrant, or postbox "
-            "is abnormal. Climbers use world_xyz when hanging legs break "
-            "the 2D stack test. Do not mix ego-cam or OpenVLA pick frames."
+            "(demo/vlm_dataset/cctv_gt_to_yolo.py). YOLO names classes; "
+            "SAR assistant text is only {candidate_id}|{situation} with "
+            "runtime IDs {camera_id}:person:{n}. Object rows keep eight-relation "
+            "referring expressions without grounding xyz, and only when the "
+            "relation uniquely identifies that instance. Unlabeled ground "
+            "lying_down (no surface_class) is dropped; person_prone is always "
+            "accident. Picnic-table lying is abnormal; crouch is abnormal. "
+            "No-landmark parking scenes still emit a SAR row. "
+            "Do not mix ego-cam or OpenVLA pick frames."
         ),
     }
     info_path = os.path.join(out_dir, "dataset_info.json")

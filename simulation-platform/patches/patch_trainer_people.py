@@ -108,7 +108,8 @@ V2_COMBOS = '''    combos = []
             "sports_car", "sports_car_2", "suv", "taxi")
     _WRONG = _CLIMB + _VEH
     _ON_WRONG_POSES = ("person_sitting", "person_crouching", "person_reaching")
-    _ON_SEAT_POSES = ("person_sitting", "person_reclining", "person_lying_down")
+    _ON_SEAT_POSES = ("person_sitting", "person_reclining", "person_lying_down",
+                      "person_prone")
     if random.random() < _marc_frac("TRAINER_FORCE_CLIMB_LANDMARK_PROB", 0.35):
         _have = {_marc_lm_typ(s) for s in landmarks}
         if not (_have & set(_CLIMB)):
@@ -331,7 +332,8 @@ NEW_COMBOS = '''    combos = []
     _WRONG = _CLIMB + _VEH
     _ABOVE_DEFAULT = _CLIMB + _VEH + _RIDE
     _ON_WRONG_POSES = ("person_sitting", "person_crouching", "person_reaching")
-    _ON_SEAT_POSES = ("person_sitting", "person_reclining", "person_lying_down")
+    _ON_SEAT_POSES = ("person_sitting", "person_reclining", "person_lying_down",
+                      "person_prone")
     # Climb poses on non-sittable landmarks. person_walking is the catalog
     # standing/upright clip (there is no person_standing).
     _ON_ABOVE_POSES = (
@@ -396,14 +398,115 @@ NEW_COMBOS = '''    combos = []
     _seats = [t for t in _lm_types if _marc_is_seat(t)]
     _wrongs = [t for t in _lm_types if t in _WRONG or _marc_people_is_vehicle(t)]
     _pose_set = set(all_poses)
+    def _marc_sar_recipe_list():
+        path = "/marc-patches/sar_recipes.yaml"
+        try:
+            import yaml as _yaml_rec
+            with open(path, encoding="utf-8") as _rf:
+                _data = _yaml_rec.safe_load(_rf) or {}
+            _recs = list(_data.get("recipes") or [])
+            if _recs:
+                return _recs
+        except Exception:
+            pass
+        return [
+            {"id": "sar01_trash_sit", "pose": "person_sitting",
+             "support_landmark": "trash_can", "relation": "on", "above": True,
+             "distractor_poses": ["person_walking"]},
+            {"id": "sar07_parking_prone", "pose": "person_prone",
+             "surface_class": "parking",
+             "distractor_poses": ["person_walking", "person_sitting"]},
+            {"id": "sar08_fallenbike_down", "pose": "person_lying_down",
+             "support_landmark": "bicycle", "relation": "beside",
+             "beside": True, "surface_class": "parking",
+             "distractor_poses": ["person_walking"]},
+        ]
+    def _marc_dump_recipe(rec):
+        if not rec:
+            return
+        try:
+            import json as _json_rec
+            with open("/tmp/marc_sar_recipe.json", "w", encoding="utf-8") as _rf:
+                _json_rec.dump({
+                    "recipe_id": rec.get("id"),
+                    "target_pose": rec.get("pose"),
+                    "support_class": rec.get("support_class") or rec.get(
+                        "support_landmark"),
+                    "surface_class": rec.get("surface_class"),
+                    "support_landmark": rec.get("support_landmark"),
+                    "relation": rec.get("relation"),
+                }, _rf)
+        except Exception:
+            pass
+    _recipe = None
+    if _marc_flag("TRAINER_SAR_RECIPES", "0"):
+        _recs = _marc_sar_recipe_list()
+        if _recs:
+            global _marc_sar_recipe_cursor
+            try:
+                _rc = int(_marc_sar_recipe_cursor)
+            except (NameError, TypeError, ValueError):
+                _rc = 0
+            _recipe = _recs[_rc % len(_recs)]
+            _marc_sar_recipe_cursor = _rc + 1
+            _need = _recipe.get("support_landmark")
+            if _need and not any(_marc_lm_typ(s) == _need for s in landmarks):
+                landmarks.append({"name": "%s_0" % _need})
+            for _extra in (_recipe.get("extra_landmarks") or []):
+                if _extra and not any(_marc_lm_typ(s) == _extra for s in landmarks):
+                    landmarks.append({"name": "%s_0" % _extra})
+            _marc_dump_recipe(_recipe)
     if _above_mode and combos:
         # Climber identity is random per scene. Round-robin locked the
         # same mesh to the same CCTV as cameras cycled.
         random.shuffle(combos)
     _climber_placed = False
+    _recipe_target_placed = False
     for pose, ch in combos:
         spec = {"type": pose, "character": ch, "count": 1}
-        if _above_mode and _target and not _climber_placed:
+        if _recipe is not None and not _recipe_target_placed:
+            _want = str(_recipe.get("pose") or pose)
+            if _want not in _pose_set and _want == "person_prone" and (
+                    "person_lying_down" in _pose_set):
+                _want = "person_lying_down"
+            elif _want not in _pose_set:
+                _want = pose if pose in _pose_set else (
+                    list(_pose_set)[0] if _pose_set else pose)
+            spec["type"] = _want
+            _pl = {
+                "recipe_id": _recipe.get("id"),
+                "support_class": _recipe.get("support_class") or _recipe.get(
+                    "support_landmark"),
+                "surface_class": _recipe.get("surface_class"),
+            }
+            _lm = _recipe.get("support_landmark")
+            if _lm and (_recipe.get("above") or _recipe.get("relation") in (
+                    "on", "above")):
+                _pl["on_landmark_type"] = _lm
+                _pl["above"] = bool(_recipe.get("above"))
+                if _pl["above"]:
+                    _pl["contact_clearance"] = _marc_above_clearance()
+                    _pl["z_offset_from_top"] = (
+                        _marc_above_clearance()
+                        - _marc_sit_sink(_lm, spec["type"])
+                    )
+                else:
+                    _pl["z_offset_from_top"] = 0.02
+            if _lm and (_recipe.get("beside") or _recipe.get("relation") == "beside"):
+                _pl["beside_landmark_type"] = _lm
+            spec["placement"] = _pl
+            _recipe_target_placed = True
+        elif _recipe is not None:
+            _dposes = list(_recipe.get("distractor_poses") or [])
+            _fit = [p for p in _dposes if p in _pose_set] or [
+                p for p in _pose_set if p]
+            spec["type"] = random.choice(_fit) if _fit else pose
+            spec["placement"] = {
+                "on_landmark_type": None,
+                "above": False,
+                "recipe_id": _recipe.get("id"),
+            }
+        elif _above_mode and _target and not _climber_placed:
             spec["type"] = _marc_above_climber_pose(_target, _pose_set)
             spec["placement"] = {
                 "on_landmark_type": _target,
@@ -1075,6 +1178,45 @@ def main():
             if needle in src:
                 src = src.replace(needle, insert, 1)
                 changed = True
+        _old_seat = (
+            '_ON_SEAT_POSES = ("person_sitting", "person_reclining", '
+            '"person_lying_down")'
+        )
+        _new_seat = (
+            '_ON_SEAT_POSES = ("person_sitting", "person_reclining", '
+            '"person_lying_down",\n'
+            '                      "person_prone")'
+        )
+        if _old_seat in src:
+            src = src.replace(_old_seat, _new_seat)
+            changed = True
+        if "TRAINER_SAR_RECIPES" not in src and "_pose_set = set(all_poses)" in src:
+            _old_pose_set = "    _pose_set = set(all_poses)\n    if _above_mode and combos:\n"
+            _new_pose_set = NEW_COMBOS[
+                NEW_COMBOS.find("    _pose_set = set(all_poses)\n"):
+                NEW_COMBOS.find("    if _above_mode and combos:\n")
+                + len("    if _above_mode and combos:\n")
+            ]
+            if _old_pose_set in src and _new_pose_set:
+                src = src.replace(_old_pose_set, _new_pose_set, 1)
+                changed = True
+            _old_loop = (
+                "    _climber_placed = False\n"
+                "    for pose, ch in combos:\n"
+                "        spec = {\"type\": pose, \"character\": ch, \"count\": 1}\n"
+                "        if _above_mode and _target and not _climber_placed:\n"
+            )
+            _new_loop = NEW_COMBOS[
+                NEW_COMBOS.find("    _climber_placed = False\n"):
+                NEW_COMBOS.find(
+                    "        elif _above_mode and _target and not _climber_placed:\n"
+                ) + len(
+                    "        elif _above_mode and _target and not _climber_placed:\n"
+                )
+            ]
+            if _old_loop in src and _new_loop:
+                src = src.replace(_old_loop, _new_loop, 1)
+                changed = True
         if changed:
             if not _write(src):
                 return 0
@@ -1123,10 +1265,12 @@ def _log_people():
     poses = os.environ.get("TRAINER_PEOPLE_POSES", "") or "*"
     on_off = "ON" if str(above).strip().lower() not in (
         "0", "false", "no", "off", "") else "OFF (ground scenes, no stacking)"
+    recipes = os.environ.get("TRAINER_SAR_RECIPES", "0")
     print(f"[people-patch] all identities per scene "
           f"(TRAINER_PEOPLE_ALL_CHARS={mode}); chars={chars} poses={poses}; "
           f"on-landmark p={on_p}; "
-          f"above={above} [{on_off}] clearance={clearance} weights={weights}")
+          f"above={above} [{on_off}] clearance={clearance} weights={weights}; "
+          f"sar_recipes={recipes}")
 
 
 if __name__ == "__main__":
