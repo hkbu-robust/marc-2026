@@ -29,15 +29,11 @@ from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
     run_stage1_candidate_pipeline,
 )
+from marc_agent.pick_runtime import PickRuntime
 from marc_agent.retrieval_state import RetrievalState, search_area_approach_goal
 from mock_agent_vla import MockVLAGrounding
 from mock_agent_navigation import lidar_cloud_to_obstacles, frontal_hit
 from nearfield import NearFieldAcquire, make_detector
-# Closed-loop placo pick from the manipulation kit (arm_pick.py): grasp_yaw wrist-roll +
-# DLS servo, targeting the object position. Requires placo (installed in the demo image).
-# The fixed-keyframe mock in mock_agent_manipulation.py remains as a dependency-free
-# fallback reference.
-from arm_pick import run_pick_sequence
 
 log = logging.getLogger("participant_app")
 
@@ -158,8 +154,9 @@ class DemoParticipant:
     def _drive(self):
         """Called once in a separate thread on entering STAGE2_RUN.
 
-        Leg 1: D* to the reveal search-area approach goal. Pick (#12/#13) stays as-is
-        after arrival. Delivery to owner_position is #14 — stored, not driven here.
+        Leg 1: D* to the reveal search-area approach goal. #12 localizes in RGB-D,
+        then #13 grasps only on positive is_grasping() and loads the basket.
+        Delivery to owner_position is #14 — stored, not driven here.
         """
         c = self.client
         # SIM-time deadline (via /clock) -- shared across all legs, robust to real-time factor < 1.
@@ -211,13 +208,20 @@ class DemoParticipant:
             else:
                 log.info("[Stage2] localized %s grasp=(%.2f, %.2f, z=%.2f) conf=%.2f",
                          target.name or "?", target.fwd, target.lat, target.z, target.conf)
-                try:
-                    held = run_pick_sequence(c, log, (target.fwd, target.lat))
-                    c.send_cmd_vel(0.0, 0.0)
-                    picked = True if held is None else bool(held)
-                    log.info("[Stage2] pick %s (grip held=%s)", "ok" if picked else "failed", held)
-                except Exception as e:
-                    log.warning("[Stage2] pick failed: %s", e)
+                def _reacquire():
+                    nxt = NearFieldAcquire(c, make_detector()).acquire(reveal, deadline)
+                    for _ in range(3):
+                        c.send_cmd_vel(0.0, 0.0)
+                        c.sleep(0.05)
+                    return nxt
+                pick = PickRuntime(c, log, reacquire_fn=_reacquire).run(
+                    target, deadline=deadline, reveal=reveal)
+                self._state.adopt_pick(pick)
+                picked = pick.ok
+                c.send_cmd_vel(0.0, 0.0)
+                log.info("[Stage2] pick %s reason=%s attempts=%d grasping=%s basket=%s policy=%s",
+                         "ok" if picked else "failed", pick.reason, pick.attempts,
+                         pick.grasped, pick.basket_occupied, pick.policy)
 
         if not picked:
             self._stow_arm()

@@ -1,0 +1,88 @@
+# Hand-reviewed pick/basket fixtures. Grasp and basket values are per call
+# (null / true / false). None/false grasping is never success.
+
+cases:
+  - id: none_not_success
+    grasp: [null, null, null]
+    basket: [null, null, null]
+    expect_ok: false
+    expect_reason: no_grasp
+    expect_attempts: 3
+    expect_grasped: false
+    expect_basket: false
+  - id: empty_grasp_then_ok
+    grasp: [false, true]
+    basket: [true]
+    expect_ok: true
+    expect_reason: ok
+    expect_attempts: 2
+    expect_grasped: true
+    expect_basket: true
+  - id: basket_miss_retry_place
+    grasp: [true]
+    basket: [false, true]
+    expect_ok: true
+    expect_reason: ok
+    expect_attempts: 2
+    expect_grasped: true
+    expect_basket: true
+  - id: drop_then_retry
+    grasp: [true, true]
+    basket: [false, true]
+    drop_after_place: [true, false]
+    expect_ok: true
+    expect_reason: ok
+    expect_attempts: 2
+    expect_grasped: true
+    expect_basket: true
+  - id: all_empty
+    grasp: [false, false, false]
+    basket: [false]
+    expect_ok: false
+    expect_reason: no_grasp
+    expect_attempts: 3
+    expect_grasped: false
+    expect_basket: false
+  - id: success_first_try
+    grasp: [true]
+    basket: [true]
+    expect_ok: true
+    expect_reason: ok
+    expect_attempts: 1
+    expect_grasped: true
+    expect_basket: true
+  - id: basket_never
+    grasp: [true]
+    basket: [false, false, false]
+    expect_ok: false
+    expect_reason: no_basket
+    expect_attempts: 3
+    expect_grasped: true
+    expect_basket: false
+  - id: timeout
+    grasp: [true]
+    basket: [true]
+    deadline_s: -1
+    expect_ok: false
+    expect_reason: timeout
+    expect_attempts: 1
+    expect_grasped: false
+    expect_basket: false
+  - id: lost_on_reacquire
+    grasp: [false]
+    basket: [false]
+    reacquire: fail
+    expect_ok: false
+    expect_reason: lost_target
+    expect_attempts: 1
+    expect_grasped: false
+    expect_basket: false
+  - id: invalid_target
+    invalid_target: true
+    grasp: []
+    basket: []
+    expect_ok: false
+    expect_reason: lost_target
+    expect_attempts: 0
+    expect_grasped: false
+    expect_basket: false
