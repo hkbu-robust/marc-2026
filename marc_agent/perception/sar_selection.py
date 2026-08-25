@@ -126,7 +126,10 @@ def candidate_evidence(
             if anchor
             else None
         )
-        pose_situation = situation_for_pose(person.pose_class)
+        pose_situation = situation_for_pose(
+            person.pose_class,
+            support=anchor.class_name if anchor else None,
+        )
         score = person.confidence
         if requested_situation and pose_situation == requested_situation:
             score += 2.0
@@ -400,7 +403,10 @@ def select_sar_candidate(
         SelectionStatus.SELECTED,
         best.person,
         requested,
-        situation_for_pose(best.person.pose_class),
+        situation_for_pose(
+            best.person.pose_class,
+            support=best.anchor.class_name if best.anchor else None,
+        ),
         "deterministic_fallback",
         fallback_reason,
         raw_output,

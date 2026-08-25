@@ -1,0 +1,120 @@
+# Practice SAR archetypes for dataset-gen (TRAINER_SAR_RECIPES=1).
+# One target + ordinary distractors per scene. support_class/surface_class are
+# R03 keys or landmark names that situation_rules.py can resolve.
+# Parking vs grass is a recipe field, not inferred from generic ground cells.
+
+recipes:
+  - id: sar01_trash_sit
+    pose: person_sitting
+    support_landmark: trash_can
+    support_class: trash_can
+    relation: on
+    above: true
+    distractor_poses: [person_walking, person_walking_away]
+
+  - id: sar02_vending_sit
+    pose: person_sitting
+    support_landmark: vending_machine
+    support_class: vending_machine
+    relation: on
+    above: true
+    distractor_poses: [person_walking, person_reaching]
+
+  - id: sar03_bench_lie
+    pose: person_lying_down
+    support_landmark: bench
+    support_class: bench
+    relation: on
+    above: false
+    distractor_poses: [person_walking, person_sitting]
+
+  - id: sar04_table_lie
+    pose: person_lying_down
+    support_landmark: picnic_table
+    support_class: picnic_table
+    relation: on
+    above: false
+    distractor_poses: [person_walking, person_sitting]
+
+  - id: sar06_parking_collapsed
+    pose: person_lying_down
+    support_landmark: null
+    surface_class: parking
+    relation: null
+    distractor_poses: [person_walking, person_sitting]
+
+  - id: sar07_parking_prone
+    pose: person_prone
+    support_landmark: null
+    surface_class: parking
+    relation: null
+    distractor_poses: [person_walking, person_sitting]
+
+  - id: sar08_fallenbike_down
+    pose: person_lying_down
+    support_landmark: bicycle
+    support_class: bicycle
+    surface_class: parking
+    relation: beside
+    beside: true
+    distractor_poses: [person_walking]
+
+  - id: sar09_park_bending
+    pose: person_bending
+    support_landmark: trash_can
+    support_class: trash_can
+    surface_class: grass
+    relation: beside
+    beside: true
+    distractor_poses: [person_walking, person_sitting]
+
+  - id: sarH1_park_needhelp
+    pose: person_bending
+    support_landmark: trash_can
+    support_class: trash_can
+    surface_class: grass
+    relation: beside
+    beside: true
+    distractor_poses: [person_lying_down, person_walking]
+
+  - id: sarH2_parking_bikeacc
+    pose: person_prone
+    support_landmark: bicycle
+    support_class: bicycle
+    surface_class: parking
+    relation: beside
+    beside: true
+    distractor_poses: [person_walking]
+
+  - id: sarH3_climbed_machine
+    pose: person_reaching
+    support_landmark: vending_machine
+    support_class: vending_machine
+    relation: above
+    above: true
+    distractor_poses: [person_walking, person_sitting]
+
+  - id: sarH4_parking_trashsit
+    pose: person_sitting
+    support_landmark: trash_can
+    support_class: trash_can
+    surface_class: parking
+    relation: on
+    above: true
+    distractor_poses: [person_walking]
+
+  - id: sarH5_taxi_benchlie
+    pose: person_lying_down
+    support_landmark: bench
+    support_class: bench
+    relation: on
+    above: false
+    extra_landmarks: [taxi]
+    distractor_poses: [person_walking, person_sitting]
+
+  - id: sarH6_most_critical
+    pose: person_prone
+    support_landmark: null
+    surface_class: parking
+    relation: null
+    distractor_poses: [person_sitting, person_walking, person_bending]

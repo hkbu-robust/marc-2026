@@ -445,6 +445,68 @@ class AboveModePatchTests(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old)
 
+    def test_seat_pool_includes_person_prone(self):
+        patch = _load_patch()
+        self.assertIn("person_prone", patch.NEW_COMBOS)
+        self.assertIn("TRAINER_SAR_RECIPES", patch.NEW_COMBOS)
+        self.assertIn("_ON_SEAT_POSES", patch.NEW_COMBOS)
+
+    def test_sar_recipes_pin_one_target_per_scene(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-recipe-pin>", "exec"), namespace)
+        poses = [
+            "person_sitting", "person_walking", "person_lying_down",
+            "person_prone", "person_reaching",
+        ]
+        chars = ["female_student_01", "male_student_01", "professor_01"]
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            recipe_ids = []
+            for _ in range(6):
+                landmarks, specs = namespace["build"](
+                    [{"name": "bench_0"}], list(chars), list(poses),
+                )
+                people = [o for o in specs if o.get("character")]
+                self.assertEqual(len(people), 3)
+                targets = []
+                for person in people:
+                    pl = person.get("placement") or {}
+                    if (pl.get("on_landmark_type")
+                            or pl.get("beside_landmark_type")
+                            or pl.get("support_class")
+                            or pl.get("surface_class")):
+                        targets.append(person)
+                self.assertEqual(len(targets), 1, people)
+                recipe_ids.append((targets[0].get("placement") or {}).get(
+                    "recipe_id"))
+                names = {s["name"] for s in landmarks}
+                pl = targets[0].get("placement") or {}
+                if pl.get("beside_landmark_type") == "bicycle":
+                    self.assertIn("bicycle_0", names)
+                if pl.get("on_landmark_type"):
+                    self.assertIn("%s_0" % pl["on_landmark_type"], names)
+            self.assertTrue(any(recipe_ids))
+            self.assertGreaterEqual(len(set(recipe_ids)), 2)
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
 
 if __name__ == "__main__":
     unittest.main()
