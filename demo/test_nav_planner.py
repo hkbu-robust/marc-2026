@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Numpy-only checks for D* Lite repair, lidar XY transform, and path-blocked.
+"""Numpy-only checks for D* Lite repair, lidar XY transform, path-blocked, and SpeedGovernor.
 
 Run from repo root or demo/:
   python3 demo/test_nav_planner.py
@@ -14,6 +14,7 @@ import numpy as np
 
 from mock_agent_navigation import (
     OccupancyGridPlanner,
+    SpeedGovernor,
     LIDAR_CLUSTER_M,
     OVERLAY_TTL_S,
     frontal_hit,
@@ -204,6 +205,87 @@ def test_overlay_blocks_plan():
     _check(hits == 0, "path crossed overlay (%d cells)" % hits)
 
 
+class _V:
+    def __init__(self, x=0.0, y=0.0, z=0.0, w=None):
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+        if w is not None:
+            self.w = float(w)
+
+
+class _Imu:
+    """Duck-typed sensor_msgs/Imu. roll is about +X; az defaults to +g (level, gravity-on)."""
+
+    def __init__(self, roll=0.0, ay=0.0, az=9.81, wx=0.0, wz=0.0):
+        cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
+        self.orientation = _V(x=sr, y=0.0, z=0.0, w=cr)
+        self.angular_velocity = _V(x=wx, y=0.0, z=wz)
+        self.linear_acceleration = _V(x=0.0, y=ay, z=az)
+
+
+def _ackermann_ok(linear, angular):
+    if linear <= 1e-3:
+        return True
+    return abs(angular) <= 1.8 * linear / SpeedGovernor.STEERING_TRACK + 1e-9
+
+
+def test_governor_straight_cruise():
+    g = SpeedGovernor()
+    lin, ang = g.limit(1.0, 0.0, imu=_Imu(), xyz=np.zeros((0, 3)), dt=0.1)
+    _check(abs(lin - 1.0) < 1e-9, "straight quiet IMU should keep cruise, got %s" % lin)
+    _check(abs(ang) < 1e-12, "straight should not invent angular, got %s" % ang)
+
+
+def test_governor_high_yaw_caps_and_ackermann():
+    g = SpeedGovernor()
+    lin, ang = g.limit(1.0, 1.2, imu=None, xyz=None, dt=0.1)
+    _check(lin < 0.70, "high |angular| should cut cruise, got v=%s" % lin)
+    _check(lin > 0.30, "high |angular| should still move, got v=%s" % lin)
+    _check(_ackermann_ok(lin, ang), "recap must stay Ackermann-valid v=%s w=%s" % (lin, ang))
+
+
+def test_governor_roll_and_ay_slower_than_level():
+    cruise = 1.0
+    w = 0.15
+    level, _ = SpeedGovernor().limit(cruise, w, imu=_Imu(), dt=0.1)
+    rolled, _ = SpeedGovernor().limit(cruise, w, imu=_Imu(roll=0.28), dt=0.1)
+    lat, _ = SpeedGovernor().limit(cruise, w, imu=_Imu(ay=3.2), dt=0.1)
+    _check(rolled < level - 0.15, "roll should cut vs level (%s vs %s)" % (rolled, level))
+    _check(lat < level - 0.15, "high a_y should cut vs level (%s vs %s)" % (lat, level))
+
+
+def test_governor_curb_lidar_slower_than_high_z():
+    cruise = 1.0
+    curb = np.array([[0.6, 0.0, 0.08], [0.7, 0.05, 0.10], [0.55, -0.04, 0.06]], dtype=np.float32)
+    high = np.array([[0.6, 0.0, 0.80], [0.7, 0.05, 0.90], [0.55, -0.04, 1.00]], dtype=np.float32)
+    v_curb, _ = SpeedGovernor().limit(cruise, 0.0, imu=_Imu(), xyz=curb, dt=0.1)
+    v_high, _ = SpeedGovernor().limit(cruise, 0.0, imu=_Imu(), xyz=high, dt=0.1)
+    _check(abs(v_high - cruise) < 1e-9, "high-Z hits are not curbs, got %s" % v_high)
+    _check(v_curb < v_high - 0.3, "curb-Z look-ahead should slow (%s vs %s)" % (v_curb, v_high))
+    _check(v_curb >= SpeedGovernor.V_FLOOR - 1e-9, "curb floor should still creep, got %s" % v_curb)
+
+
+def test_governor_az_spike_latches():
+    g = SpeedGovernor()
+    spiked, _ = g.limit(1.0, 0.0, imu=_Imu(az=20.0), dt=0.1)
+    _check(spiked <= SpeedGovernor.V_SPIKE + 1e-9, "spike should drop v, got %s" % spiked)
+    held, _ = g.limit(1.0, 0.0, imu=_Imu(), dt=0.1)
+    _check(held <= SpeedGovernor.V_SPIKE + 0.05, "latch should keep v low after quiet IMU, got %s" % held)
+    fresh, _ = SpeedGovernor().limit(1.0, 0.0, imu=_Imu(), dt=0.1)
+    _check(abs(fresh - 1.0) < 1e-9, "fresh quiet governor should cruise, got %s" % fresh)
+    _check(held < fresh - 0.5, "latched call must be slower than a fresh quiet sample")
+
+
+def test_governor_missing_sensors_never_raises():
+    g = SpeedGovernor()
+    lin, ang = g.limit(1.0, 1.0, imu=None, xyz=None, dt=0.1)
+    _check(lin < 1.0, "missing sensors should still cap from commanded yaw, got %s" % lin)
+    _check(_ackermann_ok(lin, ang), "missing-sensor recap must stay Ackermann-valid")
+    held, _ = g.limit(0.30, 0.0, imu=None, xyz=None, dt=0.1)
+    _check(held <= 0.30 + 1e-12, "governor must never raise linear (%s)" % held)
+
+
 def main():
     tests = [
         test_empty_corridor,
@@ -216,6 +298,12 @@ def main():
         test_overlay_expiry,
         test_no_path_status,
         test_overlay_blocks_plan,
+        test_governor_straight_cruise,
+        test_governor_high_yaw_caps_and_ackermann,
+        test_governor_roll_and_ay_slower_than_level,
+        test_governor_curb_lidar_slower_than_high_z,
+        test_governor_az_spike_latches,
+        test_governor_missing_sensors_never_raises,
     ]
     failed = 0
     for fn in tests:
