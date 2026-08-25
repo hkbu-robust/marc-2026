@@ -141,12 +141,21 @@ services:
       TRAINER_PEOPLE_WRONG_PLACE_PROB: "${TRAINER_PEOPLE_WRONG_PLACE_PROB:-0.55}"
       TRAINER_FORCE_CLIMB_LANDMARK_PROB: "${TRAINER_FORCE_CLIMB_LANDMARK_PROB:-0.35}"
       # 1 = construct every scene with one random-pose climber on a guaranteed
-      # climb landmark (vending-biased). Extra people stay on the ground.
+      # climb landmark. Extra people stay on the ground.
       TRAINER_PEOPLE_ABOVE: "${TRAINER_PEOPLE_ABOVE:-0}"
       TRAINER_PEOPLE_ABOVE_CLEARANCE: "${TRAINER_PEOPLE_ABOVE_CLEARANCE:-0.03}"
       TRAINER_PEOPLE_ABOVE_TYPES: "${TRAINER_PEOPLE_ABOVE_TYPES:-vending_machine,trash_can,hydrant,postbox}"
-      # Repeat counts in the climb-target cycle. Default 3x vending machines.
-      TRAINER_PEOPLE_ABOVE_WEIGHTS: "${TRAINER_PEOPLE_ABOVE_WEIGHTS:-vending_machine:3}"
+      # Repeat counts in the climb-target cycle. Empty = even cycle.
+      TRAINER_PEOPLE_ABOVE_WEIGHTS: "${TRAINER_PEOPLE_ABOVE_WEIGHTS:-}"
+      # Optional comma lists. Empty = full catalog. Short names work
+      # (weight, sitting). Pins climber + extras to those meshes/poses.
+      TRAINER_PEOPLE_CHARS: "${TRAINER_PEOPLE_CHARS:-}"
+      TRAINER_PEOPLE_POSES: "${TRAINER_PEOPLE_POSES:-}"
+      # Unused (forced off). Mesh-vert snap launched climbers into the sky.
+      TRAINER_PEOPLE_VEND_MESH_CONTACT: "${TRAINER_PEOPLE_VEND_MESH_CONTACT:-0}"
+      # Female/professor vending sit: auto = mix of glass-center and corners.
+      # Pin with center|left|right. Always clamped onto the cabinet roof.
+      TRAINER_PEOPLE_VEND_SLOT: "${TRAINER_PEOPLE_VEND_SLOT:-auto}"
       # Render fresh frames after redeploy/contact before GT capture, clearing
       # RTX temporal after-images from the previous scene.
       TRAINER_RENDER_WARMUP_FRAMES: "${TRAINER_RENDER_WARMUP_FRAMES:-12}"

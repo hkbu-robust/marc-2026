@@ -13,11 +13,13 @@
 #   1. sets place_on_landmark=True in trainer.py
 #   2. lets an object spec's placement overlay the pose YAML
 #   3. re-seats those people after landmark ground-snap (trash cans tip)
-#   4. if placement.above is set, constructs the stacked image: seats the
-#      posed skeleton on a raycasted top-patch (retry XY until in contact
-#      AND on top), parks the landmark in camera headroom, and if the roof
-#      would still clip, nudges it nearer and recaptures. The 2D/3D save
-#      check is a safety net, not a generate-and-filter lottery.
+#   4. if placement.above is set, construct the stack: person AABB sits on
+#      the landmark AABB top (XY on the roof). For tall cabinets the
+#      posed sitting mesh hangs below the bind-pose AABB, so Z is the
+#      lowest posed joint on the mesh roof. Strip rigid bodies so 90
+#      settle frames and GT playback cannot drop them to the ground.
+#      Climb landmark+person stay in-frame with headroom; extras may go
+#      off-frame.
 #
 # boot.py runs this before dataset-gen. Idempotent via MARKER. Pair with
 # patch_trainer_people.py, which actually stamps placement onto people specs.
@@ -41,6 +43,12 @@ NEW_PLACE_POSE = '''    placement = dict((pose or {}).get("placement") or {})
         placement.update(_obj_pl)
     # [marc-patch] _marc_obj_placement: object-spec overlay beats pose YAML.
     on_landmark_type = placement.get("on_landmark_type") if place_on_landmark else None
+    if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+            "0", "false", "no", "off", ""):
+        # Only the climber (placement.above) may sit on a landmark. Pose YAML
+        # would otherwise drop extras (lying/prone) through the same vending.
+        if not placement.get("above"):
+            on_landmark_type = None
     z_offset_from_top = float(placement.get("z_offset_from_top", 0.0) or 0.0)
 '''
 
@@ -56,9 +64,14 @@ NEW_REPOSITION_PL = '''        placement = dict((pose or {}).get("placement") or
         if _obj_pl:
             placement.update(_obj_pl)
         on_lm = placement.get("on_landmark_type")
-        if not on_lm or placement.get("above"):
+        if not on_lm:
             continue
-        z_off = float(placement.get("z_offset_from_top", 0.0) or 0.0)
+        if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            if not placement.get("above"):
+                continue
+        z_off = float(placement.get("z_offset_from_top",
+                                    placement.get("contact_clearance", 0.0)) or 0.0)
 '''
 
 OLD_SNAP = "        _snap_landmarks_to_ground([mission])\n"
@@ -102,7 +115,7 @@ NEW_SNAP_V3 = '''        _snap_landmarks_to_ground([mission])
                 simulation_context.step(render=True)
 '''
 
-NEW_SNAP = '''        _snap_landmarks_to_ground([mission])
+NEW_SNAP_V4 = '''        _snap_landmarks_to_ground([mission])
         try:
             from world.object_deployer import reposition_on_landmark_people
             reposition_on_landmark_people(
@@ -130,6 +143,87 @@ NEW_SNAP = '''        _snap_landmarks_to_ground([mission])
                 _marc_run_above_place()
             except Exception as _e:
                 log.warning(f"place-above people failed (non-fatal): {_e}")
+'''
+
+NEW_SNAP = '''        _snap_landmarks_to_ground([mission])
+        try:
+            from world.object_deployer import reposition_on_landmark_people
+            reposition_on_landmark_people(
+                mission["id"], mission.get("objects") or [], configurations)
+        except Exception as _e:
+            log.warning(f"reposition on-landmark people failed (non-fatal): {_e}")
+        try:
+            simulation_context.pause()
+        except Exception:
+            pass
+        try:
+            from world.object_deployer import _marc_place_above_people
+            _marc_place_above_people(
+                mission["id"], mission.get("objects") or [], configurations)
+        except Exception as _e:
+            log.warning(f"place-above people failed (non-fatal): {_e}")
+'''
+
+OLD_SETTLE = '''        simulation_context.play()
+        for _ in range(_SETTLE_FRAMES):
+            simulation_context.step(render=False)
+        _snap_landmarks_to_ground([mission])
+'''
+
+NEW_SETTLE = '''        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            # Construct the stack first, freeze the climber, then let lost
+            # objects fall. Re-seat every settle tick so PhysX cannot restore
+            # the ground spawn pose. Clear the contact lock once per scene.
+            try:
+                simulation_context.pause()
+            except Exception:
+                pass
+            _snap_landmarks_to_ground([mission])
+            try:
+                from world import object_deployer as _od_lock
+                _od_lock._marc_above_lock = {}
+            except Exception:
+                pass
+            try:
+                from world.object_deployer import (
+                    reposition_on_landmark_people,
+                    _marc_place_above_people,
+                )
+                reposition_on_landmark_people(
+                    mission["id"], mission.get("objects") or [],
+                    configurations)
+                _marc_place_above_people(
+                    mission["id"], mission.get("objects") or [],
+                    configurations)
+            except Exception as _e:
+                log.warning(f"place-above after snap failed (non-fatal): {_e}")
+            simulation_context.play()
+            for _ in range(_SETTLE_FRAMES):
+                try:
+                    from world.object_deployer import _marc_place_above_people
+                    _marc_place_above_people(
+                        mission["id"], mission.get("objects") or [],
+                        configurations)
+                except Exception:
+                    pass
+                simulation_context.step(render=False)
+            try:
+                simulation_context.pause()
+            except Exception:
+                pass
+            try:
+                from world.object_deployer import _marc_place_above_people
+                _marc_place_above_people(
+                    mission["id"], mission.get("objects") or [],
+                    configurations)
+            except Exception as _e:
+                log.warning(f"place-above after settle failed (non-fatal): {_e}")
+        else:
+            simulation_context.play()
+            for _ in range(_SETTLE_FRAMES):
+                simulation_context.step(render=False)
+            _snap_landmarks_to_ground([mission])
 '''
 
 NEW_SNAP_V1 = '''        _snap_landmarks_to_ground([mission])
@@ -283,7 +377,7 @@ NEW_SAVE_V2 = '''        active_payload = gt_by_mission.get(active_mission_id)
                     log.warning(f"offline GT save failed: {e}")
 '''
 
-NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
+NEW_SAVE_V3 = '''        active_payload = gt_by_mission.get(active_mission_id)
         _active_valid = True
         if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
                 "0", "false", "no", "off", ""):
@@ -421,10 +515,178 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                     log.warning(f"offline GT save failed: {e}")
 '''
 
+NEW_SAVE_V4 = '''        active_payload = gt_by_mission.get(active_mission_id)
+        _active_valid = True
+        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            try:
+                from world import object_deployer as _od_above
+                _n_placed = int(getattr(
+                    _od_above, "_marc_above_placed_n", 0) or 0)
+                _target = str(getattr(
+                    _od_above, "_marc_above_target", "") or "")
+            except Exception:
+                _n_placed = 0
+                _target = ""
+            # 3D raycast+joint contact only. 2D boxes and AABBs disagree
+            # with a pitched CCTV view and are not a placement oracle.
+            _active_valid = _n_placed > 0
+            if not _active_valid:
+                raise RuntimeError(
+                    f"Above scene {scene_id}: constructed stack invariant "
+                    f"failed (target={_target or '-'} placed={_n_placed})")
+            log.info(
+                f"Above scene {scene_id}: target={_target or '-'} "
+                f"saved placed={_n_placed}")
+        if save_offline_enabled and _active_valid:
+            # 선택된 카메라만 저장 (배치 콘텐츠가 있는 active 미션).
+            if active_payload is not None:
+                try:
+                    gt.save_offline(scene_id, {active_mission_id: active_payload})
+                except Exception as e:
+                    log.warning(f"offline GT save failed: {e}")
+'''
+
+NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
+        _active_valid = True
+        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            try:
+                from world import object_deployer as _od_above
+                _n_placed = int(getattr(
+                    _od_above, "_marc_above_placed_n", 0) or 0)
+                _target = str(getattr(
+                    _od_above, "_marc_above_target", "") or "")
+            except Exception:
+                _n_placed = 0
+                _target = ""
+            _dets = list((active_payload or {}).get("detections") or [])
+            _target_in_view = True
+            if _target:
+                _t = str(_target)
+                _target_in_view = any(
+                    str(d.get("class") or "") == _t
+                    or str(d.get("class") or "").startswith(_t)
+                    for d in _dets)
+            try:
+                from world import object_deployer as _od_view
+                _od_view._marc_above_target_in_view = _target_in_view
+            except Exception:
+                pass
+            # 3D raycast+joint contact only. 2D boxes and AABBs disagree
+            # with a pitched CCTV view and are not a placement oracle.
+            # Skip save (and retry) if the climb landmark is not in the
+            # camera at all — scene 0 often captures before the CCTV
+            # looks at the spawned cabinet.
+            _active_valid = _n_placed > 0 and _target_in_view
+            if _n_placed <= 0:
+                log.warning(
+                    f"Above scene {scene_id}: constructed stack invariant "
+                    f"failed (target={_target or '-'} placed={_n_placed}); "
+                    f"skip save")
+            if not _target_in_view:
+                log.warning(
+                    f"Above scene {scene_id}: target={_target or '-'} "
+                    f"not in CCTV detections; skip save")
+            else:
+                log.info(
+                    f"Above scene {scene_id}: target={_target or '-'} "
+                    f"saved placed={_n_placed}")
+        if save_offline_enabled and _active_valid:
+            # 선택된 카메라만 저장 (배치 콘텐츠가 있는 active 미션).
+            if active_payload is not None:
+                try:
+                    gt.save_offline(scene_id, {active_mission_id: active_payload})
+                except Exception as e:
+                    log.warning(f"offline GT save failed: {e}")
+'''
+
+OLD_RENDER_STEP = (
+    "        simulation_context.play()\n"
+    "        stamp = float(getattr(simulation_context, \"current_time\", 0.0) or 0.0)\n"
+    "        gt_by_mission = gt.capture(\n"
+    "            scene_id, simulation_app, stamp=stamp,\n"
+    "            render_step=lambda: simulation_context.step(render=True))\n"
+)
+NEW_RENDER_STEP = '''        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            try:
+                simulation_context.pause()
+            except Exception:
+                pass
+            try:
+                from world.object_deployer import _marc_place_above_people
+                _miss = next(
+                    m for m in missions if m.get("id") == active_mission_id)
+                _marc_place_above_people(
+                    _miss["id"], _miss.get("objects") or [],
+                    configurations)
+            except Exception as _pe:
+                log.warning(
+                    f"place-above before GT capture failed (non-fatal): {_pe}")
+        simulation_context.play()
+        def _marc_gt_step():
+            # Playback ticks restore spawn poses. Freeze/re-seat the climber
+            # on the landmark top before AND after each annotator frame.
+            def _marc_reseat():
+                if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                        "0", "false", "no", "off", ""):
+                    try:
+                        from world.object_deployer import _marc_place_above_people
+                        _miss = next(
+                            m for m in missions if m.get("id") == active_mission_id)
+                        _marc_place_above_people(
+                            _miss["id"], _miss.get("objects") or [],
+                            configurations)
+                    except Exception as _pe:
+                        log.warning(
+                            f"place-above GT step failed (non-fatal): {_pe}")
+            _marc_reseat()
+            simulation_context.step(render=True)
+            _marc_reseat()
+        stamp = float(getattr(simulation_context, "current_time", 0.0) or 0.0)
+        gt_by_mission = gt.capture(
+            scene_id, simulation_app, stamp=stamp,
+            render_step=_marc_gt_step)
+'''
+
+NEW_RENDER_STEP_V1 = '''        simulation_context.play()
+        def _marc_gt_step():
+            # Playback ticks restore spawn poses. Re-seat the climber on
+            # the landmark top before each annotator/render frame.
+            if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                    "0", "false", "no", "off", ""):
+                try:
+                    from world.object_deployer import _marc_place_above_people
+                    _miss = next(
+                        m for m in missions if m.get("id") == active_mission_id)
+                    _marc_place_above_people(
+                        _miss["id"], _miss.get("objects") or [],
+                        configurations)
+                except Exception as _pe:
+                    log.warning(
+                        f"place-above before GT step failed (non-fatal): {_pe}")
+            simulation_context.step(render=True)
+        stamp = float(getattr(simulation_context, "current_time", 0.0) or 0.0)
+        gt_by_mission = gt.capture(
+            scene_id, simulation_app, stamp=stamp,
+            render_step=_marc_gt_step)
+'''
+
 OLD_CAPTURE_RETURN = "        return gt.last_render_ok\n"
 NEW_CAPTURE_RETURN = '''        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
                 "0", "false", "no", "off", ""):
-            return _active_valid
+            # Scene 0 often has a valid RGB but the climb landmark is off
+            # camera. Return False so the stock black-frame redeploy retries
+            # instead of keeping a cabinet-less first frame.
+            try:
+                from world import object_deployer as _od_cap
+                _n = int(getattr(_od_cap, "_marc_above_placed_n", 0) or 0)
+                _in = bool(getattr(
+                    _od_cap, "_marc_above_target_in_view", True))
+            except Exception:
+                _n, _in = 0, True
+            return bool(gt.last_render_ok) and _n > 0 and _in
         return gt.last_render_ok
 '''
 
@@ -600,7 +862,7 @@ NEW_POSITIONS_V2 = '''        positions = generate_cell_positions(area, n_lm + n
                 obj_pos[_climber_i] = list(lm_pos[_lm_i])
 '''
 
-NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_obj)
+NEW_POSITIONS_V3 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
         lm_pos = positions[:n_lm]
         obj_pos = positions[n_lm:]
         if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
@@ -662,6 +924,346 @@ NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_ob
                 if (_climber_i is not None
                         and _climber_i < len(obj_pos)):
                     obj_pos[_climber_i] = list(lm_pos[_lm_i])
+                _lx, _ly = lm_pos[_lm_i][0], lm_pos[_lm_i][1]
+                _ndx = _ndy = None
+                if _spot is not None:
+                    try:
+                        _ndx = _bot[0] - _top[0]
+                        _ndy = _bot[1] - _top[1]
+                    except Exception:
+                        _ndx = _ndy = None
+                _mag = None
+                if _ndx is not None:
+                    _mag = (_ndx * _ndx + _ndy * _ndy) ** 0.5
+                _oi = 0
+                for _spec in objects or []:
+                    _n = max(1, int(_spec.get("count", 1) or 1))
+                    _is_climber = bool((_spec.get("placement") or {}).get("above"))
+                    _is_person = bool(_spec.get("character")) or str(
+                        _spec.get("type") or "").startswith("person_")
+                    for _ in range(_n):
+                        if (_is_person and (not _is_climber)
+                                and _oi < len(obj_pos)):
+                            _dx = obj_pos[_oi][0] - _lx
+                            _dy = obj_pos[_oi][1] - _ly
+                            if (_dx * _dx + _dy * _dy) < 4.0:
+                                if _mag and _mag > 1e-4:
+                                    obj_pos[_oi] = [
+                                        _lx + _ndx / _mag * 2.4,
+                                        _ly + _ndy / _mag * 2.4,
+                                        obj_pos[_oi][2],
+                                    ]
+                        _oi += 1
+'''
+
+NEW_POSITIONS_V5 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
+        lm_pos = positions[:n_lm]
+        obj_pos = positions[n_lm:]
+        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            import re as _re_pos
+            _pl = ""
+            _climber_i = None
+            _obj_i = 0
+            for _spec in objects or []:
+                _n = max(1, int(_spec.get("count", 1) or 1))
+                _opl = (_spec.get("placement") or {})
+                if _climber_i is None and _opl.get("above"):
+                    _climber_i = _obj_i
+                    _pl = str(_opl.get("on_landmark_type") or "")
+                _obj_i += _n
+            _lm_i = None
+            if _pl:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t == _pl:
+                        _lm_i = _i
+                        break
+            if _lm_i is None:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t not in ("bench", "picnic_table"):
+                        _lm_i = _i
+                        break
+            if isinstance(area, dict):
+                try:
+                    _tl = list(area["top_left"])
+                    _tr = list(area["top_right"])
+                    _br = list(area["bottom_right"])
+                    _bl = list(area["bottom_left"])
+                    def _marc_quad(_u, _v):
+                        _bot = [(1.0 - _u) * _bl[_k] + _u * _br[_k]
+                                for _k in range(3)]
+                        _top = [(1.0 - _u) * _tl[_k] + _u * _tr[_k]
+                                for _k in range(3)]
+                        return [(1.0 - _v) * _bot[_k] + _v * _top[_k]
+                                for _k in range(3)]
+                    _climb_u = 0.28 + random.random() * 0.44
+                    _climb_v = (0.18 + random.random() * 0.14
+                                if _pl in ("vending_machine", "postbox")
+                                else 0.22 + random.random() * 0.14)
+                    _climb = _marc_quad(_climb_u, _climb_v)
+                    try:
+                        from world import object_deployer as _od_near
+                        _od_near._marc_above_near_xy = (
+                            _bl[0] - _tl[0], _bl[1] - _tl[1])
+                    except Exception:
+                        pass
+                    if _lm_i is not None and _lm_i < len(lm_pos):
+                        lm_pos[_lm_i] = list(_climb)
+                    if (_climber_i is not None
+                            and _climber_i < len(obj_pos)):
+                        obj_pos[_climber_i] = list(lm_pos[_lm_i])
+                    for _i in range(len(lm_pos)):
+                        if _i == _lm_i:
+                            continue
+                        _p = list(_climb)
+                        for _ in range(8):
+                            _u = 0.30 + random.random() * 0.40
+                            _v = 0.16 + random.random() * 0.22
+                            _cand = _marc_quad(_u, _v)
+                            _dx = _cand[0] - _climb[0]
+                            _dy = _cand[1] - _climb[1]
+                            if (_dx * _dx + _dy * _dy) >= 4.0:
+                                _p = _cand
+                                break
+                        lm_pos[_i] = _p
+                    _oi = 0
+                    for _spec in objects or []:
+                        _n = max(1, int(_spec.get("count", 1) or 1))
+                        for _ in range(_n):
+                            if (_oi < len(obj_pos)
+                                    and _oi != _climber_i):
+                                _p = list(obj_pos[_oi])
+                                for _ in range(8):
+                                    _u = 0.30 + random.random() * 0.40
+                                    _v = 0.16 + random.random() * 0.22
+                                    _cand = _marc_quad(_u, _v)
+                                    _dx = _cand[0] - _climb[0]
+                                    _dy = _cand[1] - _climb[1]
+                                    if (_dx * _dx + _dy * _dy) >= 4.0:
+                                        _p = _cand
+                                        break
+                                obj_pos[_oi] = _p
+                            _oi += 1
+                except Exception:
+                    if (_lm_i is not None and _climber_i is not None
+                            and _lm_i < len(lm_pos)
+                            and _climber_i < len(obj_pos)):
+                        obj_pos[_climber_i] = list(lm_pos[_lm_i])
+            elif (_lm_i is not None and _climber_i is not None
+                    and _lm_i < len(lm_pos)
+                    and _climber_i < len(obj_pos)):
+                obj_pos[_climber_i] = list(lm_pos[_lm_i])
+'''
+
+NEW_POSITIONS_V4 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
+        lm_pos = positions[:n_lm]
+        obj_pos = positions[n_lm:]
+        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            import re as _re_pos
+            _pl = ""
+            _climber_i = None
+            _obj_i = 0
+            for _spec in objects or []:
+                _n = max(1, int(_spec.get("count", 1) or 1))
+                _opl = (_spec.get("placement") or {})
+                if _climber_i is None and _opl.get("above"):
+                    _climber_i = _obj_i
+                    _pl = str(_opl.get("on_landmark_type") or "")
+                _obj_i += _n
+            _lm_i = None
+            if _pl:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t == _pl:
+                        _lm_i = _i
+                        break
+            if _lm_i is None:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t not in ("bench", "picnic_table"):
+                        _lm_i = _i
+                        break
+            if isinstance(area, dict):
+                try:
+                    _tl = list(area["top_left"])
+                    _tr = list(area["top_right"])
+                    _br = list(area["bottom_right"])
+                    _bl = list(area["bottom_left"])
+                    def _marc_quad(_u, _v):
+                        _bot = [(1.0 - _u) * _bl[_k] + _u * _br[_k]
+                                for _k in range(3)]
+                        _top = [(1.0 - _u) * _tl[_k] + _u * _tr[_k]
+                                for _k in range(3)]
+                        return [(1.0 - _v) * _bot[_k] + _v * _top[_k]
+                                for _k in range(3)]
+                    _climb_u = 0.24 + random.random() * 0.52
+                    _climb_v = (0.08 + random.random() * 0.16
+                                if _pl in ("vending_machine", "postbox")
+                                else 0.12 + random.random() * 0.18)
+                    _climb = _marc_quad(_climb_u, _climb_v)
+                    try:
+                        from world import object_deployer as _od_near
+                        _od_near._marc_above_near_xy = (
+                            _bl[0] - _tl[0], _bl[1] - _tl[1])
+                    except Exception:
+                        pass
+                    if _lm_i is not None and _lm_i < len(lm_pos):
+                        lm_pos[_lm_i] = list(_climb)
+                    if (_climber_i is not None
+                            and _climber_i < len(obj_pos)):
+                        obj_pos[_climber_i] = list(lm_pos[_lm_i])
+                    for _i in range(len(lm_pos)):
+                        if _i == _lm_i:
+                            continue
+                        _p = list(_climb)
+                        for _ in range(10):
+                            _u = random.random() * 1.05 - 0.025
+                            _v = 0.04 + random.random() * 0.66
+                            _cand = _marc_quad(_u, _v)
+                            _dx = _cand[0] - _climb[0]
+                            _dy = _cand[1] - _climb[1]
+                            if (_dx * _dx + _dy * _dy) >= 9.0:
+                                _p = _cand
+                                break
+                        lm_pos[_i] = _p
+                    _oi = 0
+                    for _spec in objects or []:
+                        _n = max(1, int(_spec.get("count", 1) or 1))
+                        for _ in range(_n):
+                            if (_oi < len(obj_pos)
+                                    and _oi != _climber_i):
+                                _p = list(obj_pos[_oi])
+                                for _ in range(10):
+                                    _u = random.random() * 1.20 - 0.10
+                                    _v = random.random() * 0.90
+                                    _cand = _marc_quad(_u, _v)
+                                    _dx = _cand[0] - _climb[0]
+                                    _dy = _cand[1] - _climb[1]
+                                    if (_dx * _dx + _dy * _dy) >= 2.25:
+                                        _p = _cand
+                                        break
+                                obj_pos[_oi] = _p
+                            _oi += 1
+                except Exception:
+                    if (_lm_i is not None and _climber_i is not None
+                            and _lm_i < len(lm_pos)
+                            and _climber_i < len(obj_pos)):
+                        obj_pos[_climber_i] = list(lm_pos[_lm_i])
+            elif (_lm_i is not None and _climber_i is not None
+                    and _lm_i < len(lm_pos)
+                    and _climber_i < len(obj_pos)):
+                obj_pos[_climber_i] = list(lm_pos[_lm_i])
+'''
+
+NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_obj)
+        lm_pos = positions[:n_lm]
+        obj_pos = positions[n_lm:]
+        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
+                "0", "false", "no", "off", ""):
+            import re as _re_pos
+            _pl = ""
+            _climber_i = None
+            _obj_i = 0
+            for _spec in objects or []:
+                _n = max(1, int(_spec.get("count", 1) or 1))
+                _opl = (_spec.get("placement") or {})
+                if _climber_i is None and _opl.get("above"):
+                    _climber_i = _obj_i
+                    _pl = str(_opl.get("on_landmark_type") or "")
+                _obj_i += _n
+            _lm_i = None
+            if _pl:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t == _pl:
+                        _lm_i = _i
+                        break
+            if _lm_i is None:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t not in ("bench", "picnic_table"):
+                        _lm_i = _i
+                        break
+            if isinstance(area, dict):
+                try:
+                    _tl = list(area["top_left"])
+                    _tr = list(area["top_right"])
+                    _br = list(area["bottom_right"])
+                    _bl = list(area["bottom_left"])
+                    def _marc_quad(_u, _v):
+                        _bot = [(1.0 - _u) * _bl[_k] + _u * _br[_k]
+                                for _k in range(3)]
+                        _top = [(1.0 - _u) * _tl[_k] + _u * _tr[_k]
+                                for _k in range(3)]
+                        return [(1.0 - _v) * _bot[_k] + _v * _top[_k]
+                                for _k in range(3)]
+                    # Tall climb targets: nearer-mid so the roof stays below
+                    # the image top. Helper also frames the roof in camera.
+                    _climb_u = 0.30 + random.random() * 0.40
+                    if _pl == "vending_machine":
+                        # Nearer fallback if camera framing misses. Helper
+                        # then parks the roof on a mid-image downward ray.
+                        _climb_v = 0.20 + random.random() * 0.12
+                    elif _pl == "postbox":
+                        _climb_v = 0.22 + random.random() * 0.16
+                    else:
+                        _climb_v = 0.16 + random.random() * 0.18
+                    _climb = _marc_quad(_climb_u, _climb_v)
+                    try:
+                        from world import object_deployer as _od_near
+                        _od_near._marc_above_near_xy = (
+                            _bl[0] - _tl[0], _bl[1] - _tl[1])
+                    except Exception:
+                        pass
+                    if _lm_i is not None and _lm_i < len(lm_pos):
+                        lm_pos[_lm_i] = list(_climb)
+                    if (_climber_i is not None
+                            and _climber_i < len(obj_pos)):
+                        obj_pos[_climber_i] = list(lm_pos[_lm_i])
+                    _extra_k = 0
+                    for _i in range(len(lm_pos)):
+                        if _i == _lm_i:
+                            continue
+                        _u = (0.08 + random.random() * 0.10
+                              if _extra_k % 2 == 0
+                              else 0.82 + random.random() * 0.10)
+                        _v = 0.10 + random.random() * 0.55
+                        lm_pos[_i] = _marc_quad(_u, _v)
+                        _extra_k += 1
+                    _oi = 0
+                    _extra_k = 0
+                    for _spec in objects or []:
+                        _n = max(1, int(_spec.get("count", 1) or 1))
+                        for _ in range(_n):
+                            if (_oi < len(obj_pos)
+                                    and _oi != _climber_i):
+                                _u = (0.06 + 0.16 * ((_extra_k // 2) % 3)
+                                      + random.random() * 0.08
+                                      if _extra_k % 2 == 0
+                                      else 0.70 + 0.16 * ((_extra_k // 2) % 3)
+                                      + random.random() * 0.08)
+                                _v = 0.06 + random.random() * 0.70
+                                obj_pos[_oi] = _marc_quad(_u, _v)
+                                _extra_k += 1
+                            _oi += 1
+                except Exception:
+                    if (_lm_i is not None and _climber_i is not None
+                            and _lm_i < len(lm_pos)
+                            and _climber_i < len(obj_pos)):
+                        obj_pos[_climber_i] = list(lm_pos[_lm_i])
+            elif (_lm_i is not None and _climber_i is not None
+                    and _lm_i < len(lm_pos)
+                    and _climber_i < len(obj_pos)):
+                obj_pos[_climber_i] = list(lm_pos[_lm_i])
 '''
 
 OLD_DEPLOY_LANDMARKS = '''        deploy_landmarks(mission_id, landmarks, area, configurations,
@@ -730,6 +1332,62 @@ def visible_above_stack(person, lm, image_height=0.0, top_margin=8.0):
     return True
 
 
+def vending_glass_sign(local_pts, axis):
+    """+1 if the detailed face (glass/doors) is toward local +axis, else -1.
+
+    Independent of camera and of world yaw: the door panel has more mesh
+    than the flat back, so vertex count on each end of the short local
+    axis is a stable glass lock.
+    """
+    if not local_pts:
+        return 1
+    ax = 0 if int(axis) <= 0 else 1
+    vals = [float(p[ax]) for p in local_pts]
+    mid = 0.5 * (min(vals) + max(vals))
+    pos = sum(1 for v in vals if v >= mid)
+    neg = len(vals) - pos
+    return 1 if pos >= neg else -1
+
+
+def mesh_top_patch(points, thickness=0.04):
+    """Centroid and XY bounds of the highest mesh vertices (the real top face)."""
+    if not points:
+        return None
+    top_z = max(float(p[2]) for p in points)
+    patch = [p for p in points if float(p[2]) >= top_z - float(thickness)]
+    if not patch:
+        patch = list(points)
+    xs = [float(p[0]) for p in patch]
+    ys = [float(p[1]) for p in patch]
+    cx = sum(xs) / float(len(xs))
+    cy = sum(ys) / float(len(ys))
+    return (cx, cy, top_z), (min(xs), min(ys)), (max(xs), max(ys)), patch
+
+
+def above_roof_contact_ok(foot_xyz, roof_lo, roof_hi, body_lo, body_hi, top_z,
+                          max_gap=0.06):
+    """True when support sits on the roof patch, not the landmark's side AABB."""
+    fx, fy, fz = (float(foot_xyz[0]), float(foot_xyz[1]), float(foot_xyz[2]))
+    x0, y0 = float(roof_lo[0]), float(roof_lo[1])
+    x1, y1 = float(roof_hi[0]), float(roof_hi[1])
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    pad_x = max(0.02, 0.12 * (x1 - x0))
+    pad_y = max(0.02, 0.12 * (y1 - y0))
+    if not (x0 - pad_x <= fx <= x1 + pad_x and y0 - pad_y <= fy <= y1 + pad_y):
+        return False
+    z0, z1 = float(body_lo[2]), float(body_hi[2])
+    height = z1 - z0
+    if height < 0.12:
+        return False
+    if (fz - z0) < 0.50 * height:
+        return False
+    gap = fz - float(top_z)
+    return -0.02 <= gap <= float(max_gap)
+
+
 def above_contact_ok(foot_xyz, lm_lo, lm_hi, top_z, max_gap=0.06):
     """True when support is on the landmark top and touching it, not beside/hovering."""
     fx, fy, fz = (float(foot_xyz[0]), float(foot_xyz[1]), float(foot_xyz[2]))
@@ -755,7 +1413,7 @@ def above_contact_ok(foot_xyz, lm_lo, lm_hi, top_z, max_gap=0.06):
 ABOVE_HELPER = r'''
 
 def _marc_place_above_people(mission_id, objects, configurations=None):
-    """[marc-patch] _marc_above_construct: posed joints on raycast top (_marc_above_surface_contact)."""
+    """[marc-patch] _marc_above_aabb_stack: person on roof (_marc_above_freeze, _marc_above_always_on_top, _marc_above_joint_seat, _marc_above_ray_roof, _marc_above_sit_sink, _marc_above_sit_sink_70, _marc_above_sit_sink_short, _marc_above_vend_drape, _marc_above_vend_drape_lip, _marc_above_trash_raise, _marc_above_hydrant_crouch, _marc_above_trash_crouch, _marc_above_vend_farther, _marc_above_vend_farther2, _marc_above_vend_farther3, _marc_above_vend_farther4, _marc_above_vend_not_too_far, _marc_above_vend_closer, _marc_above_vend_sit_yaw, _marc_above_vend_glass_drape, _marc_above_vend_sit_fix, _marc_above_vend_sit_nudge, _marc_above_vend_sit_unraise, _marc_above_vend_lip_fwd, _marc_above_vend_lip_fwd2, _marc_above_vend_lip_fwd3, _marc_above_vend_lip_back, _marc_above_vend_prof, _marc_above_vend_prof2, _marc_above_vend_prof3, _marc_above_vend_prof4, _marc_above_vend_prof5, _marc_above_vend_prof6, _marc_above_vend_female, _marc_above_vend_female2, _marc_above_vend_female3, _marc_above_vend_female4, _marc_above_vend_female5, _marc_above_vend_female6, _marc_above_vend_female7, _marc_above_vend_male, _marc_above_vend_male2, _marc_above_vend_male3, _marc_above_vend_male4, _marc_above_vend_male5, _marc_above_vend_weight, _marc_above_vend_weight2, _marc_above_vend_weight3, _marc_above_vend_weight4, _marc_above_vend_weight5, _marc_above_no_closeup, _marc_above_mid_field, _marc_above_roof_in_view, _marc_above_vend_abs_frame, _marc_above_vend_leg_yaw, _marc_above_camera_frame, _marc_above_vend_mesh_seat, _marc_above_vend_mid_dist, _marc_above_vend_on_roof, _marc_above_vend_male6, _marc_above_vend_prof7, _marc_above_vend_female8, _marc_above_vend_weight6, _marc_above_vend_roof_visible, _marc_above_vend_joint_z, _marc_above_vend_prof8, _marc_above_vend_mesh_xy, _marc_above_vend_female_yaw, _marc_above_vend_prof9, _marc_above_vend_weight_yaw, _marc_above_vend_female_fwd, _marc_above_vend_stand, _marc_above_vend_prof10, _marc_above_vend_prof_yaw, _marc_above_vend_sit_hip, _marc_above_vend_weight7, _marc_above_vend_weight8, _marc_above_vend_mesh_contact, _marc_above_crouch_authored, _marc_above_vend_mesh_contact2, _marc_above_vend_mesh_nudge, _marc_above_vend_mesh_snap, _marc_above_lock_contact, _marc_above_joint_only, _marc_above_vend_prof11, _marc_above_vend_slot, _marc_above_vend_female9, _marc_above_vend_prof12)."""
     jobs = []
     for spec in objects or []:
         pl = spec.get("placement") or {}
@@ -770,6 +1428,11 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
     globals()["_marc_above_placed_n"] = 0
     globals()["_marc_above_target"] = jobs[0][1] if jobs else ""
     if not jobs:
+        print(
+            "[on-landmark-patch] above-mode ERROR: no climber jobs "
+            "(placement.above missing) TRAINER_PEOPLE_ABOVE=%s"
+            % __import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0")
+        )
         return
     try:
         import carb
@@ -797,6 +1460,90 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         t = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()
         return [float(t[0]), float(t[1]), float(t[2])]
 
+    def _camera_prim():
+        mid = str(mission_id or "")
+        nmid = _norm(mid)
+        parts = mid.split("_")
+        rig_tok = "_".join(parts[:2]) if len(parts) >= 2 else mid
+        letter = parts[-1].upper() if len(parts) >= 3 else ""
+        fallback = None
+        for prim in stage.Traverse():
+            if not prim.IsA(UsdGeom.Camera):
+                continue
+            try:
+                override = prim.GetAttribute("isaac:nameOverride").Get()
+            except Exception:
+                override = None
+            path = str(prim.GetPath())
+            blob = _norm(path)
+            if str(override or "") == mid or (nmid and nmid in blob):
+                return prim
+            if rig_tok and ("/%s/" % rig_tok) in path:
+                if (not letter) or (("Camera_%s" % letter) in path) or path.endswith("/Camera"):
+                    fallback = prim
+        return fallback
+
+    def _camera_xyz():
+        """World position of the CCTV camera for this mission."""
+        prim = _camera_prim()
+        if prim is not None:
+            try:
+                t = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
+                    Usd.TimeCode.Default()).ExtractTranslation()
+                return [float(t[0]), float(t[1]), float(t[2])]
+            except Exception:
+                pass
+        return None
+
+    def _frame_landmark(lm, roof_z=None, typ=""):
+        """Put the landmark ROOF on a camera ray so it stays in view."""
+        rng = _world_range(lm)
+        cam = _camera_prim()
+        xyz = _world_xyz(lm)
+        if rng is None or cam is None or xyz is None:
+            return rng
+        lo, hi = rng
+        try:
+            usd_cam = UsdGeom.Camera(cam)
+            focal = float(usd_cam.GetFocalLengthAttr().Get() or 0.0)
+            h_ap = float(usd_cam.GetHorizontalApertureAttr().Get() or 0.0)
+            v_ap = float(usd_cam.GetVerticalApertureAttr().Get() or 0.0)
+            cam_xf = UsdGeom.Xformable(cam).ComputeLocalToWorldTransform(
+                Usd.TimeCode.Default())
+            cam_t = cam_xf.ExtractTranslation()
+            if focal <= 0.0 or h_ap <= 0.0 or v_ap <= 0.0:
+                return rng
+            parity = sum(ord(ch) for ch in str(mission_id)) % 2
+            u = 0.40 if parity == 0 else 0.60
+            # _marc_above_vend_roof_visible: these CCTVs sit ~1m above a
+            # vending roof. A 6m XY push parks the roof at y0=0 and crops
+            # the sitter. Close-ups are required for a visible stack.
+            v = 0.50 if typ == "vending_machine" else 0.55
+            ray_local = Gf.Vec3d(
+                (2.0 * u - 1.0) * 0.5 * h_ap,
+                (1.0 - 2.0 * v) * 0.5 * v_ap,
+                -focal,
+            )
+            ray = cam_xf.TransformDir(ray_local)
+            if abs(float(ray[2])) < 1e-6:
+                return rng
+            plane_z = float(roof_z) if roof_z is not None else float(hi[2])
+            t = (plane_z - float(cam_t[2])) / float(ray[2])
+            if t <= 0.0:
+                return rng
+            want_x = float(cam_t[0]) + t * float(ray[0])
+            want_y = float(cam_t[1]) + t * float(ray[1])
+            center_x = 0.5 * (lo[0] + hi[0])
+            center_y = 0.5 * (lo[1] + hi[1])
+            _set_xyz(lm, [
+                xyz[0] + (want_x - center_x),
+                xyz[1] + (want_y - center_y),
+                xyz[2],
+            ])
+            return _world_range(lm)
+        except Exception:
+            return rng
+
     bounds = UsdGeom.BBoxCache(
         Usd.TimeCode.Default(),
         [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
@@ -817,8 +1564,60 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         except Exception:
             return None
 
+    def _marc_freeze_person(prim):
+        """Kinematic hold. Do not convex-hull the posed mesh: that hull is
+        mostly empty space and PhysX bounces climbers off the cabinet.
+        _marc_above_lock_contact
+        """
+        try:
+            from pxr import UsdPhysics, PhysxSchema, Gf
+            for p in Usd.PrimRange(prim):
+                if p.HasAPI(UsdPhysics.RigidBodyAPI):
+                    try:
+                        rb = UsdPhysics.RigidBodyAPI(p)
+                        rb.CreateKinematicEnabledAttr(True)
+                        rb.CreateRigidBodyEnabledAttr(True)
+                        try:
+                            rb.CreateVelocityAttr().Set(Gf.Vec3f(0, 0, 0))
+                            rb.CreateAngularVelocityAttr().Set(
+                                Gf.Vec3f(0, 0, 0))
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                if p.HasAPI(PhysxSchema.PhysxRigidBodyAPI):
+                    try:
+                        PhysxSchema.PhysxRigidBodyAPI(p).CreateDisableGravityAttr(True)
+                    except Exception:
+                        pass
+                    try:
+                        p.RemoveAPI(PhysxSchema.PhysxRigidBodyAPI)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def _set_xyz(prim, xyz):
         path = str(prim.GetPath())
+        try:
+            from pxr import UsdPhysics, PhysxSchema, Usd
+            for p in Usd.PrimRange(prim):
+                if p.HasAPI(UsdPhysics.RigidBodyAPI):
+                    try:
+                        UsdPhysics.RigidBodyAPI(p).CreateKinematicEnabledAttr(True)
+                    except Exception:
+                        pass
+                    try:
+                        UsdPhysics.RigidBodyAPI(p).CreateRigidBodyEnabledAttr(True)
+                    except Exception:
+                        pass
+                if p.HasAPI(PhysxSchema.PhysxRigidBodyAPI):
+                    try:
+                        PhysxSchema.PhysxRigidBodyAPI(p).CreateDisableGravityAttr(True)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         setter = globals().get("_set_prim_translate")
         if callable(setter):
             try:
@@ -887,120 +1686,604 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 return None
             path = str(hit.get("rigidBody") or hit.get("collision") or "")
             hz = float(hit["position"][2])
+            if "/people/" in path or path.startswith("/world/people"):
+                origin_z = hz - 0.01
+                continue
             if path.startswith(lm_path) or (lm_path in path):
                 return hz
             origin_z = hz - 0.01
         return None
 
+    def _mesh_world_points(root):
+        pts = []
+        xfc = UsdGeom.XformCache()
+        for prim in Usd.PrimRange(root):
+            if not prim.IsA(UsdGeom.Mesh):
+                continue
+            mesh = UsdGeom.Mesh(prim)
+            local = mesh.GetPointsAttr().Get()
+            if not local:
+                continue
+            xf = xfc.GetLocalToWorldTransform(prim)
+            for p in local:
+                wp = xf.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2])))
+                pts.append((float(wp[0]), float(wp[1]), float(wp[2])))
+        return pts
+
     def _top_candidates(lm):
+        # _marc_above_ray_roof: roof Z is a PhysX hit on THIS landmark.
+        # Mesh-vertex max Z launched sitting people into the sky; AABB /
+        # 2D overlap is not a placement oracle (perspective mismatch).
         rng = _world_range(lm)
-        if rng is None:
+        xyz = _world_xyz(lm)
+        if rng is None and xyz is None:
             return None
-        lo, hi = rng
-        path = str(lm.GetPath())
-        xs = [0.2, 0.35, 0.5, 0.65, 0.8]
-        ys = [0.2, 0.35, 0.5, 0.65, 0.8]
+        if rng is None:
+            body_lo = [xyz[0] - 0.4, xyz[1] - 0.4, xyz[2]]
+            body_hi = [xyz[0] + 0.4, xyz[1] + 0.4, xyz[2] + 2.0]
+        else:
+            body_lo, body_hi = rng
+        cx = 0.5 * (body_lo[0] + body_hi[0])
+        cy = 0.5 * (body_lo[1] + body_hi[1])
+        start_z = float(body_hi[2]) + 1.2
         hits = []
-        start_z = hi[2] + 0.8
-        for u in xs:
-            for v in ys:
-                x = lo[0] + u * (hi[0] - lo[0])
-                y = lo[1] + v * (hi[1] - lo[1])
-                hz = _ray_landmark_z(path, x, y, start_z)
+        for u in (0.30, 0.40, 0.50, 0.60, 0.70):
+            for v in (0.30, 0.40, 0.50, 0.60, 0.70):
+                x = body_lo[0] + u * (body_hi[0] - body_lo[0])
+                y = body_lo[1] + v * (body_hi[1] - body_lo[1])
+                hz = _ray_landmark_z(str(lm.GetPath()), x, y, start_z)
                 if hz is not None:
                     hits.append((x, y, hz))
         if hits:
             top_z = max(h[2] for h in hits)
-            patch = [h for h in hits if h[2] >= top_z - 0.04]
+            patch = [h for h in hits if h[2] >= top_z - 0.08]
             cx = sum(h[0] for h in patch) / float(len(patch))
             cy = sum(h[1] for h in patch) / float(len(patch))
-            ordered = [(cx, cy, top_z)]
-            rest = sorted(
-                patch, key=lambda h: (h[0] - cx) ** 2 + (h[1] - cy) ** 2)
-            for h in rest:
-                if abs(h[0] - cx) > 0.01 or abs(h[1] - cy) > 0.01:
-                    ordered.append(h)
-            return ordered, lo, hi
-        mid = (
-            0.5 * (lo[0] + hi[0]),
-            0.5 * (lo[1] + hi[1]),
-            hi[2],
-        )
-        return [mid], lo, hi
+            roof_lo = (min(h[0] for h in patch), min(h[1] for h in patch))
+            roof_hi = (max(h[0] for h in patch), max(h[1] for h in patch))
+            return [(cx, cy, top_z)], roof_lo, roof_hi, body_lo, body_hi
+        mid = (cx, cy, float(body_hi[2]))
+        roof_lo = (body_lo[0], body_lo[1])
+        roof_hi = (body_hi[0], body_hi[1])
+        return [mid], roof_lo, roof_hi, body_lo, body_hi
 
-    def _seat_at(person, cx, cy, top_z, clearance):
+    def _mesh_seat_z(person, bx, by, joint_z):
+        # _marc_above_vend_mesh_seat: visual butt, not joint cluster.
+        # Male mesh hangs below the pelvis joints; professor sits high.
+        pts = _mesh_world_points(person)
+        if not pts:
+            return None
+        rad2 = 0.18 * 0.18
+        near = [p[2] for p in pts
+                if (p[0] - bx) ** 2 + (p[1] - by) ** 2 <= rad2]
+        if len(near) < 12:
+            rad2 = 0.28 * 0.28
+            near = [p[2] for p in pts
+                    if (p[0] - bx) ** 2 + (p[1] - by) ** 2 <= rad2]
+        if not near:
+            return None
+        lo = float(joint_z) - 0.18
+        hi = float(joint_z) + 0.08
+        band = [z for z in near if lo <= z <= hi]
+        if not band:
+            band = near
+        return min(band)
+
+    def _mesh_hip_xy(person, bx, by, bz):
+        # _marc_above_vend_mesh_xy: visual hips, not joint-butt. Professor
+        # and female clips park the mesh a metre beside the skeleton.
+        pts = _mesh_world_points(person)
+        if not pts:
+            return None
+        hip = []
+        rad2 = 0.32 * 0.32
+        lo = float(bz) - 0.12
+        hi = float(bz) + 0.32
+        for p in pts:
+            if (p[0] - bx) ** 2 + (p[1] - by) ** 2 > rad2:
+                continue
+            if lo <= p[2] <= hi:
+                hip.append(p)
+        if len(hip) < 16:
+            # _marc_above_vend_prof10 / _marc_above_vend_sit_hip:
+            # professor visual is ~1m from the joints. Widen XY at the
+            # same hip Z. Do not average the whole sitting mesh:
+            # student_weight hanging legs pull the centroid off the roof.
+            rad2 = 1.20 * 1.20
+            hip = []
+            for p in pts:
+                if (p[0] - bx) ** 2 + (p[1] - by) ** 2 > rad2:
+                    continue
+                if lo <= p[2] <= hi:
+                    hip.append(p)
+        if not hip:
+            return None
+        n = float(len(hip))
+        return (sum(p[0] for p in hip) / n, sum(p[1] for p in hip) / n)
+
+    def _vend_mesh_contact_on():
+        # TRAINER_PEOPLE_VEND_MESH_CONTACT is ignored.
+        # _marc_above_joint_only: mesh-vert snap launched people into the
+        # sky. Joint seat + per-character yaw/sink/lip only.
+        return False
+
+    def _mesh_on_roof(person, cx, cy, roof_lo, roof_hi):
+        pts = _mesh_world_points(person)
+        if not pts:
+            return [], []
+        pad = 0.06
+        x0 = min(float(roof_lo[0]), float(roof_hi[0])) - pad
+        x1 = max(float(roof_lo[0]), float(roof_hi[0])) + pad
+        y0 = min(float(roof_lo[1]), float(roof_hi[1])) - pad
+        y1 = max(float(roof_lo[1]), float(roof_hi[1])) + pad
+        if (x1 - x0) < 0.25:
+            x0, x1 = float(cx) - 0.32, float(cx) + 0.32
+        if (y1 - y0) < 0.25:
+            y0, y1 = float(cy) - 0.32, float(cy) + 0.32
+        over = [p for p in pts
+                if x0 <= p[0] <= x1 and y0 <= p[1] <= y1]
+        if len(over) < 8:
+            rad2 = 0.38 * 0.38
+            over = [p for p in pts
+                    if (p[0] - float(cx)) ** 2 + (p[1] - float(cy)) ** 2 <= rad2]
+        return over, pts
+
+    def _mesh_nudge_xy(verts):
+        # _marc_above_vend_mesh_nudge: mid-height body over the roof.
+        # A dangling foot must not pull XY.
+        if not verts:
+            return None
+        zs = [p[2] for p in verts]
+        zlo, zhi = min(zs), max(zs)
+        span = max(zhi - zlo, 0.01)
+        lo_b = zlo + 0.28 * span
+        hi_b = zlo + 0.62 * span
+        band = [p for p in verts if lo_b <= p[2] <= hi_b] or list(verts)
+        n = float(len(band))
+        return (sum(p[0] for p in band) / n, sum(p[1] for p in band) / n)
+
+    def _mesh_snap_z(verts, all_pts, mode="seat"):
+        # _marc_above_vend_mesh_snap: drop until hips/butt meet the roof.
+        # Lowest-on-roof is often a grazing foot; that parked people
+        # "seated" on one toe.
+        if mode == "feet":
+            src = verts or all_pts
+            if not src:
+                return None
+            zmin = min(p[2] for p in src)
+            cluster = [p for p in src if p[2] <= zmin + 0.05]
+            return sum(p[2] for p in cluster) / float(len(cluster))
+        src = verts or []
+        span = 0.0
+        if src:
+            zs = [p[2] for p in src]
+            span = max(zs) - min(zs)
+        if (not src) or span < 0.35:
+            # Only a foot/hand is on the roof footprint. Use the visual
+            # hip band of the whole posed mesh so we keep lowering.
+            src = all_pts or src
+            if not src:
+                return None
+            zs = [p[2] for p in src]
+            zlo, zhi = min(zs), max(zs)
+            sp = max(zhi - zlo, 0.01)
+            hip = [p for p in src
+                   if (zlo + 0.28 * sp) <= p[2] <= (zlo + 0.55 * sp)]
+            src = hip or src
+        zs = [p[2] for p in src]
+        zlo, zhi = min(zs), max(zs)
+        cut = zlo + 0.35 * max(zhi - zlo, 0.01)
+        body = [p for p in src if p[2] >= cut]
+        if len(body) < 8:
+            body = list(src)
+        bz = min(p[2] for p in body)
+        layer = [p for p in body if p[2] <= bz + 0.08]
+        return sum(p[2] for p in layer) / float(len(layer))
+
+    def _mesh_contact(person, cx, cy, top_z, roof_lo, roof_hi, mode="seat"):
+        # _marc_above_vend_mesh_contact / _marc_above_vend_mesh_contact2:
+        # posed mesh vs roof, not bind AABB. Body seat, not first foot.
+        verts, all_pts = _mesh_on_roof(person, cx, cy, roof_lo, roof_hi)
+        nxy = _mesh_nudge_xy(verts) if verts else None
+        mz = _mesh_snap_z(verts, all_pts, mode)
+        if mz is None:
+            return None
+        if nxy is None:
+            nxy = (float(cx), float(cy))
+        return [float(nxy[0]), float(nxy[1]), float(mz)]
+
+    def _seat_at(person, cx, cy, top_z, clearance, xy_from="support",
+                 roof_lo=None, roof_hi=None, mesh_z=False, mesh_snap="seat"):
         person_xyz = _world_xyz(person)
         if person_xyz is None:
             return None
         joints = _posed_joints(person)
         support = _support_from_joints(joints)
         if support is None:
-            rng = _world_range(person)
-            if rng is None:
-                return None
-            p_lo, p_hi = rng
-            support = [
-                0.5 * (p_lo[0] + p_hi[0]),
-                0.5 * (p_lo[1] + p_hi[1]),
-                p_lo[2],
-            ]
+            return None
+        ax, ay = float(support[0]), float(support[1])
+        if xy_from == "butt" and joints:
+            support = _butt_from_joints(joints) or support
+            ax, ay = float(support[0]), float(support[1])
+        elif xy_from == "centroid" and joints:
+            ax = sum(p[0] for p in joints) / float(len(joints))
+            ay = sum(p[1] for p in joints) / float(len(joints))
         _set_xyz(person, [
-            person_xyz[0] + (cx - support[0]),
-            person_xyz[1] + (cy - support[1]),
+            person_xyz[0] + (cx - ax),
+            person_xyz[1] + (cy - ay),
             person_xyz[2],
         ])
-        if callable(_drop_to_support):
-            try:
-                _drop_to_support(
-                    stage, str(person.GetPath()),
-                    support_z=top_z, clearance=clearance)
-            except Exception:
-                person_xyz = _world_xyz(person)
-                joints = _posed_joints(person)
-                support = _support_from_joints(joints)
-                if person_xyz is None or support is None:
-                    return None
-                _set_xyz(person, [
-                    person_xyz[0], person_xyz[1],
-                    person_xyz[2] + (top_z + clearance - support[2]),
-                ])
-        else:
-            person_xyz = _world_xyz(person)
-            joints = _posed_joints(person)
-            support = _support_from_joints(joints)
-            if person_xyz is None or support is None:
-                return None
-            _set_xyz(person, [
-                person_xyz[0], person_xyz[1],
-                person_xyz[2] + (top_z + clearance - support[2]),
-            ])
+        person_xyz = _world_xyz(person)
         joints = _posed_joints(person)
         support = _support_from_joints(joints)
-        if support is None:
-            rng = _world_range(person)
-            if rng is None:
-                return None
-            support = [
-                0.5 * (rng[0][0] + rng[1][0]),
-                0.5 * (rng[0][1] + rng[1][1]),
-                rng[0][2],
-            ]
+        if xy_from == "butt" and joints:
+            support = _butt_from_joints(joints) or support
+        if person_xyz is None or support is None:
+            return None
+        # _marc_above_joint_only / _marc_above_vend_joint_z: posed joints
+        # only. Mesh min-Z, hip XY, and roof-vert contact all launched
+        # people into the sky or off the cabinet. Per-character sit
+        # extras are yaw / lip / sink, not vertex samples.
+        delta = (float(top_z) + float(clearance)) - float(support[2])
+        # Spawn already puts the root on the roof. A bogus roof (mesh max Z)
+        # used to add metres and park sitting people in the sky. Bring them
+        # down always; never climb more than a cabinet is tall.
+        if delta > 3.0:
+            print(
+                "[on-landmark-patch] above-mode: skip insane upward "
+                "dz=%.2f roof=%.3f support=%.3f"
+                % (delta, float(top_z), float(support[2]))
+            )
+        else:
+            _set_xyz(person, [
+                person_xyz[0], person_xyz[1],
+                person_xyz[2] + delta,
+            ])
+        joints = _posed_joints(person)
+        support = (
+            _butt_from_joints(joints) if xy_from == "butt"
+            else _support_from_joints(joints))
         return support
 
-    def _contact_ok(foot, lo, hi, top_z):
-        fx, fy, fz = foot
-        pad_x = max(0.02, 0.05 * (hi[0] - lo[0]))
-        pad_y = max(0.02, 0.05 * (hi[1] - lo[1]))
-        if not (lo[0] - pad_x <= fx <= hi[0] + pad_x
-                and lo[1] - pad_y <= fy <= hi[1] + pad_y):
+    def _butt_from_joints(pts):
+        # Sitting clips park the feet on the roof or hang them; either way
+        # the lowest joints are not the seat. Skip the hanging/foot layer
+        # and sit on the remaining lowest cluster (pelvis / thighs).
+        if not pts:
+            return None
+        min_z = min(p[2] for p in pts)
+        max_z = max(p[2] for p in pts)
+        skip = 0.40 * max(max_z - min_z, 0.01)
+        body = [p for p in pts if p[2] >= min_z + skip]
+        if len(body) < 3:
+            body = list(pts)
+        bz = min(p[2] for p in body)
+        layer = [p for p in body if p[2] <= bz + 0.10]
+        if not layer:
+            layer = body
+        return [
+            sum(p[0] for p in layer) / float(len(layer)),
+            sum(p[1] for p in layer) / float(len(layer)),
+            bz,
+        ]
+
+    def _yaw_person(prim, deg):
+        """Replace world yaw. Random spawn yaw must not leak through."""
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            return
+        q = Gf.Rotation(Gf.Vec3d(0, 0, 1), float(deg)).GetQuat()
+        ops = {op.GetOpName(): op for op in xf.GetOrderedXformOps()}
+        orient = ops.get("xformOp:orient")
+        if orient is None:
+            orient = xf.AddOrientOp()
+        try:
+            orient.Set(Gf.Quatf(q))
+        except Exception:
+            orient.Set(q)
+        ordered = []
+        if "xformOp:translate" in ops:
+            ordered.append(ops["xformOp:translate"])
+        ordered.append(orient)
+        if "xformOp:scale" in ops:
+            ordered.append(ops["xformOp:scale"])
+        if ordered:
+            xf.SetXformOpOrder(ordered)
+
+    def _feet_from_joints(pts):
+        if not pts:
+            return None
+        zs = [p[2] for p in pts]
+        span = max(max(zs) - min(zs), 0.01)
+        cut = min(zs) + 0.28 * span
+        feet = [p for p in pts if p[2] <= cut]
+        if len(feet) < 2:
+            feet = list(pts)
+        n = float(len(feet))
+        return [sum(p[0] for p in feet) / n, sum(p[1] for p in feet) / n]
+
+    def _yaw_legs_along(person, fx, fy, extra=0.0):
+        # Sitting clips do not share a bind-forward. Rotate so the posed
+        # feet hang toward glass, not toward a camera or a +90 guess.
+        _math = __import__("math")
+        want = _math.atan2(float(fy), float(fx))
+        best, best_dot = None, -1e9
+        for off in (0.0, 90.0, -90.0, 180.0):
+            deg = _math.degrees(want) + off
+            _yaw_person(person, deg)
+            joints = _posed_joints(person)
+            butt = _butt_from_joints(joints)
+            feet = _feet_from_joints(joints)
+            if not butt or not feet:
+                continue
+            dx = float(feet[0]) - float(butt[0])
+            dy = float(feet[1]) - float(butt[1])
+            n = (dx * dx + dy * dy) ** 0.5
+            if n < 1e-4:
+                continue
+            d = (dx / n) * float(fx) + (dy / n) * float(fy)
+            if d > best_dot:
+                best_dot, best = d, deg
+        if best is not None:
+            _yaw_person(person, best + float(extra))
+
+    def _vending_local_frame(lm, body_lo, body_hi):
+        xf = UsdGeom.Xformable(lm)
+        if not xf:
+            return None
+        m = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        xdir = m.TransformDir(Gf.Vec3d(1, 0, 0))
+        ydir = m.TransformDir(Gf.Vec3d(0, 1, 0))
+        ldx, ldy = 1.0, 1.0
+        lo = hi = None
+        try:
+            bound = UsdGeom.Imageable(lm).ComputeLocalBound(
+                Usd.TimeCode.Default(), "default")
+            rng = bound.GetRange()
+            lo, hi = rng.GetMin(), rng.GetMax()
+            ldx = abs(float(hi[0]) - float(lo[0]))
+            ldy = abs(float(hi[1]) - float(lo[1]))
+        except Exception:
+            lo = hi = None
+        if lo is None and body_lo is not None and body_hi is not None:
+            try:
+                inv = m.GetInverse()
+                xs, ys = [], []
+                for x in (body_lo[0], body_hi[0]):
+                    for y in (body_lo[1], body_hi[1]):
+                        for z in (body_lo[2], body_hi[2]):
+                            lp = inv.Transform(Gf.Vec3d(
+                                float(x), float(y), float(z)))
+                            xs.append(lp[0])
+                            ys.append(lp[1])
+                ldx = max(xs) - min(xs)
+                ldy = max(ys) - min(ys)
+                lo = [min(xs), min(ys), 0.0]
+                hi = [max(xs), max(ys), 0.0]
+            except Exception:
+                ldx = abs(float(body_hi[0]) - float(body_lo[0]))
+                ldy = abs(float(body_hi[1]) - float(body_lo[1]))
+        return m, xdir, ydir, ldx, ldy, lo, hi
+
+    def _vending_roof_xy(lm, body_lo, body_hi):
+        """Cabinet-local roof centre in world XY (not a world-AABB patch)."""
+        fr = _vending_local_frame(lm, body_lo, body_hi)
+        if fr is None:
+            return None
+        m, _xdir, _ydir, _ldx, _ldy, lo, hi = fr
+        if lo is None or hi is None:
+            return None
+        mid = m.Transform(Gf.Vec3d(
+            0.5 * (float(lo[0]) + float(hi[0])),
+            0.5 * (float(lo[1]) + float(hi[1])),
+            0.5 * (float(lo[2]) + float(hi[2])),
+        ))
+        return float(mid[0]), float(mid[1])
+
+    def _vend_slot_xy(ox, oy, fx, fy, half_front, half_side, slot, margin=0.10):
+        # _marc_above_vend_slot: glass-lip center or left/right corner.
+        # Depth stays on the roof (never past the cabinet face).
+        depth = max(0.06, float(half_front) - float(margin))
+        side = max(0.0, float(half_side) - float(margin))
+        lat = 0.0
+        sl = str(slot or "center").lower()
+        if sl == "left":
+            lat = side
+        elif sl == "right":
+            lat = -side
+        lx, ly = -float(fy), float(fx)
+        return (
+            float(ox) + depth * float(fx) + lat * lx,
+            float(oy) + depth * float(fy) + lat * ly,
+        )
+
+    def _vending_roof_clamp(lm, body_lo, body_hi, wx, wy, margin=0.10):
+        # Pull world XY onto the cabinet-local roof, inset so the butt
+        # cannot sit past a face. Female/professor clips hang off if we
+        # only clamp after a glass-forward that is already past the lip.
+        fr = _vending_local_frame(lm, body_lo, body_hi) if lm is not None else None
+        if fr is None:
+            return float(wx), float(wy)
+        m, _xd, _yd, _ldx, _ldy, lo, hi = fr
+        if lo is None or hi is None:
+            return float(wx), float(wy)
+        try:
+            inv = m.GetInverse()
+            zmid = 0.5 * (float(lo[2]) + float(hi[2]))
+            lp = inv.Transform(Gf.Vec3d(float(wx), float(wy), zmid))
+            dx = abs(float(hi[0]) - float(lo[0]))
+            dy = abs(float(hi[1]) - float(lo[1]))
+            mx = max(0.02, min(float(margin), max(0.02, 0.5 * dx - 0.02)))
+            my = max(0.02, min(float(margin), max(0.02, 0.5 * dy - 0.02)))
+            x = min(max(float(lp[0]), float(lo[0]) + mx), float(hi[0]) - mx)
+            y = min(max(float(lp[1]), float(lo[1]) + my), float(hi[1]) - my)
+            wp = m.Transform(Gf.Vec3d(x, y, float(lp[2])))
+            return float(wp[0]), float(wp[1])
+        except Exception:
+            return float(wx), float(wy)
+
+    def _on_vending_roof(lm, body_lo, body_hi, wx, wy, margin=0.06):
+        nx, ny = _vending_roof_clamp(
+            lm, body_lo, body_hi, wx, wy, margin)
+        return ((float(nx) - float(wx)) ** 2
+                + (float(ny) - float(wy)) ** 2) <= 0.03 * 0.03
+
+    def _vending_front_xy(lm, body_lo, body_hi):
+        """Glass-door outward WORLD XY, locked to the cabinet mesh.
+
+        Not the camera-facing panel, not a world AABB, not a random +X
+        sign that flips with landmark yaw.
+        """
+        def nrm2(dx, dy):
+            n = (float(dx) * float(dx) + float(dy) * float(dy)) ** 0.5
+            if n < 1e-4:
+                return None
+            return (float(dx) / n, float(dy) / n)
+
+        origin = _world_xyz(lm)
+        for p in Usd.PrimRange(lm):
+            blob = _norm(str(p.GetName() or ""))
+            if not any(t in blob for t in (
+                    "glass", "door", "display", "window", "front")):
+                continue
+            c = _world_xyz(p)
+            if origin is None or c is None:
+                continue
+            hit = nrm2(c[0] - origin[0], c[1] - origin[1])
+            if hit is not None:
+                pick = hit
+                break
+        else:
+            pick = None
+        fr = _vending_local_frame(lm, body_lo, body_hi)
+        if pick is None and fr is not None:
+            m, xdir, ydir, ldx, ldy, lo, hi = fr
+            local_pts = []
+            try:
+                inv = m.GetInverse()
+                for wp in _mesh_world_points(lm) or []:
+                    lp = inv.Transform(Gf.Vec3d(
+                        float(wp[0]), float(wp[1]), float(wp[2])))
+                    local_pts.append(
+                        (float(lp[0]), float(lp[1]), float(lp[2])))
+            except Exception:
+                local_pts = []
+            axis = 0 if ldx <= ldy else 1
+            base = nrm2(xdir[0], xdir[1]) if axis == 0 else nrm2(
+                ydir[0], ydir[1])
+            if base is None:
+                base = nrm2(xdir[0], xdir[1]) or nrm2(
+                    ydir[0], ydir[1]) or (1.0, 0.0)
+            if not local_pts:
+                sign = 1
+            else:
+                vals = [p[axis] for p in local_pts]
+                midv = 0.5 * (min(vals) + max(vals))
+                pos = sum(1 for v in vals if v >= midv)
+                sign = 1 if pos >= (len(vals) - pos) else -1
+            pick = (base[0] * sign, base[1] * sign)
+        if pick is None:
+            pick = (1.0, 0.0)
+        try:
+            flip = str(__import__("os").environ.get(
+                "TRAINER_PEOPLE_VEND_FRONT_FLIP", "") or "").strip().lower()
+        except Exception:
+            flip = ""
+        if flip in ("1", "true", "yes", "on"):
+            pick = (-pick[0], -pick[1])
+        return pick
+
+    def _drape_xy(cx, cy, typ, pose, body_lo, body_hi, lm=None, ch="",
+                 slot="lip"):
+        # Sitting on a vending: hips on the glass-side lip in *cabinet*
+        # local space so every CCTV sees the same physical pose.
+        if typ != "vending_machine" or "sitting" not in str(pose or ""):
+            return float(cx), float(cy)
+        fx, fy = _vending_front_xy(lm, body_lo, body_hi) if lm is not None else (1.0, 0.0)
+        try:
+            lip = float(__import__("os").environ.get(
+                "TRAINER_PEOPLE_VEND_LIP", "0.50") or "0.50")
+        except (TypeError, ValueError):
+            lip = 0.50
+        if "professor" in str(ch or "").lower():
+            try:
+                lip += float(__import__("os").environ.get(
+                    "TRAINER_PEOPLE_VEND_PROF_LIP", "0.0727") or "0.0727")
+            except (TypeError, ValueError):
+                lip += 0.0727
+        elif "female" in str(ch or "").lower():
+            try:
+                lip += float(__import__("os").environ.get(
+                    "TRAINER_PEOPLE_VEND_FEMALE_LIP", "0.0727") or "0.0727")
+            except (TypeError, ValueError):
+                lip += 0.0727
+        elif "weight" in str(ch or "").lower():
+            try:
+                lip += float(__import__("os").environ.get(
+                    "TRAINER_PEOPLE_VEND_WEIGHT_LIP", "0.0727") or "0.0727")
+            except (TypeError, ValueError):
+                lip += 0.0727
+        elif "male_student" in str(ch or "").lower():
+            try:
+                lip += float(__import__("os").environ.get(
+                    "TRAINER_PEOPLE_VEND_MALE_LIP", "0.0727") or "0.0727")
+            except (TypeError, ValueError):
+                lip += 0.0727
+        origin = _vending_roof_xy(lm, body_lo, body_hi) if lm is not None else None
+        ox, oy = origin if origin is not None else (float(cx), float(cy))
+        # _marc_above_vend_on_roof: keep the butt on the cabinet. Female
+        # / professor used to get half+0.04 past the face and sit in air.
+        half_front = 0.35
+        half_side = 0.35
+        if lm is not None:
+            fr = _vending_local_frame(lm, body_lo, body_hi)
+            if fr is not None:
+                _m, _xd, _yd, ldx, ldy, _lo, _hi = fr
+                half_front = 0.5 * min(float(ldx), float(ldy))
+                half_side = 0.5 * max(float(ldx), float(ldy))
+        _ch = str(ch or "").lower()
+        margin = 0.12 if ("female" in _ch or "professor" in _ch) else 0.08
+        sl = str(slot or "lip").lower()
+        if sl in ("center", "left", "right"):
+            # _marc_above_vend_female9 / _marc_above_vend_prof12: glass
+            # lip, center or a corner, then clamp onto the roof.
+            wx, wy = _vend_slot_xy(
+                ox, oy, fx, fy, half_front, half_side, sl, margin)
+            return _vending_roof_clamp(
+                lm, body_lo, body_hi, wx, wy, margin)
+        lip = min(float(lip), max(0.06, half_front - margin))
+        if "female" in _ch or "professor" in _ch or "weight" in _ch:
+            # Female sit is the good close-up: hips on the glass lip.
+            # student_weight without this extra sits on roof centre and
+            # drops out of tight CCTV crops. _marc_above_vend_weight7
+            if "female" in _ch:
+                _fwd_key = "TRAINER_PEOPLE_VEND_FEMALE_FWD"
+                _fwd_def = "0.16"
+            elif "professor" in _ch:
+                _fwd_key = "TRAINER_PEOPLE_VEND_PROF_FWD"
+                _fwd_def = "0.16"
+            else:
+                # _marc_above_vend_weight8: +7 cm glass-forward vs female.
+                _fwd_key = "TRAINER_PEOPLE_VEND_WEIGHT_FWD"
+                _fwd_def = "0.23"
+            try:
+                fwd = float(__import__("os").environ.get(
+                    _fwd_key, _fwd_def) or _fwd_def)
+            except (TypeError, ValueError):
+                fwd = float(_fwd_def)
+            lip = min(half_front - margin, float(lip) + fwd)
+        wx = float(ox) + lip * fx
+        wy = float(oy) + lip * fy
+        return _vending_roof_clamp(lm, body_lo, body_hi, wx, wy, margin)
+
+    def _contact_ok(foot, cx, cy, top_z, min_gap=-0.05, max_xy=0.55):
+        # Never fake Z: posed support vs raycast roof only.
+        fx, fy, fz = float(foot[0]), float(foot[1]), float(foot[2])
+        dist_xy = ((fx - float(cx)) ** 2 + (fy - float(cy)) ** 2) ** 0.5
+        if dist_xy > float(max_xy):
             return False
-        height = hi[2] - lo[2]
-        if height < 0.12:
-            return False
-        if (fz - lo[2]) < 0.50 * height:
-            return False
-        gap = fz - top_z
-        return -0.02 <= gap <= 0.06
+        gap = fz - float(top_z)
+        return float(min_gap) <= gap <= 0.15
 
     def _landmark_prims(typ):
         group = stage.GetPrimAtPath("/world/landmarks/%s" % mission_id)
@@ -1080,38 +2363,324 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         lms = _landmark_prims(typ)
         people = _person_prims(spec)
         if not lms or not people:
-            continue
-        lm, person = lms[0], people[0]
-        cand = _top_candidates(lm)
-        if cand is None:
-            continue
-        candidates, lo, hi = cand
-        seated = False
-        support = None
-        top_z = candidates[0][2]
-        for cx, cy, top_z in candidates:
-            support = _seat_at(person, cx, cy, top_z, clearance)
-            if support is not None and _contact_ok(support, lo, hi, top_z):
-                seated = True
-                break
-        if not seated:
             print(
-                "[on-landmark-patch] above-mode: rejected %s on %s "
-                "(support=%s top_z=%.3f after %d top-patch tries)"
-                % (str(person.GetPath()), str(lm.GetPath()),
-                   ("%.3f,%.3f,%.3f" % tuple(support)
-                    if support is not None else "-"),
-                   top_z, len(candidates))
+                "[on-landmark-patch] above-mode: missing prims type=%s "
+                "landmarks=%d people=%d spec=%s/%s"
+                % (typ, len(lms), len(people),
+                   str(spec.get("type") or ""),
+                   str(spec.get("character") or ""))
             )
             continue
+        lm, person = lms[0], people[0]
+        _lock = dict(globals().get("_marc_above_lock") or {})
+        _lk = str(person.GetPath())
+        _hold = _lock.get(_lk)
+        if _hold and _hold.get("person") and _hold.get("lm"):
+            # _marc_above_lock_contact: already seated this scene. Restore
+            # and freeze; do not re-snap (PhysX bounce + mesh min-Z).
+            _set_xyz(lm, _hold["lm"])
+            _set_xyz(person, _hold["person"])
+            _marc_freeze_person(person)
+            used_lms.add(str(lm.GetPath()))
+            used_people.add(_lk)
+            n += 1
+            continue
+        _marc_freeze_person(person)
+        tops = _top_candidates(lm)
+        if tops is None:
+            print(
+                "[on-landmark-patch] above-mode: no roof for %s"
+                % str(getattr(lm, "GetPath", lambda: "?")())
+            )
+            continue
+        ordered, roof_lo, roof_hi, body_lo, body_hi = tops
+        cx, cy, top_z = ordered[0]
+        _frame_landmark(lm, top_z, typ)
+        tops = _top_candidates(lm)
+        if tops is None:
+            continue
+        ordered, roof_lo, roof_hi, body_lo, body_hi = tops
+        cx, cy, top_z = ordered[0]
+        pose = str(spec.get("type") or "")
+        sink = 0.0
+        if "sitting" in pose:
+            if typ == "vending_machine":
+                try:
+                    sink = float(__import__("os").environ.get(
+                        "TRAINER_PEOPLE_VEND_BUTT_SINK", "0.12") or "0.12")
+                except (TypeError, ValueError):
+                    sink = 0.12
+                if "professor" in str(spec.get("character") or "").lower():
+                    try:
+                        sink += float(__import__("os").environ.get(
+                            "TRAINER_PEOPLE_VEND_PROF_SINK", "0.08") or "0.08")
+                    except (TypeError, ValueError):
+                        sink += 0.08
+                elif "female" in str(spec.get("character") or "").lower():
+                    try:
+                        sink += float(__import__("os").environ.get(
+                            "TRAINER_PEOPLE_VEND_FEMALE_SINK", "0.05") or "0.05")
+                    except (TypeError, ValueError):
+                        sink += 0.05
+                elif "weight" in str(spec.get("character") or "").lower():
+                    try:
+                        sink += float(__import__("os").environ.get(
+                            "TRAINER_PEOPLE_VEND_WEIGHT_SINK", "0.07") or "0.07")
+                    except (TypeError, ValueError):
+                        sink += 0.07
+                elif "male_student" in str(
+                        spec.get("character") or "").lower():
+                    try:
+                        sink += float(__import__("os").environ.get(
+                            "TRAINER_PEOPLE_VEND_MALE_SINK", "-0.01") or "-0.01")
+                    except (TypeError, ValueError):
+                        sink += -0.01
+            else:
+                try:
+                    sink = float(__import__("os").environ.get(
+                        "TRAINER_PEOPLE_SIT_SINK", "0.70") or "0.70")
+                except (TypeError, ValueError):
+                    sink = 0.70
+                if typ == "trash_can":
+                    try:
+                        sink += float(__import__("os").environ.get(
+                            "TRAINER_PEOPLE_SIT_SINK_TRASH", "0.15") or "0.15")
+                    except (TypeError, ValueError):
+                        sink += 0.15
+                elif typ in ("postbox", "hydrant"):
+                    try:
+                        sink += float(__import__("os").environ.get(
+                            "TRAINER_PEOPLE_SIT_SINK_SHORT", "0.35") or "0.35")
+                    except (TypeError, ValueError):
+                        sink += 0.35
+        elif "crouching" in pose and typ == "hydrant":
+            try:
+                sink = float(__import__("os").environ.get(
+                    "TRAINER_PEOPLE_CROUCH_SINK_HYDRANT", "0.18") or "0.18")
+            except (TypeError, ValueError):
+                sink = 0.18
+        if typ == "postbox" or (
+                typ == "vending_machine" and "sitting" not in pose):
+            clearance = max(float(clearance), 0.05)
+        if typ == "vending_machine" and "sitting" in pose:
+            # _marc_above_crouch_authored: sitting clips need the glass
+            # bind yaw. Crouch / person_walking / prone keep authored facing.
+            fx, fy = _vending_front_xy(lm, body_lo, body_hi)
+            extra = 0.0
+            _ch = str(spec.get("character") or "").lower()
+            if "female" in _ch or "weight" in _ch or "professor" in _ch:
+                # Female sit is good with 180. Professor/weight clips
+                # share that bind flip.
+                if "female" in _ch:
+                    _yaw_key = "TRAINER_PEOPLE_VEND_FEMALE_YAW"
+                elif "professor" in _ch:
+                    _yaw_key = "TRAINER_PEOPLE_VEND_PROF_YAW"
+                else:
+                    _yaw_key = "TRAINER_PEOPLE_VEND_WEIGHT_YAW"
+                try:
+                    extra = float(__import__("os").environ.get(
+                        _yaw_key, "180") or "180")
+                except (TypeError, ValueError):
+                    extra = 180.0
+            _yaw_legs_along(person, fx, fy, extra)
+            _marc_freeze_person(person)
+        _ch = str(spec.get("character") or "").lower()
+        _slots = ["lip"]
+        _sit_margin = 0.08
+        if typ == "vending_machine" and "sitting" in pose:
+            if "female" in _ch or "professor" in _ch:
+                _sit_margin = 0.12
+                try:
+                    _forced = str(__import__("os").environ.get(
+                        "TRAINER_PEOPLE_VEND_SLOT", "auto") or "auto"
+                    ).strip().lower()
+                except Exception:
+                    _forced = "auto"
+                if _forced in ("center", "left", "right"):
+                    _slots = [_forced]
+                else:
+                    _slots = ["center", "left", "right"]
+                    __import__("random").shuffle(_slots)
+        xy_from = "support"
+        if typ in ("hydrant", "trash_can") and "crouching" in pose and body_lo is not None:
+            xy_from = "centroid"
+        elif typ == "vending_machine" and "sitting" in pose:
+            xy_from = "butt"
+        seated = False
+        gap = 999.0
+        pcx = pcy = 0.0
+        support = None
+        sx, sy = float(cx), float(cy)
+        for _slot in _slots:
+            if typ in ("hydrant", "trash_can") and "crouching" in pose and body_lo is not None:
+                sx = 0.5 * (float(body_lo[0]) + float(body_hi[0]))
+                sy = 0.5 * (float(body_lo[1]) + float(body_hi[1]))
+            else:
+                sx, sy = _drape_xy(
+                    cx, cy, typ, pose, body_lo, body_hi, lm,
+                    spec.get("character"), slot=_slot)
+            support = _seat_at(
+                person, sx, sy, float(top_z), float(clearance) - sink,
+                xy_from=xy_from)
+            _marc_freeze_person(person)
+            if support is None:
+                support = _support_from_joints(_posed_joints(person))
+            if (typ == "vending_machine" and "sitting" in pose
+                    and support is not None):
+                nx, ny = _vending_roof_clamp(
+                    lm, body_lo, body_hi,
+                    float(support[0]), float(support[1]), _sit_margin)
+                pxyz = _world_xyz(person)
+                if pxyz is not None:
+                    _set_xyz(person, [
+                        float(pxyz[0]) + (nx - float(support[0])),
+                        float(pxyz[1]) + (ny - float(support[1])),
+                        float(pxyz[2]),
+                    ])
+                    _marc_freeze_person(person)
+                    joints = _posed_joints(person)
+                    support = (
+                        _butt_from_joints(joints) if xy_from == "butt"
+                        else _support_from_joints(joints)) or support
+            if "professor" in _ch:
+                # _marc_above_vend_prof11: a few cm away from the CCTV,
+                # then clamp so cam-away cannot walk them off the roof.
+                pxyz = _world_xyz(person)
+                cam = _camera_xyz()
+                if pxyz is not None:
+                    try:
+                        away = float(__import__("os").environ.get(
+                            "TRAINER_PEOPLE_VEND_PROF_CAM_AWAY", "0.04") or "0.04")
+                    except (TypeError, ValueError):
+                        away = 0.04
+                    nx = ny = 0.0
+                    if cam is not None and abs(away) > 1e-6:
+                        dx = float(pxyz[0]) - float(cam[0])
+                        dy = float(pxyz[1]) - float(cam[1])
+                        nrm = (dx * dx + dy * dy) ** 0.5
+                        if nrm > 1e-4:
+                            nx, ny = away * dx / nrm, away * dy / nrm
+                    _set_xyz(person, [
+                        float(pxyz[0]) + nx,
+                        float(pxyz[1]) + ny,
+                        float(pxyz[2]),
+                    ])
+                    _marc_freeze_person(person)
+                    if typ == "vending_machine" and "sitting" in pose:
+                        joints = _posed_joints(person)
+                        support = (
+                            _butt_from_joints(joints) if xy_from == "butt"
+                            else _support_from_joints(joints)) or support
+                        if support is not None:
+                            cx2, cy2 = _vending_roof_clamp(
+                                lm, body_lo, body_hi,
+                                float(support[0]), float(support[1]),
+                                _sit_margin)
+                            pxyz = _world_xyz(person)
+                            if pxyz is not None:
+                                _set_xyz(person, [
+                                    float(pxyz[0]) + (cx2 - float(support[0])),
+                                    float(pxyz[1]) + (cy2 - float(support[1])),
+                                    float(pxyz[2]),
+                                ])
+                                _marc_freeze_person(person)
+                            joints = _posed_joints(person)
+                            support = (
+                                _butt_from_joints(joints) if xy_from == "butt"
+                                else _support_from_joints(joints)
+                            ) or support
+            if support is not None:
+                pcx, pcy = float(support[0]), float(support[1])
+                gap = float(support[2]) - float(top_z)
+                max_xy = 0.55
+                seated = bool(_contact_ok(
+                    support, sx, sy, float(top_z),
+                    min_gap=(-(abs(sink) + 0.15) if sink else -0.05),
+                    max_xy=max_xy))
+                if (seated and typ == "vending_machine"
+                        and "sitting" in pose):
+                    seated = bool(_on_vending_roof(
+                        lm, body_lo, body_hi, pcx, pcy, 0.04))
+            if seated:
+                break
+        if (not seated) and typ == "vending_machine" and "sitting" in pose:
+            origin = _vending_roof_xy(lm, body_lo, body_hi)
+            if origin is not None:
+                sx, sy = _vending_roof_clamp(
+                    lm, body_lo, body_hi,
+                    float(origin[0]), float(origin[1]), _sit_margin)
+                support = _seat_at(
+                    person, sx, sy, float(top_z),
+                    float(clearance) - sink, xy_from="butt")
+                _marc_freeze_person(person)
+                if support is None:
+                    support = _support_from_joints(_posed_joints(person))
+                if support is not None:
+                    nx, ny = _vending_roof_clamp(
+                        lm, body_lo, body_hi,
+                        float(support[0]), float(support[1]), _sit_margin)
+                    pxyz = _world_xyz(person)
+                    if pxyz is not None:
+                        _set_xyz(person, [
+                            float(pxyz[0]) + (nx - float(support[0])),
+                            float(pxyz[1]) + (ny - float(support[1])),
+                            float(pxyz[2]),
+                        ])
+                        _marc_freeze_person(person)
+                        joints = _posed_joints(person)
+                        support = _butt_from_joints(joints) or support
+                    pcx, pcy = float(support[0]), float(support[1])
+                    gap = float(support[2]) - float(top_z)
+                    seated = bool(_contact_ok(
+                        support, sx, sy, float(top_z),
+                        min_gap=(-(abs(sink) + 0.15) if sink else -0.05),
+                        max_xy=0.55) and _on_vending_roof(
+                            lm, body_lo, body_hi, pcx, pcy, 0.04))
+        if not seated:
+            _rej = (
+                str(person.GetPath()), str(lm.GetPath()),
+                round(gap, 3), round(pcx, 2), round(pcy, 2),
+            )
+            if globals().get("_marc_above_last_rej") != _rej:
+                globals()["_marc_above_last_rej"] = _rej
+                print(
+                    "[on-landmark-patch] above-mode: rejected %s on %s "
+                    "(gap=%.3f xy=%.2f,%.2f top_z=%.3f)"
+                    % (str(person.GetPath()), str(lm.GetPath()),
+                       gap, pcx, pcy, top_z)
+                )
+            continue
+        _ok = (
+            str(person.GetPath()), str(lm.GetPath()),
+            round(gap, 3), round(pcx - cx, 2), round(pcy - cy, 2),
+        )
+        if globals().get("_marc_above_last_ok") != _ok:
+            globals()["_marc_above_last_ok"] = _ok
+            print(
+                "[on-landmark-patch] above-mode: seated %s on %s "
+                "dx=%.2f dy=%.2f gap=%.3f"
+                % (str(person.GetPath()), str(lm.GetPath()),
+                   pcx - cx, pcy - cy, gap)
+            )
         used_lms.add(str(lm.GetPath()))
         used_people.add(str(person.GetPath()))
+        _pxyz = _world_xyz(person)
+        _lxyz = _world_xyz(lm)
+        if _pxyz is not None and _lxyz is not None:
+            _lock = dict(globals().get("_marc_above_lock") or {})
+            _lock[str(person.GetPath())] = {
+                "person": list(_pxyz), "lm": list(_lxyz)}
+            globals()["_marc_above_lock"] = _lock
+        _marc_freeze_person(person)
         n += 1
     globals()["_marc_above_placed_n"] = n
-    print(
-        "[on-landmark-patch] above-mode: target=%s placed %d/%d person(s) "
-        "with surface contact" % ((jobs[0][1] if jobs else "-"), n, len(jobs))
-    )
+    _sum = ((jobs[0][1] if jobs else "-"), n, len(jobs))
+    if globals().get("_marc_above_last_sum") != _sum:
+        globals()["_marc_above_last_sum"] = _sum
+        print(
+            "[on-landmark-patch] above-mode: target=%s placed %d/%d person(s) "
+            "with posed-joint roof contact" % _sum
+        )
 
 
 def _marc_nudge_above_nearer(mission_id, objects, configurations=None, step=0.18):
@@ -1217,8 +2786,96 @@ def _ensure_above_helper(path):
         src = f.read()
     have_fn = "def _marc_place_above_people" in src
     have_contact = (
-        "_marc_above_construct" in src and "_marc_above_target" in src
-        and "above-mode: target=" in src
+        "_marc_above_aabb_stack" in src and "_marc_above_target" in src
+        and "_marc_above_freeze" in src
+        and "_marc_above_always_on_top" in src
+        and "_marc_above_joint_seat" in src
+        and "_marc_above_ray_roof" in src
+        and "_marc_above_sit_sink" in src
+        and "_marc_above_sit_sink_70" in src
+        and "_marc_above_sit_sink_short" in src
+        and "_marc_above_vend_drape" in src
+        and "_marc_above_vend_drape_lip" in src
+        and "_marc_above_trash_raise" in src
+        and "_marc_above_hydrant_crouch" in src
+        and "_marc_above_trash_crouch" in src
+        and "_marc_above_vend_farther" in src
+        and "_marc_above_vend_farther2" in src
+        and "_marc_above_vend_farther3" in src
+        and "_marc_above_vend_farther4" in src
+        and "_marc_above_vend_not_too_far" in src
+        and "_marc_above_vend_closer" in src
+        and "_marc_above_vend_sit_yaw" in src
+        and "_marc_above_vend_glass_drape" in src
+        and "_marc_above_vend_sit_fix" in src
+        and "_marc_above_vend_sit_nudge" in src
+        and "_marc_above_vend_sit_unraise" in src
+        and "_marc_above_vend_lip_fwd" in src
+        and "_marc_above_vend_lip_fwd2" in src
+        and "_marc_above_vend_lip_fwd3" in src
+        and "_marc_above_vend_lip_back" in src
+        and "_marc_above_vend_prof" in src
+        and "_marc_above_vend_prof2" in src
+        and "_marc_above_vend_prof3" in src
+        and "_marc_above_vend_prof4" in src
+        and "_marc_above_vend_prof5" in src
+        and "_marc_above_vend_prof6" in src
+        and "_marc_above_vend_female" in src
+        and "_marc_above_vend_female2" in src
+        and "_marc_above_vend_female3" in src
+        and "_marc_above_vend_female4" in src
+        and "_marc_above_vend_female5" in src
+        and "_marc_above_vend_female6" in src
+        and "_marc_above_vend_female7" in src
+        and "_marc_above_vend_male" in src
+        and "_marc_above_vend_male2" in src
+        and "_marc_above_vend_male3" in src
+        and "_marc_above_vend_male4" in src
+        and "_marc_above_vend_male5" in src
+        and "_marc_above_vend_weight" in src
+        and "_marc_above_vend_weight2" in src
+        and "_marc_above_vend_weight3" in src
+        and "_marc_above_vend_weight4" in src
+        and "_marc_above_vend_weight5" in src
+        and "_marc_above_no_closeup" in src
+        and "_marc_above_mid_field" in src
+        and "_marc_above_roof_in_view" in src
+        and "_marc_above_vend_abs_frame" in src
+        and "_marc_above_vend_leg_yaw" in src
+        and "_marc_above_vend_mesh_seat" in src
+        and "_marc_above_vend_on_roof" in src
+        and "_marc_above_vend_male6" in src
+        and "_marc_above_vend_prof7" in src
+        and "_marc_above_vend_female8" in src
+        and "_marc_above_vend_weight6" in src
+        and "_marc_above_vend_roof_visible" in src
+        and "_marc_above_vend_joint_z" in src
+        and "_marc_above_vend_prof8" in src
+        and "_marc_above_vend_mesh_xy" in src
+        and "_marc_above_vend_female_yaw" in src
+        and "_marc_above_vend_prof9" in src
+        and "_marc_above_vend_weight_yaw" in src
+        and "_marc_above_vend_female_fwd" in src
+        and "_marc_above_vend_stand" in src
+        and "_marc_above_vend_prof10" in src
+        and "_marc_above_vend_prof_yaw" in src
+        and "_marc_above_vend_sit_hip" in src
+        and "_marc_above_vend_weight7" in src
+        and "_marc_above_vend_weight8" in src
+        and "_marc_above_vend_mesh_contact" in src
+        and "_marc_above_crouch_authored" in src
+        and "_marc_above_vend_mesh_contact2" in src
+        and "_marc_above_vend_mesh_nudge" in src
+        and "_marc_above_vend_mesh_snap" in src
+        and "_marc_above_lock_contact" in src
+        and "_marc_above_joint_only" in src
+        and "_marc_above_vend_prof11" in src
+        and "_marc_above_vend_slot" in src
+        and "_marc_above_vend_female9" in src
+        and "_marc_above_vend_prof12" in src
+        and "_marc_above_camera_frame" in src
+        and "RemoveAPI" in src
+        and "GetPointsAttr" in src
         and "def _marc_nudge_above_nearer" in src)
     if have_fn and have_contact:
         return False
@@ -1285,18 +2942,43 @@ def main():
         with open(TRAINER, "r", encoding="utf-8") as f:
             tsrc = f.read()
         tnew = _enable_place_flag(tsrc)
-        if NEW_SNAP not in tnew:
-            if NEW_SNAP_V3 in tnew:
-                tnew = tnew.replace(NEW_SNAP_V3, NEW_SNAP, 1)
-            elif (NEW_SNAP_V2 in tnew and
-                    "TRAINER_RENDER_WARMUP_FRAMES" not in tnew):
-                tnew = tnew.replace(NEW_SNAP_V2, NEW_SNAP, 1)
-            elif NEW_SNAP_V1 in tnew and "_marc_place_above_people" not in tnew:
-                tnew = tnew.replace(NEW_SNAP_V1, NEW_SNAP, 1)
-            elif OLD_SNAP in tnew and "reposition_on_landmark_people" not in tnew:
-                tnew = tnew.replace(OLD_SNAP, NEW_SNAP, 1)
+        if NEW_SETTLE not in tnew:
+            _play_loop = (
+                "        simulation_context.play()\n"
+                "        for _ in range(_SETTLE_FRAMES):\n"
+                "            simulation_context.step(render=False)\n"
+            )
+            if OLD_SETTLE in tnew:
+                tnew = tnew.replace(OLD_SETTLE, NEW_SETTLE, 1)
+            else:
+                _settle_done = False
+                for _snap in (NEW_SNAP, NEW_SNAP_V4, NEW_SNAP_V3, NEW_SNAP_V2,
+                              NEW_SNAP_V1):
+                    _blob = _play_loop + _snap
+                    if _blob in tnew:
+                        tnew = tnew.replace(_blob, NEW_SETTLE, 1)
+                        _settle_done = True
+                        break
+                if (not _settle_done) and NEW_SNAP not in tnew:
+                    if NEW_SNAP_V4 in tnew:
+                        tnew = tnew.replace(NEW_SNAP_V4, NEW_SNAP, 1)
+                    elif NEW_SNAP_V3 in tnew:
+                        tnew = tnew.replace(NEW_SNAP_V3, NEW_SNAP, 1)
+                    elif (NEW_SNAP_V2 in tnew and
+                            "TRAINER_RENDER_WARMUP_FRAMES" not in tnew):
+                        tnew = tnew.replace(NEW_SNAP_V2, NEW_SNAP, 1)
+                    elif (NEW_SNAP_V1 in tnew
+                            and "_marc_place_above_people" not in tnew):
+                        tnew = tnew.replace(NEW_SNAP_V1, NEW_SNAP, 1)
+                    elif (OLD_SNAP in tnew
+                            and "reposition_on_landmark_people" not in tnew):
+                        tnew = tnew.replace(OLD_SNAP, NEW_SNAP, 1)
         if NEW_SAVE not in tnew:
-            if NEW_SAVE_V2 in tnew:
+            if NEW_SAVE_V4 in tnew:
+                tnew = tnew.replace(NEW_SAVE_V4, NEW_SAVE, 1)
+            elif NEW_SAVE_V3 in tnew:
+                tnew = tnew.replace(NEW_SAVE_V3, NEW_SAVE, 1)
+            elif NEW_SAVE_V2 in tnew:
                 tnew = tnew.replace(NEW_SAVE_V2, NEW_SAVE, 1)
             elif NEW_SAVE_V1 in tnew:
                 tnew = tnew.replace(NEW_SAVE_V1, NEW_SAVE, 1)
@@ -1342,15 +3024,70 @@ def main():
                 '                        f"{auto_remaining} on-landmark scenes remain)")\n',
                 1,
             )
-        if (OLD_CAPTURE_RETURN in tnew
-                and "return _active_valid" not in tnew
-                and "_active_valid = True" in tnew):
-            tnew = tnew.replace(
-                OLD_CAPTURE_RETURN, NEW_CAPTURE_RETURN, 1)
+        if NEW_RENDER_STEP not in tnew:
+            if NEW_RENDER_STEP_V1 in tnew:
+                tnew = tnew.replace(NEW_RENDER_STEP_V1, NEW_RENDER_STEP, 1)
+            elif OLD_RENDER_STEP in tnew:
+                tnew = tnew.replace(OLD_RENDER_STEP, NEW_RENDER_STEP, 1)
+        tnew = tnew.replace(
+            "            _active_valid = _n_placed > 0 and _n_stack > 0\n",
+            "            _active_valid = _n_placed > 0\n",
+            1,
+        )
+        tnew = tnew.replace(
+            "                    _climb_v = (0.01 + random.random() * 0.06\n"
+            "                                if _pl in (\"vending_machine\", \"postbox\")\n"
+            "                                else 0.04 + random.random() * 0.08)\n",
+            "                    _climb_v = 0.16 + random.random() * 0.18\n",
+            1,
+        )
+        tnew = tnew.replace(
+            "                        _climb_v = 0.66 + random.random() * 0.12\n",
+            "                        _climb_v = 0.20 + random.random() * 0.12\n",
+            1,
+        )
+        tnew = tnew.replace(
+            "                        _climb_v = 0.78 + random.random() * 0.10\n",
+            "                        _climb_v = 0.20 + random.random() * 0.12\n",
+            1,
+        )
+        tnew = tnew.replace(
+            "                        _climb_v = 0.48 + random.random() * 0.12\n",
+            "                        _climb_v = 0.20 + random.random() * 0.12\n",
+            1,
+        )
+        tnew = tnew.replace(
+            "                        _climb_v = 0.55 + random.random() * 0.10\n",
+            "                        _climb_v = 0.20 + random.random() * 0.12\n",
+            1,
+        )
+        tnew = tnew.replace(
+            "                        _climb_v = 0.42 + random.random() * 0.10\n",
+            "                        _climb_v = 0.20 + random.random() * 0.12\n",
+            1,
+        )
+        _cap_lottery = (
+            "        if str(os.environ.get(\"TRAINER_PEOPLE_ABOVE\", \"0\"))"
+            ".lower() not in (\n"
+            "                \"0\", \"false\", \"no\", \"off\", \"\"):\n"
+            "            return _active_valid\n"
+            "        return gt.last_render_ok\n"
+        )
+        if NEW_CAPTURE_RETURN not in tnew:
+            if _cap_lottery in tnew:
+                tnew = tnew.replace(_cap_lottery, NEW_CAPTURE_RETURN, 1)
+            elif OLD_CAPTURE_RETURN in tnew:
+                tnew = tnew.replace(OLD_CAPTURE_RETURN, NEW_CAPTURE_RETURN, 1)
         if OLD_INITIAL_WARN in tnew:
             tnew = tnew.replace(OLD_INITIAL_WARN, NEW_INITIAL_WARN, 1)
         if NEW_POSITIONS not in tnew:
-            if NEW_POSITIONS_V2 in tnew:
+            if NEW_POSITIONS_V5 in tnew:
+                tnew = tnew.replace(NEW_POSITIONS_V5, NEW_POSITIONS, 1)
+            elif NEW_POSITIONS_V4 in tnew:
+                tnew = tnew.replace(NEW_POSITIONS_V4, NEW_POSITIONS, 1)
+            elif NEW_POSITIONS_V3 in tnew:
+                tnew = tnew.replace(NEW_POSITIONS_V3, NEW_POSITIONS, 1)
+            elif NEW_POSITIONS_V2 in tnew:
                 tnew = tnew.replace(NEW_POSITIONS_V2, NEW_POSITIONS, 1)
             elif NEW_POSITIONS_V1 in tnew:
                 tnew = tnew.replace(NEW_POSITIONS_V1, NEW_POSITIONS, 1)
@@ -1374,7 +3111,7 @@ def main():
                     f.write(tnew)
                 n += 1
                 print("[on-landmark-patch] trainer.py: place_on_landmark=True "
-                      "(+ construct stacked image, warmup; 2D/3D save is a safety net)")
+                      "(+ freeze climber on landmark top through settle/GT)")
             except OSError as e:
                 print(f"[on-landmark-patch] trainer write failed, skipping: {e}")
         else:
@@ -1422,24 +3159,75 @@ def main():
     if os.path.exists(DEPLOYER):
         with open(DEPLOYER, "r", encoding="utf-8") as f:
             dsrc = f.read()
-        _old_repo_lm = (
-            '        on_lm = placement.get("on_landmark_type")\n'
-            '        if not on_lm:\n'
-            '            continue\n'
+        _no_extra_lm = (
+            '    if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0"))'
+            '.lower() not in (\n'
+            '            "0", "false", "no", "off", ""):\n'
+            '        if not placement.get("above"):\n'
+            '            on_landmark_type = None\n'
         )
-        _new_repo_lm = (
+        if _no_extra_lm not in dsrc:
+            _anchor_lm = (
+                '    on_landmark_type = placement.get("on_landmark_type") '
+                'if place_on_landmark else None\n'
+                '    z_offset_from_top = float(placement.get("z_offset_from_top", 0.0) or 0.0)\n'
+            )
+            _with_gate = (
+                '    on_landmark_type = placement.get("on_landmark_type") '
+                'if place_on_landmark else None\n'
+                + _no_extra_lm +
+                '    z_offset_from_top = float(placement.get("z_offset_from_top", 0.0) or 0.0)\n'
+            )
+            if _anchor_lm in dsrc:
+                try:
+                    with open(DEPLOYER, "w", encoding="utf-8") as f:
+                        f.write(dsrc.replace(_anchor_lm, _with_gate, 1))
+                    print("[on-landmark-patch] deployer: extras never inherit pose YAML landmark")
+                    n += 1
+                except OSError as e:
+                    print(f"[on-landmark-patch] deployer extra-gate failed: {e}")
+                with open(DEPLOYER, "r", encoding="utf-8") as f:
+                    dsrc = f.read()
+        _old_repo_lm = (
             '        on_lm = placement.get("on_landmark_type")\n'
             '        if not on_lm or placement.get("above"):\n'
             '            continue\n'
         )
-        if _old_repo_lm in dsrc and _new_repo_lm not in dsrc:
+        _new_repo_lm = (
+            '        on_lm = placement.get("on_landmark_type")\n'
+            '        if not on_lm:\n'
+            '            continue\n'
+        )
+        if _old_repo_lm in dsrc:
             try:
                 with open(DEPLOYER, "w", encoding="utf-8") as f:
                     f.write(dsrc.replace(_old_repo_lm, _new_repo_lm, 1))
-                print("[on-landmark-patch] deployer: skip origin-reseat for climbers")
+                print("[on-landmark-patch] deployer: reseat climbers on landmark top")
                 n += 1
             except OSError as e:
-                print(f"[on-landmark-patch] deployer climber-skip failed: {e}")
+                print(f"[on-landmark-patch] deployer climber-reseat failed: {e}")
+            with open(DEPLOYER, "r", encoding="utf-8") as f:
+                dsrc = f.read()
+        _ground_spawn = (
+            '    on_landmark_type = placement.get("on_landmark_type") '
+            'if place_on_landmark else None\n'
+            '    if placement.get("above"):\n'
+            '        on_landmark_type = None\n'
+            '    z_offset_from_top = float(placement.get("z_offset_from_top", 0.0) or 0.0)\n'
+        )
+        _stock_spawn = (
+            '    on_landmark_type = placement.get("on_landmark_type") '
+            'if place_on_landmark else None\n'
+            '    z_offset_from_top = float(placement.get("z_offset_from_top", 0.0) or 0.0)\n'
+        )
+        if _ground_spawn in dsrc:
+            try:
+                with open(DEPLOYER, "w", encoding="utf-8") as f:
+                    f.write(dsrc.replace(_ground_spawn, _stock_spawn, 1))
+                print("[on-landmark-patch] deployer: spawn climbers on landmark top")
+                n += 1
+            except OSError as e:
+                print(f"[on-landmark-patch] deployer spawn-restore failed: {e}")
 
     if _ensure_above_helper(DEPLOYER):
         n += 1
