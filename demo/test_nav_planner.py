@@ -17,7 +17,6 @@ from mock_agent_navigation import (
     SpeedGovernor,
     LIDAR_CLUSTER_M,
     OVERLAY_TTL_S,
-    RECOVERY_LINEAR_X,
     frontal_hit,
     lidar_xyz_to_obstacles,
     path_is_blocked,
@@ -320,13 +319,12 @@ def test_callable_goal_retarget():
     _check(resolve_xy((2.5, 3.5)) == (2.5, 3.5), "plain tuple")
 
 
-def test_recovery_cmd_reverses_on_frontal():
+def test_recovery_cmd_zeros_on_frontal():
     pose = (0.0, 0.0, 0.0)
     hit = [(0.6, 0.0, 0.2)]
     _check(frontal_hit(hit, pose), "bumper disc should be a frontal hit")
     lin, ang = recovery_cmd(True)
-    _check(lin < 0.0, "recovery must reverse, got lin=%s" % lin)
-    _check(abs(lin - RECOVERY_LINEAR_X) < 1e-12, "expected %s got %s" % (RECOVERY_LINEAR_X, lin))
+    _check(lin == 0.0, "recovery must command zero linear, got lin=%s" % lin)
     _check(ang == 0.0, "recovery has no yaw")
     lin2, ang2 = recovery_cmd(False)
     _check(lin2 == 0.0 and ang2 == 0.0, "no hit -> zero cmd")
@@ -352,7 +350,7 @@ def main():
         test_governor_missing_sensors_never_raises,
         test_search_tol_uses_radius,
         test_callable_goal_retarget,
-        test_recovery_cmd_reverses_on_frontal,
+        test_recovery_cmd_zeros_on_frontal,
     ]
     failed = 0
     for fn in tests:
