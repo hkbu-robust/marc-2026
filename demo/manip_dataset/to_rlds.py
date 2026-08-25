@@ -3,12 +3,12 @@
 
 Writes:
   <out>/episodes/episode_XXXX.npz   — arrays per episode
-  <out>/dataset_statistics.json     — action mean/std
+  <out>/dataset_statistics.json     — nested marc_pnp q01/q99/mask
   <out>/manifest.json               — episode index + language
 
 Does not require tensorflow_datasets at convert time (NumPy export). Point an
 OXE/RLDS builder at these files, or load npz directly in a custom OpenVLA
-dataset transform.
+dataset transform. LoRA fine-tuning should use unnorm_key=marc_pnp.
 
 Usage:
   python3 -m manip_dataset.to_rlds \\
@@ -22,10 +22,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from typing import List, Tuple
 
 import numpy as np
 
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from marc_agent.openvla_actions import (  # noqa: E402
+    DEFAULT_UNNORM_KEY,
+    IMAGE_SIZE,
+    build_dataset_statistics,
+    resize_rgb,
+)
 try:
     import h5py
 except ImportError as e:  # pragma: no cover
@@ -34,18 +45,7 @@ except ImportError as e:  # pragma: no cover
 
 def _resize_rgb(img: np.ndarray, size: int) -> np.ndarray:
     """Nearest-neighbor resize without OpenCV/Pillow dependency."""
-    h, w = img.shape[:2]
-    if h == size and w == size:
-        return img
-    # center-crop to square then NN resize
-    side = min(h, w)
-    y0 = (h - side) // 2
-    x0 = (w - side) // 2
-    crop = img[y0:y0 + side, x0:x0 + side]
-    # NN scale
-    yy = (np.linspace(0, side - 1, size)).astype(np.int32)
-    xx = (np.linspace(0, side - 1, size)).astype(np.int32)
-    return np.ascontiguousarray(crop[yy][:, xx])
+    return resize_rgb(img, size)
 
 
 CAMERA_CHOICES = ("auto", "base_left", "base_right", "gripper_left", "gripper_right")
@@ -91,10 +91,11 @@ def _load_episode(ep_dir: str, camera: str = "auto") -> Tuple[dict, dict]:
     return meta, data
 
 
-def convert(in_dir: str, out_dir: str, image_size: int = 224, camera: str = "auto"):
+def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str = "auto"):
     os.makedirs(os.path.join(out_dir, "episodes"), exist_ok=True)
     episodes = []
     all_actions: List[np.ndarray] = []
+    all_states: List[np.ndarray] = []
 
     subdirs = sorted(
         d for d in os.listdir(in_dir)
@@ -148,6 +149,7 @@ def convert(in_dir: str, out_dir: str, image_size: int = 224, camera: str = "aut
             "camera": data["image_key"],
         })
         all_actions.append(data["action"])
+        all_states.append(state)
         print(f"[ok] {name} -> episode_{idx:04d}.npz "
               f"({data['action'].shape[0]} steps, {data['image_key']})")
         idx += 1
@@ -156,30 +158,31 @@ def convert(in_dir: str, out_dir: str, image_size: int = 224, camera: str = "aut
         raise SystemExit(f"no successful episodes found under {in_dir}")
 
     actions = np.concatenate(all_actions, axis=0)
-    stats = {
-        "action_dim": 7,
-        "action_mean": actions.mean(axis=0).tolist(),
-        "action_std": actions.std(axis=0).clip(min=1e-6).tolist(),
-        "num_episodes": len(episodes),
-        "num_steps": int(actions.shape[0]),
-        "image_size": image_size,
-        "action_convention": "ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip",
-        "camera": camera,
-    }
+    proprio = np.concatenate(all_states, axis=0)
+    stats = build_dataset_statistics(
+        actions,
+        proprio,
+        unnorm_key=DEFAULT_UNNORM_KEY,
+        image_size=image_size,
+        camera=camera,
+        num_episodes=len(episodes),
+    )
     with open(os.path.join(out_dir, "dataset_statistics.json"), "w") as f:
         json.dump(stats, f, indent=2)
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump({"episodes": episodes}, f, indent=2)
+    action_block = stats[DEFAULT_UNNORM_KEY]["action"]
     print(f"[done] {len(episodes)} episodes -> {out_dir}")
-    print(f"[stats] action_mean={stats['action_mean']}")
-    print(f"[stats] action_std={stats['action_std']}")
+    print(f"[stats] action_q01={action_block['q01']}")
+    print(f"[stats] action_q99={action_block['q99']}")
+    print(f"[stats] action_mask={action_block['mask']}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--in", dest="in_dir", required=True, help="marc_pnp success root")
     ap.add_argument("--out", dest="out_dir", required=True, help="export root")
-    ap.add_argument("--image-size", type=int, default=224)
+    ap.add_argument("--image-size", type=int, default=IMAGE_SIZE)
     ap.add_argument(
         "--camera",
         choices=CAMERA_CHOICES,

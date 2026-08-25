@@ -55,6 +55,10 @@ class RetrievalState:
     task_description: str = ""
     time_limit: Optional[float] = None
     grounding_score: Optional[float] = None
+    picked: bool = False
+    basket_occupied: bool = False
+    pick_attempts: int = 0
+    pick_reason: str = ""
 
     @property
     def hint_center_xy(self) -> Optional[tuple]:
@@ -102,6 +106,15 @@ class RetrievalState:
         score = getattr(reveal, "grounding_score", None)
         if score is not None:
             self.grounding_score = float(score)
+
+    def adopt_pick(self, result) -> None:
+        """Store #13 pick/basket outcome for the delivery leg (#14)."""
+        if result is None:
+            return
+        self.picked = bool(getattr(result, "ok", False))
+        self.basket_occupied = bool(getattr(result, "basket_occupied", False))
+        self.pick_attempts = int(getattr(result, "attempts", 0) or 0)
+        self.pick_reason = str(getattr(result, "reason", "") or "")
 
     def search_xy(self) -> Optional[tuple]:
         """Reveal hint if present, else Stage 2 grounding target_coord."""
