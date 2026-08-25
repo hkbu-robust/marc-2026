@@ -1,0 +1,26 @@
+{
+  "model": {
+    "name": "Qwen3-VL-8B-Instruct",
+    "upstream_repository": "Qwen/Qwen3-VL-8B-Instruct",
+    "revision": "60595ebc30ec8e3b1d3b9e65d4943ca011c0006a",
+    "local_directory": "model",
+    "format": "Hugging Face Transformers safetensors snapshot"
+  },
+  "inference": {
+    "loader": "transformers.AutoModelForImageTextToText",
+    "processor": "transformers.AutoProcessor",
+    "local_files_only": true,
+    "dtype": "bfloat16",
+    "device_map": "auto",
+    "attention_implementation": "sdpa",
+    "do_sample": false,
+    "max_new_tokens": 8,
+    "output_grammar": "<candidate_id>|<normal|abnormal|emergency|accident>"
+  },
+  "framework": {
+    "transformers": "4.57.1",
+    "accelerate": "1.10.1",
+    "safetensors": "0.6.2"
+  },
+  "offline_bundle_load_verified": false
+}

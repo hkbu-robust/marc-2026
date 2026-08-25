@@ -27,6 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && pip3 install --no-cache-dir \
         torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
     && pip3 install --no-cache-dir "ultralytics-opencv-headless==8.4.118" \
+    && pip3 install --no-cache-dir \
+        "transformers==4.57.1" "accelerate==1.10.1" "safetensors==0.6.2" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /agent
@@ -42,6 +44,9 @@ ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ENV PYTHONPATH=/agent:/agent/demo
 ENV YOLO_OFFLINE=1
 ENV YOLO_CONFIG_DIR=/agent/demo/weights
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+ENV MARC_QWEN_MODEL_DIR=/agent/models/runtime/stage1-sar-qwen/model
 
 WORKDIR /agent/demo
 
