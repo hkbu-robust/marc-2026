@@ -289,6 +289,107 @@ class SarLabelTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertEqual(rows[0][3], "emergency")
 
+    def test_recipe_target_frame_uses_runtime_verifier_prompt(self):
+        person = _det("person_sitting", "object", [600, 200, 700, 420],
+                      xyz=(-62.77, 135.78, 17.94))
+        person["recipe_id"] = "sar02_vending_sit"
+        person["command"] = "Find the person sitting on top of the vending machine."
+        person["situation"] = "abnormal"
+        walker = _det("person_walking", "object", [100, 300, 180, 500],
+                      xyz=(0.0, 0.0, 16.75))
+        vendor = _det("vending_machine", "landmark", [580, 280, 720, 500],
+                      xyz=(-62.81, 135.53, 16.20))
+        payload = _payload([walker, person, vendor])
+        people = [walker, person]
+        ids = q.person_candidate_id_list(people, "cam")
+        cid = q.person_candidate_ids(people, "cam")[id(person)]
+        row = q._sample(
+            "/tmp/fake.png", payload, "cam", person["command"],
+            person, vendor, "llama-factory", situation="abnormal",
+            candidate_id=cid, candidate_ids=ids, people=people)
+        user = row["messages"][0]["content"]
+        self.assertIn("Original request:", user)
+        self.assertIn("Candidates:", user)
+        self.assertIn("pose=", user)
+        self.assertIn("anchor=", user)
+        self.assertIn("distance=", user)
+        self.assertIn("overlap=", user)
+        self.assertIn(cid, user)
+        self.assertEqual(row["messages"][1]["content"], f"{cid}|abnormal")
+
+    def test_missing_recipe_target_camera_emits_no_sar(self):
+        walker = _det("person_walking", "object", [100, 300, 180, 500],
+                      xyz=(0.0, 0.0, 16.75))
+        rows = q._sar_pairs_for_payload(
+            _payload([walker]), random.Random(0), 2,
+            require_recipe_target=True)
+        self.assertEqual(rows, [])
+
+    def test_far_gt_support_is_ignored(self):
+        person = _det("person_lying_down", "object", [200, 400, 360, 520],
+                      xyz=(0.0, 0.0, 16.74))
+        person["support_class"] = "bicycle"
+        person["surface_class"] = "parking"
+        person["recipe_id"] = "sar08_fallenbike_down"
+        bike = _det("bicycle", "landmark", [1000, 10, 1100, 80],
+                    xyz=(20.0, 20.0, 17.02))
+        rows = q._sar_pairs_for_payload(
+            _payload([person, bike]), random.Random(0), 1)
+        self.assertTrue(rows)
+        self.assertNotEqual(rows[0][3], "emergency")
+
+    def test_convert_writes_split_sar_and_obj_jsonl(self):
+        import json
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        tmp = tempfile.mkdtemp()
+        try:
+            scene = Path(tmp) / "scene_00001"
+            scene.mkdir()
+            (scene / "cam_tgt.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            (scene / "cam_walk.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            person = _det("person_prone", "object", [10, 20, 30, 40],
+                          xyz=(0.0, 0.0, 16.7))
+            person["recipe_id"] = "sar07_parking_prone"
+            person["surface_class"] = "parking"
+            person["command"] = (
+                "Find the person lying face-down and motionless in the parking lot."
+            )
+            walker = _det("person_walking", "object", [100, 300, 180, 500],
+                          xyz=(1.0, 1.0, 16.7))
+            cup = _det("disposable_cup", "object", [400, 300, 440, 360],
+                       xyz=(1.0, 2.0, 16.9))
+            bench = _det("bench", "landmark", [360, 320, 500, 420],
+                         xyz=(1.05, 2.02, 16.5))
+            tgt = _payload([person, walker, cup, bench])
+            tgt["frame_id"] = "cam_tgt"
+            walk = _payload([walker])
+            walk["frame_id"] = "cam_walk"
+            (scene / "cam_tgt.json").write_text(json.dumps(tgt))
+            (scene / "cam_walk.json").write_text(json.dumps(walk))
+            out = Path(tmp) / "out"
+            q.convert(tmp, str(out), 0.0, 4, 0, "llama-factory")
+            self.assertTrue((out / "train_sar.jsonl").exists())
+            self.assertTrue((out / "val_sar.jsonl").exists())
+            self.assertTrue((out / "train_obj.jsonl").exists())
+            self.assertTrue((out / "val_obj.jsonl").exists())
+            self.assertFalse((out / "train.jsonl").exists())
+            sar_lines = (out / "train_sar.jsonl").read_text().strip().splitlines()
+            self.assertEqual(len(sar_lines), 1)
+            sar = json.loads(sar_lines[0])
+            user = sar["messages"][0]["content"]
+            self.assertIn("Original request:", user)
+            self.assertIn("Candidates:", user)
+            self.assertIn("|accident", sar["messages"][1]["content"])
+            obj_text = (out / "train_obj.jsonl").read_text()
+            self.assertTrue(obj_text.strip())
+            self.assertIn("disposable_cup", obj_text)
+            self.assertNotIn("|accident", obj_text)
+        finally:
+            shutil.rmtree(tmp)
+
     def test_sar_assistant_is_id_pipe_situation_without_coords(self):
         person = _det("person_prone", "object", [10, 20, 30, 40])
         walker = _det("person_walking", "object", [100, 100, 200, 300])

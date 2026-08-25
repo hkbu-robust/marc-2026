@@ -399,29 +399,27 @@ NEW_COMBOS = '''    combos = []
     _wrongs = [t for t in _lm_types if t in _WRONG or _marc_people_is_vehicle(t)]
     _pose_set = set(all_poses)
     def _marc_sar_recipe_list():
-        path = "/marc-patches/sar_recipes.yaml"
-        try:
-            import yaml as _yaml_rec
-            with open(path, encoding="utf-8") as _rf:
-                _data = _yaml_rec.safe_load(_rf) or {}
-            _recs = list(_data.get("recipes") or [])
-            if _recs:
-                return _recs
-        except Exception:
-            pass
-        return [
-            {"id": "sar01_trash_sit", "pose": "person_sitting",
-             "support_landmark": "trash_can", "relation": "on", "above": True,
-             "distractor_poses": ["person_walking"]},
-            {"id": "sar07_parking_prone", "pose": "person_prone",
-             "surface_class": "parking",
-             "distractor_poses": ["person_walking", "person_sitting"]},
-            {"id": "sar08_fallenbike_down", "pose": "person_lying_down",
-             "support_landmark": "bicycle", "relation": "beside",
-             "beside": True, "surface_class": "parking",
-             "distractor_poses": ["person_walking"]},
+        paths = [
+            "/marc-patches/sar_recipes.yaml",
+            os.path.join(os.getcwd(), "simulation-platform", "patches",
+                         "sar_recipes.yaml"),
         ]
-    def _marc_dump_recipe(rec):
+        for path in paths:
+            try:
+                import yaml as _yaml_rec
+                with open(path, encoding="utf-8") as _rf:
+                    _data = _yaml_rec.safe_load(_rf) or {}
+                _recs = list(_data.get("recipes") or [])
+                if _recs:
+                    return _recs
+                print("[people-patch] ERROR: %s has no recipes" % path)
+            except FileNotFoundError:
+                continue
+            except Exception as _e:
+                print("[people-patch] ERROR: could not load %s: %s" % (path, _e))
+        print("[people-patch] ERROR: sar_recipes.yaml not found; recipes disabled")
+        return []
+    def _marc_dump_recipe(rec, pose=None, character=None):
         if not rec:
             return
         try:
@@ -429,12 +427,18 @@ NEW_COMBOS = '''    combos = []
             with open("/tmp/marc_sar_recipe.json", "w", encoding="utf-8") as _rf:
                 _json_rec.dump({
                     "recipe_id": rec.get("id"),
-                    "target_pose": rec.get("pose"),
+                    "target_pose": pose or rec.get("pose"),
+                    "target_character": character,
                     "support_class": rec.get("support_class") or rec.get(
                         "support_landmark"),
                     "surface_class": rec.get("surface_class"),
                     "support_landmark": rec.get("support_landmark"),
+                    "surface_anchor": rec.get("surface_anchor"),
+                    "tip_landmark": rec.get("tip_landmark"),
                     "relation": rec.get("relation"),
+                    "command": rec.get("command"),
+                    "situation": rec.get("situation"),
+                    "scene_hint": rec.get("scene_hint"),
                 }, _rf)
         except Exception:
             pass
@@ -452,7 +456,14 @@ NEW_COMBOS = '''    combos = []
             _need = _recipe.get("support_landmark")
             if _need and not any(_marc_lm_typ(s) == _need for s in landmarks):
                 landmarks.append({"name": "%s_0" % _need})
-            for _extra in (_recipe.get("extra_landmarks") or []):
+            _extras = list(_recipe.get("extra_landmarks") or [])
+            _anchor = _recipe.get("surface_anchor")
+            if _anchor:
+                _extras.append(_anchor)
+            _tip = _recipe.get("tip_landmark")
+            if _tip:
+                _extras.append(_tip)
+            for _extra in _extras:
                 if _extra and not any(_marc_lm_typ(s) == _extra for s in landmarks):
                     landmarks.append({"name": "%s_0" % _extra})
             _marc_dump_recipe(_recipe)
@@ -492,9 +503,16 @@ NEW_COMBOS = '''    combos = []
                     )
                 else:
                     _pl["z_offset_from_top"] = 0.02
-            if _lm and (_recipe.get("beside") or _recipe.get("relation") == "beside"):
-                _pl["beside_landmark_type"] = _lm
+            _beside_lm = _lm if (
+                _lm and (_recipe.get("beside") or _recipe.get("relation") == "beside")
+            ) else None
+            if not _beside_lm and (
+                    _recipe.get("beside") or _recipe.get("relation") == "beside"):
+                _beside_lm = _recipe.get("surface_anchor")
+            if _beside_lm:
+                _pl["beside_landmark_type"] = _beside_lm
             spec["placement"] = _pl
+            _marc_dump_recipe(_recipe, pose=spec["type"], character=ch)
             _recipe_target_placed = True
         elif _recipe is not None:
             _dposes = list(_recipe.get("distractor_poses") or [])
@@ -504,7 +522,6 @@ NEW_COMBOS = '''    combos = []
             spec["placement"] = {
                 "on_landmark_type": None,
                 "above": False,
-                "recipe_id": _recipe.get("id"),
             }
         elif _above_mode and _target and not _climber_placed:
             spec["type"] = _marc_above_climber_pose(_target, _pose_set)
@@ -1190,6 +1207,42 @@ def main():
         if _old_seat in src:
             src = src.replace(_old_seat, _new_seat)
             changed = True
+        if "def _marc_sar_recipe_list():" in src and "target_character" not in src:
+            _a = src.find("    def _marc_sar_recipe_list():")
+            _b = src.find("    if _above_mode and combos:")
+            _new_rec = NEW_COMBOS[
+                NEW_COMBOS.find("    def _marc_sar_recipe_list():"):
+                NEW_COMBOS.find("    if _above_mode and combos:")
+            ]
+            if _a >= 0 and _b > _a and _new_rec:
+                src = src[:_a] + _new_rec + src[_b:]
+                changed = True
+            _old_tgt = (
+                "            if _lm and (_recipe.get(\"beside\") or "
+                "_recipe.get(\"relation\") == \"beside\"):\n"
+                "                _pl[\"beside_landmark_type\"] = _lm\n"
+                "            spec[\"placement\"] = _pl\n"
+                "            _recipe_target_placed = True\n"
+            )
+            _nt_a = NEW_COMBOS.find(
+                "            _beside_lm = _lm if (\n")
+            _nt_b = NEW_COMBOS.find(
+                "        elif _recipe is not None:\n")
+            if _old_tgt in src and _nt_a >= 0 and _nt_b > _nt_a:
+                src = src.replace(
+                    _old_tgt,
+                    NEW_COMBOS[_nt_a:_nt_b],
+                    1,
+                )
+                changed = True
+            src = src.replace(
+                '                "recipe_id": _recipe.get("id"),\n'
+                "            }\n"
+                "        elif _above_mode and _target and not _climber_placed:\n",
+                "            }\n"
+                "        elif _above_mode and _target and not _climber_placed:\n",
+                1,
+            )
         if "TRAINER_SAR_RECIPES" not in src and "_pose_set = set(all_poses)" in src:
             _old_pose_set = "    _pose_set = set(all_poses)\n    if _above_mode and combos:\n"
             _new_pose_set = NEW_COMBOS[

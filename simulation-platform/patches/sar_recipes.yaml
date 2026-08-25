@@ -1,7 +1,7 @@
 # Practice SAR archetypes for dataset-gen (TRAINER_SAR_RECIPES=1).
-# One target + ordinary distractors per scene. support_class/surface_class are
-# R03 keys or landmark names that situation_rules.py can resolve.
-# Parking vs grass is a recipe field, not inferred from generic ground cells.
+# One target + ordinary distractors per scene. command/situation/scene_hint
+# match tests/fixtures/command_cases.yaml. Parking vs grass is a placement
+# proxy (taxi / trash), not USD ground materials.
 
 recipes:
   - id: sar01_trash_sit
@@ -11,6 +11,9 @@ recipes:
     relation: on
     above: true
     distractor_poses: [person_walking, person_walking_away]
+    command: Find the person sitting on top of the trash can in the parking lot.
+    situation: abnormal
+    scene_hint: parking
 
   - id: sar02_vending_sit
     pose: person_sitting
@@ -19,6 +22,8 @@ recipes:
     relation: on
     above: true
     distractor_poses: [person_walking, person_reaching]
+    command: Find the person sitting on top of the vending machine.
+    situation: abnormal
 
   - id: sar03_bench_lie
     pose: person_lying_down
@@ -26,7 +31,10 @@ recipes:
     support_class: bench
     relation: on
     above: false
+    extra_landmarks: [taxi]
     distractor_poses: [person_walking, person_sitting]
+    command: Find the person lying face-down on the bench near the taxi.
+    situation: abnormal
 
   - id: sar04_table_lie
     pose: person_lying_down
@@ -35,29 +43,48 @@ recipes:
     relation: on
     above: false
     distractor_poses: [person_walking, person_sitting]
+    command: Find the person lying on top of the picnic table.
+    situation: abnormal
 
   - id: sar06_parking_collapsed
     pose: person_lying_down
     support_landmark: null
     surface_class: parking
-    relation: null
+    surface_anchor: taxi
+    extra_landmarks: [taxi]
+    relation: beside
+    beside: true
     distractor_poses: [person_walking, person_sitting]
+    command: Find the person collapsed on the parking lot floor.
+    situation: emergency
+    scene_hint: parking
 
   - id: sar07_parking_prone
     pose: person_prone
     support_landmark: null
     surface_class: parking
-    relation: null
+    surface_anchor: taxi
+    extra_landmarks: [taxi]
+    relation: beside
+    beside: true
     distractor_poses: [person_walking, person_sitting]
+    command: Find the person lying face-down and motionless in the parking lot.
+    situation: accident
+    scene_hint: parking
 
   - id: sar08_fallenbike_down
     pose: person_lying_down
     support_landmark: bicycle
     support_class: bicycle
     surface_class: parking
+    surface_anchor: taxi
+    extra_landmarks: [taxi]
+    tip_landmark: bicycle
     relation: beside
     beside: true
     distractor_poses: [person_walking]
+    command: Find the person fallen on the ground next to the toppled bicycle.
+    situation: emergency
 
   - id: sar09_park_bending
     pose: person_bending
@@ -67,6 +94,9 @@ recipes:
     relation: beside
     beside: true
     distractor_poses: [person_walking, person_sitting]
+    command: Find the person bent over and motionless near the trash can in the park rest area.
+    situation: emergency
+    scene_hint: park
 
   - id: sarH1_park_needhelp
     pose: person_bending
@@ -76,15 +106,24 @@ recipes:
     relation: beside
     beside: true
     distractor_poses: [person_lying_down, person_walking]
+    command: People are relaxing at the park and one is even lying on the grass; find the one near the trash can who is bent over and not moving and actually needs help.
+    situation: emergency
+    scene_hint: park
 
   - id: sarH2_parking_bikeacc
     pose: person_prone
     support_landmark: bicycle
     support_class: bicycle
     surface_class: parking
+    surface_anchor: taxi
+    extra_landmarks: [taxi]
+    tip_landmark: bicycle
     relation: beside
     beside: true
     distractor_poses: [person_walking]
+    command: In the parking lot a person is down next to a bicycle and looks like they had an accident; find them.
+    situation: accident
+    scene_hint: parking
 
   - id: sarH3_climbed_machine
     pose: person_reaching
@@ -93,6 +132,8 @@ recipes:
     relation: above
     above: true
     distractor_poses: [person_walking, person_sitting]
+    command: Someone is up where people should not be; find the person who climbed on top of the drink machine.
+    situation: abnormal
 
   - id: sarH4_parking_trashsit
     pose: person_sitting
@@ -102,6 +143,9 @@ recipes:
     relation: on
     above: true
     distractor_poses: [person_walking]
+    command: In the parking lot, find the person who climbed up and is sitting on top of the trash can.
+    situation: abnormal
+    scene_hint: parking
 
   - id: sarH5_taxi_benchlie
     pose: person_lying_down
@@ -111,10 +155,18 @@ recipes:
     above: false
     extra_landmarks: [taxi]
     distractor_poses: [person_walking, person_sitting]
+    command: Near the taxi, find the person lying down on top of the bench.
+    situation: abnormal
 
   - id: sarH6_most_critical
     pose: person_prone
     support_landmark: null
     surface_class: parking
-    relation: null
+    surface_anchor: taxi
+    extra_landmarks: [taxi]
+    relation: beside
+    beside: true
     distractor_poses: [person_sitting, person_walking, person_bending]
+    command: Several people are in the parking lot; one is completely face-down and immobile; find the most critical one.
+    situation: accident
+    scene_hint: parking

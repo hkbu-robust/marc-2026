@@ -68,8 +68,7 @@ XYZ_ONLY_APPEND = '''            det = {
             detections.append(det)
 '''
 
-
-NEW_APPEND = '''            det = {
+POSE_ONLY_RECIPE_APPEND = '''            det = {
                 "class": cls,
                 "instance_id": self._instance_id(prim_path),
                 "kind": self._kind_from_path(prim_path),
@@ -87,6 +86,37 @@ NEW_APPEND = '''            det = {
                     _rec = _json_rec.load(open("/tmp/marc_sar_recipe.json"))
                     if _rec.get("target_pose") == cls:
                         for _k in ("recipe_id", "support_class", "surface_class"):
+                            if _rec.get(_k):
+                                det[_k] = _rec[_k]
+                except Exception:
+                    pass
+            detections.append(det)
+'''
+
+
+NEW_APPEND = '''            det = {
+                "class": cls,
+                "instance_id": self._instance_id(prim_path),
+                "kind": self._kind_from_path(prim_path),
+                "bbox": [x_min, y_min, x_max, y_max],
+                "occlusion": round(occlusion, 4),
+                # 재투영 검증용 내부 필드 — _verify_detections 에서 제거된다.
+                "_prim_path": prim_path,
+            }
+            xyz = _marc_world_xyz(prim_path)
+            if xyz is not None:
+                det["world_xyz"] = xyz
+            if str(cls or "").startswith("person_"):
+                try:
+                    import json as _json_rec
+                    _rec = _json_rec.load(open("/tmp/marc_sar_recipe.json"))
+                    _want_pose = str(_rec.get("target_pose") or "")
+                    _want_ch = str(_rec.get("target_character") or "")
+                    _iid = str(self._instance_id(prim_path) or "")
+                    _blob = str(prim_path or "") + " " + _iid
+                    if _want_pose == cls and _want_ch and _want_ch in _blob:
+                        for _k in ("recipe_id", "support_class", "surface_class",
+                                   "command", "situation", "scene_hint"):
                             if _rec.get(_k):
                                 det[_k] = _rec[_k]
                 except Exception:
@@ -135,6 +165,8 @@ def main():
 
     if OLD_APPEND in src:
         src = src.replace(OLD_APPEND, NEW_APPEND, 1)
+    elif POSE_ONLY_RECIPE_APPEND in src:
+        src = src.replace(POSE_ONLY_RECIPE_APPEND, NEW_APPEND, 1)
     elif XYZ_ONLY_APPEND in src:
         src = src.replace(XYZ_ONLY_APPEND, NEW_APPEND, 1)
     elif NEW_APPEND not in src:

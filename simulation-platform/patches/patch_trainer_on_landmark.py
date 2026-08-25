@@ -47,7 +47,7 @@ NEW_PLACE_POSE = '''    placement = dict((pose or {}).get("placement") or {})
             "0", "false", "no", "off", ""):
         # Only the climber (placement.above) may sit on a landmark. Pose YAML
         # would otherwise drop extras (lying/prone) through the same vending.
-        if not placement.get("above"):
+        if not placement.get("above") and not placement.get("recipe_id"):
             on_landmark_type = None
     z_offset_from_top = float(placement.get("z_offset_from_top", 0.0) or 0.0)
 '''
@@ -68,7 +68,7 @@ NEW_REPOSITION_PL = '''        placement = dict((pose or {}).get("placement") or
             continue
         if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
                 "0", "false", "no", "off", ""):
-            if not placement.get("above"):
+            if not placement.get("above") and not placement.get("recipe_id"):
                 continue
         z_off = float(placement.get("z_offset_from_top",
                                     placement.get("contact_clearance", 0.0)) or 0.0)
@@ -162,6 +162,12 @@ NEW_SNAP = '''        _snap_landmarks_to_ground([mission])
                 mission["id"], mission.get("objects") or [], configurations)
         except Exception as _e:
             log.warning(f"place-above people failed (non-fatal): {_e}")
+        try:
+            from world.object_deployer import _marc_place_beside_people
+            _marc_place_beside_people(
+                mission["id"], mission.get("objects") or [], configurations)
+        except Exception as _e:
+            log.warning(f"place-beside people failed (non-fatal): {_e}")
 '''
 
 OLD_SETTLE = '''        simulation_context.play()
@@ -2779,6 +2785,141 @@ def _marc_nudge_above_nearer(mission_id, objects, configurations=None, step=0.18
 '''
 
 
+BESIDE_HELPER = r'''
+
+def _marc_place_beside_people(mission_id, objects, configurations=None):
+    """[marc-patch] Ground-place recipe targets beside a landmark (not on the roof)."""
+    try:
+        import json as _json_tip
+        import math
+        import omni.usd
+        from pxr import Usd, UsdGeom, Gf
+    except Exception:
+        return
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return
+
+    def _norm(s):
+        return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+    def _world_xyz(prim):
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            return None
+        t = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()
+        return [float(t[0]), float(t[1]), float(t[2])]
+
+    def _set_xyz(prim, xyz):
+        path = str(prim.GetPath())
+        setter = globals().get("_set_prim_translate")
+        if callable(setter):
+            try:
+                setter(path, xyz)
+                return
+            except Exception:
+                pass
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            return
+        ops = {op.GetOpName(): op for op in xf.GetOrderedXformOps()}
+        op = ops.get("xformOp:translate")
+        if op is None:
+            op = xf.AddTranslateOp()
+        op.Set(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
+
+    def _find_lm(typ):
+        group = stage.GetPrimAtPath("/world/landmarks/%s" % mission_id)
+        if not (group and group.IsValid()):
+            return None
+        for child in group.GetChildren():
+            name = str(child.GetName() or "")
+            blob = _norm(name) + _norm(str(child.GetPath()))
+            if (not typ) or name.startswith(typ) or _norm(typ) in blob:
+                return child
+        return None
+
+    def _find_person(spec):
+        pose = str(spec.get("type") or "")
+        ch = str(spec.get("character") or "")
+        try:
+            n = max(1, int(spec.get("count", 1) or 1))
+        except (TypeError, ValueError):
+            n = 1
+        for seq in range(n):
+            pp = "/world/people/%s_%s_%s_%s" % (mission_id, pose, ch, seq)
+            prim = stage.GetPrimAtPath(pp)
+            if prim and prim.IsValid():
+                return prim
+        return None
+
+    rec = {}
+    try:
+        rec = _json_tip.load(open("/tmp/marc_sar_recipe.json")) or {}
+    except Exception:
+        rec = {}
+    tip = str(rec.get("tip_landmark") or "")
+    if tip:
+        lm = _find_lm(tip)
+        if lm is not None:
+            tip_fn = globals().get("_set_fallen_rotation")
+            if callable(tip_fn):
+                try:
+                    tip_fn(str(lm.GetPath()), True)
+                except Exception:
+                    try:
+                        tip_fn(str(lm.GetPath()))
+                    except Exception:
+                        pass
+
+    n = 0
+    for spec in objects or []:
+        pl = spec.get("placement") or {}
+        typ = str(pl.get("beside_landmark_type") or "")
+        if not typ:
+            continue
+        lm = _find_lm(typ)
+        person = _find_person(spec)
+        if lm is None or person is None:
+            continue
+        lxyz = _world_xyz(lm)
+        pxyz = _world_xyz(person)
+        if lxyz is None:
+            continue
+        dx, dy = 1.6, 0.4
+        if pxyz is not None:
+            vx, vy = pxyz[0] - lxyz[0], pxyz[1] - lxyz[1]
+            mag = math.hypot(vx, vy)
+            if mag > 0.15:
+                dx, dy = vx / mag * 1.6, vy / mag * 1.6
+        want = [lxyz[0] + dx, lxyz[1] + dy, lxyz[2]]
+        drop = globals().get("drop_to_ground")
+        if callable(drop):
+            try:
+                dropped = drop(want[0], want[1], want[2])
+                if dropped is not None and len(dropped) >= 3:
+                    want = [float(dropped[0]), float(dropped[1]), float(dropped[2])]
+            except Exception:
+                pass
+        else:
+            try:
+                from world.people_poser import drop_to_ground as _drop
+                dropped = _drop(want[0], want[1], want[2])
+                if dropped is not None and len(dropped) >= 3:
+                    want = [float(dropped[0]), float(dropped[1]), float(dropped[2])]
+            except Exception:
+                pass
+        _set_xyz(person, want)
+        n += 1
+        print(
+            "[on-landmark-patch] beside: %s next to %s at %.2f,%.2f"
+            % (str(person.GetPath()), typ, want[0], want[1])
+        )
+    if n:
+        print("[on-landmark-patch] beside-mode: placed %d person(s)" % n)
+'''
+
+
 def _ensure_above_helper(path):
     if not os.path.exists(path):
         return False
@@ -2901,6 +3042,23 @@ def _ensure_above_helper(path):
         print(f"[on-landmark-patch] above-helper write failed: {e}")
         return False
     print("[on-landmark-patch] deployer: above-mode helper %s" % action)
+    return True
+
+
+def _ensure_beside_helper(path):
+    if not os.path.exists(path):
+        return False
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+    if "def _marc_place_beside_people" in src:
+        return False
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(src.rstrip() + BESIDE_HELPER)
+    except OSError as e:
+        print(f"[on-landmark-patch] beside-helper write failed: {e}")
+        return False
+    print("[on-landmark-patch] deployer: beside-mode helper appended")
     return True
 
 
@@ -3163,9 +3321,26 @@ def main():
             '    if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0"))'
             '.lower() not in (\n'
             '            "0", "false", "no", "off", ""):\n'
+            '        if not placement.get("above") and not placement.get("recipe_id"):\n'
+            '            on_landmark_type = None\n'
+        )
+        _no_extra_lm_old = (
+            '    if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0"))'
+            '.lower() not in (\n'
+            '            "0", "false", "no", "off", ""):\n'
             '        if not placement.get("above"):\n'
             '            on_landmark_type = None\n'
         )
+        if _no_extra_lm_old in dsrc and _no_extra_lm not in dsrc:
+            try:
+                with open(DEPLOYER, "w", encoding="utf-8") as f:
+                    f.write(dsrc.replace(_no_extra_lm_old, _no_extra_lm, 1))
+                print("[on-landmark-patch] deployer: recipe seat-lie keeps on_landmark")
+                n += 1
+            except OSError as e:
+                print(f"[on-landmark-patch] deployer recipe-seat failed: {e}")
+            with open(DEPLOYER, "r", encoding="utf-8") as f:
+                dsrc = f.read()
         if _no_extra_lm not in dsrc:
             _anchor_lm = (
                 '    on_landmark_type = placement.get("on_landmark_type") '
@@ -3231,6 +3406,44 @@ def main():
 
     if _ensure_above_helper(DEPLOYER):
         n += 1
+    if _ensure_beside_helper(DEPLOYER):
+        n += 1
+
+    if os.path.exists(TRAINER):
+        with open(TRAINER, "r", encoding="utf-8") as f:
+            tsrc = f.read()
+        if ("_marc_place_above_people" in tsrc
+                and "_marc_place_beside_people" not in tsrc):
+            _old_above_call = (
+                "            from world.object_deployer import "
+                "_marc_place_above_people\n"
+                "            _marc_place_above_people(\n"
+                '                mission["id"], mission.get("objects") or [], '
+                "configurations)\n"
+                "        except Exception as _e:\n"
+                '            log.warning(f"place-above people failed '
+                '(non-fatal): {_e}")\n'
+            )
+            _new_above_call = (
+                _old_above_call
+                + "        try:\n"
+                "            from world.object_deployer import "
+                "_marc_place_beside_people\n"
+                "            _marc_place_beside_people(\n"
+                '                mission["id"], mission.get("objects") or [], '
+                "configurations)\n"
+                "        except Exception as _e:\n"
+                '            log.warning(f"place-beside people failed '
+                '(non-fatal): {_e}")\n'
+            )
+            if _old_above_call in tsrc:
+                try:
+                    with open(TRAINER, "w", encoding="utf-8") as f:
+                        f.write(tsrc.replace(_old_above_call, _new_above_call, 1))
+                    print("[on-landmark-patch] trainer: beside place after above")
+                    n += 1
+                except OSError as e:
+                    print(f"[on-landmark-patch] trainer beside-call failed: {e}")
 
     if n:
         print("[on-landmark-patch] people with spec.placement land on that landmark")
