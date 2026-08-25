@@ -31,6 +31,7 @@ from mock_agent_navigation import (
     lidar_cloud_to_obstacles, path_is_blocked, frontal_hit,
     pointcloud2_xyz,
 )
+from nearfield import NearFieldAcquire, make_detector
 # Closed-loop placo pick from the manipulation kit (arm_pick.py): grasp_yaw wrist-roll +
 # DLS servo, targeting the object position. Requires placo (installed in the demo image).
 # The fixed-keyframe mock in mock_agent_manipulation.py remains as a dependency-free
@@ -87,6 +88,7 @@ class DemoParticipant:
         # Stage 2 pickup goal -- filled from the approximate location hint in the reveal (msg 411).
         # If not received, fall back to the Stage 2 answer target (_stage2_target_xy).
         self._collect_xy = None
+        self._reveal = None
         # Fallback pickup goal -- the Stage 2 grounding answer's target_coord (set in
         # _on_stage2_mission), used only if the reveal does not arrive.
         self._stage2_target_xy = None
@@ -153,14 +155,15 @@ class DemoParticipant:
         log.info("[Stage2] reveal received -- score=%s, type=%s, center=%s, r=%.1f",
                  reveal.grounding_score, reveal.target_type,
                  reveal.hint_center, reveal.hint_radius)
+        self._reveal = reveal
         if reveal.hint_center and len(reveal.hint_center) >= 2:
             self._collect_xy = (float(reveal.hint_center[0]), float(reveal.hint_center[1]))
 
     def _drive(self):
         """Called once in a separate thread on entering STAGE2_RUN -- pick up the object then deliver it.
 
-        Flow: stow the arm to lower the CoG -> approach the object standoff -> straight final
-        approach into arm reach -> pick (read grip-hold) -> stow again if empty-handed ->
+        Flow: stow the arm to lower the CoG -> D* standoff -> RGB-D reacquire inside
+        the reveal disc -> pick (read grip-hold) -> stow again if empty-handed ->
         deliver to the owner zone -> task_complete. All legs share one sim-time budget.
         """
         c = self.client
@@ -178,7 +181,7 @@ class DemoParticipant:
         self._stow_arm()
 
         picked = False
-        # -- leg 1: approach the object front standoff, then straight-approach into arm reach, then pick --
+        # -- leg 1: D* to the object front standoff, then RGB-D search/close, then pick --
         approach = self._standoff_goal(collect_xy, TUMBLER_STANDOFF_M)
         log.info("[Stage2] leg1 -> object %s front standoff %s",
                  tuple(round(v, 2) for v in collect_xy), tuple(round(v, 2) for v in approach))
@@ -186,26 +189,24 @@ class DemoParticipant:
         self._navigate_to(approach, deadline, tol=0.45, inflation_m=0.10, exclude_m=1.0)
         if not c.is_running:
             return
-        # Final straight approach: drive straight at the object until arm_base fwd reaches grasp reach.
-        self._approach_straight(collect_xy, deadline, target_fwd=0.40)
-        # Stop! the chassis driver keeps applying the last cmd_vel, so emit 0 before the pick
-        # (otherwise residual speed overshoots the object).
+        reveal = self._reveal if self._reveal is not None else c.stage2_reveal
+        target = NearFieldAcquire(c, make_detector()).acquire(reveal, deadline)
         for _ in range(5):
             c.send_cmd_vel(0.0, 0.0)
             c.sleep(0.1)
-        log.info("[Stage2] standoff stop -- ready to pick")
-        try:
-            grasp_xy = self._object_arm_xy(collect_xy)   # actual object position in the arm_base frame
-            log.info("[Stage2] object pick sequence (object-position grasp=%s)",
-                     tuple(round(v, 3) for v in grasp_xy) if grasp_xy else None)
-            held = run_pick_sequence(c, log, grasp_xy)
-            c.send_cmd_vel(0.0, 0.0)
-            # Grip-hold feedback (participant style). None (no feedback) -> conservatively count
-            # the completed sequence as success.
-            picked = True if held is None else bool(held)
-            log.info("[Stage2] pick %s (grip held=%s)", "ok" if picked else "failed", held)
-        except Exception as e:
-            log.warning("[Stage2] pick failed: %s", e)
+        if not target.valid:
+            log.warning("[Stage2] near-field acquire failed (%s) -- skip pick (fail closed)",
+                        target.reason)
+        else:
+            log.info("[Stage2] localized %s grasp=(%.2f, %.2f, z=%.2f) conf=%.2f",
+                     target.name or "?", target.fwd, target.lat, target.z, target.conf)
+            try:
+                held = run_pick_sequence(c, log, (target.fwd, target.lat))
+                c.send_cmd_vel(0.0, 0.0)
+                picked = True if held is None else bool(held)
+                log.info("[Stage2] pick %s (grip held=%s)", "ok" if picked else "failed", held)
+            except Exception as e:
+                log.warning("[Stage2] pick failed: %s", e)
 
         # If the arm is left raised (front_high) without an object, driving the delivery leg with
         # that top-heavy CoG can tip the robot over on turns. Empty-handed -> fold to HOME.
