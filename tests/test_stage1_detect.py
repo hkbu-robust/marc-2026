@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 from marc_agent.perception.cctv_round import fetch_cctv_round
 from marc_agent.perception.stage1_detect import detect_stage1_round
 from marc_agent.perception.stub_detections import default_stub_path, load_stub_detections
+from marc_agent.types import PersonCandidate
 
 
 class _FakeImage:
@@ -55,6 +57,46 @@ class StubDetectionTests(unittest.TestCase):
         mug = next(item for item in round_.objects if item.class_name == "mug")
         self.assertEqual("rig_2_c:mug:0", mug.candidate_id)
         self.assertEqual("accident", round_.sar[0].situation)
+
+    def test_live_mode_retains_people_and_records_missing_frames(self):
+        people = [
+            PersonCandidate(
+                "rig_2_c:person:0",
+                (10.0, 20.0, 30.0, 40.0),
+                "person_prone",
+                0.9,
+                "rig_2_c",
+                (640, 480),
+            )
+        ]
+        previous_detector = os.environ.get("MARC_STAGE1_DETECTOR")
+        previous_sar = os.environ.get("MARC_SAR_DETECTOR")
+        os.environ["MARC_STAGE1_DETECTOR"] = "yolo"
+        os.environ["MARC_SAR_DETECTOR"] = "fallback"
+        try:
+            client = _FakeClient(
+                camera_ids=["rig_2_c", "rig_missing"],
+                images={"rig_2_c": _FakeImage(640, 480)},
+            )
+            with patch(
+                "marc_agent.perception.stage1_detect.detect_frames_with_yolo",
+                return_value=([], people),
+            ):
+                round_ = detect_stage1_round(client)
+        finally:
+            if previous_detector is None:
+                os.environ.pop("MARC_STAGE1_DETECTOR", None)
+            else:
+                os.environ["MARC_STAGE1_DETECTOR"] = previous_detector
+            if previous_sar is None:
+                os.environ.pop("MARC_SAR_DETECTOR", None)
+            else:
+                os.environ["MARC_SAR_DETECTOR"] = previous_sar
+
+        self.assertEqual(people, round_.people)
+        self.assertEqual(2, round_.metrics.cameras_discovered)
+        self.assertEqual(1, round_.metrics.frames_loaded)
+        self.assertEqual(("missing_frame:rig_missing",), round_.metrics.failures)
 
     def test_filters_unknown_cameras(self):
         round_ = load_stub_detections(

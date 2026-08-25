@@ -17,7 +17,7 @@ from marc_agent.perception.bundle_paths import (
     STAGE1_CCTV_WEIGHTS,
 )
 from marc_agent.perception.pose_to_situation import is_person_pose, situation_for_pose
-from marc_agent.types import CctvFrame, ObjectCandidate, SarCandidate
+from marc_agent.types import CctvFrame, ObjectCandidate, PersonCandidate, SarCandidate
 
 log = logging.getLogger("marc_agent.cctv_yolo")
 
@@ -73,25 +73,22 @@ def detections_to_candidates(
     camera_id: str,
     image_size: tuple[int, int],
     detections: list[tuple[str, float, tuple[float, float, float, float]]],
-    *,
-    include_sar: bool = False,
-) -> tuple[list[ObjectCandidate], list[SarCandidate]]:
+) -> tuple[list[ObjectCandidate], list[PersonCandidate]]:
     objects: list[ObjectCandidate] = []
-    sar: list[SarCandidate] = []
+    people: list[PersonCandidate] = []
     class_counts: dict[str, int] = defaultdict(int)
+    person_count = 0
 
-    for class_name, confidence, bbox in detections:
+    ordered = sorted(detections, key=lambda item: (item[2], item[0], -item[1]))
+    for class_name, confidence, bbox in ordered:
         if is_person_pose(class_name):
-            if not include_sar:
-                continue
-            idx = class_counts[class_name]
-            class_counts[class_name] += 1
-            candidate_id = f"{camera_id}:{class_name}:{idx}"
-            sar.append(
-                SarCandidate(
+            candidate_id = f"{camera_id}:person:{person_count}"
+            person_count += 1
+            people.append(
+                PersonCandidate(
                     candidate_id=candidate_id,
                     bbox_xyxy=bbox,
-                    situation=situation_for_pose(class_name),
+                    pose_class=class_name,
                     confidence=confidence,
                     camera_id=camera_id,
                     image_size=image_size,
@@ -113,7 +110,22 @@ def detections_to_candidates(
             )
         )
 
-    return objects, sar
+    return objects, people
+
+
+def person_candidates_to_sar(people: list[PersonCandidate]) -> list[SarCandidate]:
+    """Adapt raw person proposals to the provisional pose-only SAR contract."""
+    return [
+        SarCandidate(
+            candidate_id=person.candidate_id,
+            bbox_xyxy=person.bbox_xyxy,
+            situation=situation_for_pose(person.pose_class),
+            confidence=person.confidence,
+            camera_id=person.camera_id,
+            image_size=person.image_size,
+        )
+        for person in people
+    ]
 
 
 class CctvYoloDetector:
@@ -205,11 +217,9 @@ class CctvYoloDetector:
     def detect(
         self,
         frames: dict[str, CctvFrame],
-        *,
-        include_sar: bool = False,
-    ) -> tuple[list[ObjectCandidate], list[SarCandidate]]:
+    ) -> tuple[list[ObjectCandidate], list[PersonCandidate]]:
         all_objects: list[ObjectCandidate] = []
-        all_sar: list[SarCandidate] = []
+        all_people: list[PersonCandidate] = []
 
         for camera_id in sorted(frames):
             frame = frames[camera_id]
@@ -218,13 +228,11 @@ class CctvYoloDetector:
                 continue
             detections = self._predict_frame(np.asarray(rgb))
             image_size = (int(frame.width), int(frame.height))
-            objects, sar = detections_to_candidates(
-                camera_id, image_size, detections, include_sar=include_sar
-            )
+            objects, people = detections_to_candidates(camera_id, image_size, detections)
             all_objects.extend(objects)
-            all_sar.extend(sar)
+            all_people.extend(people)
 
-        return all_objects, all_sar
+        return all_objects, all_people
 
 
 _detector: Optional[CctvYoloDetector] = None
@@ -232,10 +240,8 @@ _detector: Optional[CctvYoloDetector] = None
 
 def detect_frames_with_yolo(
     frames: dict[str, CctvFrame],
-    *,
-    include_sar: bool = False,
-) -> tuple[list[ObjectCandidate], list[SarCandidate]]:
+) -> tuple[list[ObjectCandidate], list[PersonCandidate]]:
     global _detector
     if _detector is None:
         _detector = CctvYoloDetector()
-    return _detector.detect(frames, include_sar=include_sar)
+    return _detector.detect(frames)

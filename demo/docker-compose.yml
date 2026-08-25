@@ -36,7 +36,7 @@ services:
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent"
       # Keep Qwen disabled until models/runtime/stage1-sar-qwen/model is complete.
-      MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-stub}"
+      MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-fallback}"
       MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"

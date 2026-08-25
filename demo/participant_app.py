@@ -25,7 +25,10 @@ import time
 from marc_sdk import MARCClient
 
 from marc_agent.perception.cctv_dump import maybe_dump_cctv_round
-from marc_agent.perception.stage1_detect import detect_stage1_round
+from marc_agent.perception.stage1_pipeline import (
+    append_stage1_record,
+    run_stage1_candidate_pipeline,
+)
 from mock_agent_vla import MockVLAGrounding
 from mock_agent_navigation import (
     OccupancyGridPlanner, PathFollower, SpeedGovernor,
@@ -84,7 +87,9 @@ class DemoParticipant:
 
     def __init__(self):
         self.client = MARCClient.from_env()
-        self.vla = MockVLAGrounding()
+        # Stage 1 never constructs or reads the scenario-backed mock. Keep the legacy
+        # Stage 2 demo adapter lazy until that separate mission path is invoked.
+        self._stage2_vla = None
         #logging.info("Connected to MARC server: %s", self.client.connect())
         # Stage 2 pickup goal -- filled from the approximate location hint in the reveal (msg 411).
         # If not received, fall back to the Stage 2 answer target (_stage2_target_xy).
@@ -102,6 +107,7 @@ class DemoParticipant:
             log.info("[Stage2] NAV_USE_MOCK_OBSTACLES=1 -- injecting %d yaml discs",
                      len(self._obstacles))
         self._last_detections = None
+        self._last_stage1_candidates = None
         self._register_handlers()
 
     # -- handler registration --
@@ -121,16 +127,36 @@ class DemoParticipant:
     def _on_mission(self, mission):
         log.info("[Stage1] round %s/%s: \"%s\"",
                  mission.round, mission.total_rounds, mission.voice_command)
-        self._last_detections = detect_stage1_round(self.client)
+        self._last_stage1_candidates = run_stage1_candidate_pipeline(
+            self.client,
+            mission.voice_command,
+        )
+        self._last_detections = self._last_stage1_candidates.detections
         maybe_dump_cctv_round(self._last_detections, round_num=mission.round)
-        log.info("[Stage1] CCTV round: %d cameras, %d frames, %d object candidates, %d SAR candidates",
+        log.info(
+                 "[Stage1] CCTV round: %d cameras, %d frames, %d objects, "
+                 "%d people, selected=%s reason=%s",
                  len(self._last_detections.camera_ids),
                  len(self._last_detections.frames),
                  len(self._last_detections.objects),
-                 len(self._last_detections.sar))
-        # Submission still uses the mock VLA until #8/#9 choose and project candidates.
-        result = self.vla.process(mission.voice_command, self.client.list_cctv())
-        self.client.submit_grounding(result)
+                 len(self._last_detections.people),
+                 self._last_stage1_candidates.selected_candidate_id,
+                 self._last_stage1_candidates.failure_reason)
+        metrics_path = os.environ.get(
+            "MARC_STAGE1_METRICS_PATH",
+            "artifacts/stage1_rounds.jsonl",
+        )
+        try:
+            append_stage1_record(self._last_stage1_candidates, metrics_path)
+        except OSError as exc:
+            log.warning("[Stage1] could not append metrics to %s: %s", metrics_path, exc)
+
+        # Issue #7 ends at a selected pixel-space candidate. Issues #8/#9 own object
+        # relation choice and projection into the GroundingResult world coordinate.
+        # Never submit the scenario-backed mock answer from the production Stage 1 path.
+        log.info(
+            "[Stage1] candidate handoff ready; awaiting #8/#9 projection before submission"
+        )
 
     # -- Stage 2: submit interpretation -> drive --
 
@@ -143,7 +169,9 @@ class DemoParticipant:
             self._pickup_xy = (float(op[0]), float(op[1]))
             log.info("[Stage2] owner_position(runtime-provided)=%s", self._pickup_xy)
         # Grounding: look up the pre-extracted Stage 2 answer for this task (mock VLA).
-        result = self.vla.process_stage2(mission.task_description)
+        if self._stage2_vla is None:
+            self._stage2_vla = MockVLAGrounding()
+        result = self._stage2_vla.process_stage2(mission.task_description)
         self.client.submit_stage2_grounding(result)
         # Keep the answer's target as a fallback pickup goal (used if no reveal arrives).
         tc = result.target_coord

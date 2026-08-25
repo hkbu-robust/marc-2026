@@ -17,6 +17,7 @@ python -m marc_agent.perception.qwen_runtime
 After the check succeeds, rebuild the participant image. Runtime loading is local-only; it
 never falls back to the Hub.
 
-Do not set `MARC_SAR_DETECTOR=qwen` yet. Candidate-board construction and the Qwen
-selection call are the next implementation step; until they are wired, keep the detector
-mode on `stub` or `yolo`.
+After the check passes, set `MARC_SAR_DETECTOR=qwen`. The Stage 1 candidate pipeline will
+build one bounded multi-image board, run one local generation, validate the returned
+candidate ID and situation token, and use deterministic evidence if loading or generation
+fails. Until the snapshot arrives, leave the mode on `fallback`.
