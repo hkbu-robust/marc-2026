@@ -26,9 +26,10 @@ from marc_sdk import MARCClient
 
 from mock_agent_vla import MockVLAGrounding
 from mock_agent_navigation import (
-    OccupancyGridPlanner, PathFollower,
+    OccupancyGridPlanner, PathFollower, SpeedGovernor,
     load_obstacles, obstacles_excluding_goal, load_mock_data,
     lidar_cloud_to_obstacles, path_is_blocked, frontal_hit,
+    pointcloud2_xyz,
 )
 # Closed-loop placo pick from the manipulation kit (arm_pick.py): grasp_yaw wrist-roll +
 # DLS servo, targeting the object position. Requires placo (installed in the demo image).
@@ -335,6 +336,7 @@ class DemoParticipant:
         c = self.client
         planner = OccupancyGridPlanner()
         follower = None
+        governor = SpeedGovernor()
 
         last_xy = None
         last_progress_t = c.now_s()
@@ -444,6 +446,10 @@ class DemoParticipant:
 
             if hold_linear:
                 linear, angular = 0.0, 0.0
+            elif linear > 1e-6:
+                xyz = pointcloud2_xyz(cloud) if cloud is not None else None
+                linear, angular = governor.limit(
+                    linear, angular, imu=c.get_imu(), xyz=xyz, dt=STAGE2_NAV_DT)
 
             c.send_cmd_vel(linear_x=linear, angular_z=angular)
 
