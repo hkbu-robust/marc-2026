@@ -3,6 +3,7 @@
 This module bundles the demo's navigation pieces (participants replace/extend them):
   - GoalSeekController / PathFollower -- P-control that returns ``(linear_x, angular_z)``
     scalars to publish with ``client.send_cmd_vel(...)``.
+  - SpeedGovernor -- IMU + low-Z lidar cap on those scalars (rollover / curb bounce).
   - OccupancyGridPlanner -- D* Lite over the runtime occupancy grid
     (``MARCClient.get_occupancy_map()``), with A* as a fallback.
   - lidar_cloud_to_obstacles -- live PointCloud2 hits as extra discs (roads-only map
@@ -68,7 +69,7 @@ class GoalSeekController:
 
     # Speed / turn caps. Large turns are handled in place (see HEADING_TOLERANCE), so forward
     # motion rarely needs a hard swerve; the Ackermann w-limit below guarantees a tight arc.
-    MAX_LINEAR = 0.8           # m/s
+    MAX_LINEAR = 1.0           # m/s; SpeedGovernor cuts this on corners / curbs / tilt
     MAX_ANGULAR = 1.2          # rad/s
     K_LINEAR = 0.5
     K_ANGULAR = 0.8
@@ -168,6 +169,173 @@ class PathFollower:
         done = final and reached
         info = {"idx": self.idx, "total": len(self.path), "waypoint": (wx, wy)}
         return linear, angular, done, info
+
+
+# ---------------------------------------------------------------------------
+# Speed governor: IMU dynamics + curb-height lidar look-ahead.
+# ---------------------------------------------------------------------------
+
+# Curb band sits below LIDAR_Z_MIN so these hits never enter occupancy overlay.
+CURB_Z_MIN = 0.03
+CURB_Z_MAX = 0.18
+CURB_X_MIN = 0.30
+CURB_X_MAX = 2.00
+CURB_Y_HALF = 0.25
+_G = 9.81
+
+
+def _imu_xyz(part):
+    if part is None:
+        return 0.0, 0.0, 0.0
+    return (
+        float(getattr(part, "x", 0.0) or 0.0),
+        float(getattr(part, "y", 0.0) or 0.0),
+        float(getattr(part, "z", 0.0) or 0.0),
+    )
+
+
+def _quat_roll_pitch(q):
+    """Body roll, pitch (rad) from a geometry_msgs-style quaternion. Zeros -> level."""
+    if q is None:
+        return 0.0, 0.0
+    x, y, z = _imu_xyz(q)
+    w = float(getattr(q, "w", 1.0) or 0.0)
+    if (x * x + y * y + z * z + w * w) < 1e-12:
+        return 0.0, 0.0
+    sinp = _clamp(2.0 * (w * y - z * x), -1.0, 1.0)
+    pitch = math.asin(sinp)
+    roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    return roll, pitch
+
+
+def _az_jolt(az):
+    """Vertical accel away from rest (0 or ±g), so gravity-on and gravity-off IMUs both work."""
+    az = float(az)
+    return min(abs(az), abs(az - _G), abs(az + _G))
+
+
+def _lerp_cap(x, x0, x1, y0, y1):
+    """x<=x0 -> y0, x>=x1 -> y1, linear in between."""
+    if x <= x0:
+        return y0
+    if x >= x1:
+        return y1
+    t = (x - x0) / (x1 - x0)
+    return y0 + t * (y1 - y0)
+
+
+def curb_hits_ahead(xyz):
+    """Count curb-height lidar hits in a short bumper box.
+
+    ``xyz`` is robot-frame Nx3 (lidar +X forward). Returns ``(n_hits, min_forward_m)``.
+    No hits -> ``(0, inf)``. Not an occupancy overlay -- curbs stay drivable, just slow.
+    """
+    if xyz is None:
+        return 0, float("inf")
+    pts = np.asarray(xyz, dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[1] < 3 or pts.shape[0] == 0:
+        return 0, float("inf")
+    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    mask = (
+        finite
+        & (z >= CURB_Z_MIN) & (z <= CURB_Z_MAX)
+        & (x >= CURB_X_MIN) & (x <= CURB_X_MAX)
+        & (np.abs(y) <= CURB_Y_HALF)
+    )
+    hits = pts[mask]
+    if hits.shape[0] == 0:
+        return 0, float("inf")
+    return int(hits.shape[0]), float(np.min(hits[:, 0]))
+
+
+class SpeedGovernor:
+    """Cap PathFollower cmd_vel so straights can cruise and corners / curbs do not flip the chassis.
+
+    ``limit(linear, angular, imu, xyz)`` never raises ``linear`` above the request. Missing
+    IMU/lidar still caps from commanded yaw rate. After cutting v, recaps w with the same
+    Ackermann rule as ``GoalSeekController`` so the chassis does not stall on ``2v <= w*T``.
+    """
+
+    STEERING_TRACK = GoalSeekController.STEERING_TRACK
+    A_LAT_MAX = 0.65          # m/s^2; v <= A_LAT / |w|
+    ROLL_START = 0.08         # rad (~4.5 deg) -- begin cutting
+    ROLL_HARD = 0.30          # rad (~17 deg)
+    ROLL_RATE_START = 0.50    # rad/s
+    ROLL_RATE_HARD = 2.00
+    AY_START = 1.00           # m/s^2 lateral
+    AY_HARD = 3.50
+    AY_SPIKE = 4.50
+    AZ_SPIKE = 4.00           # m/s^2 jolt from rest
+    V_FLOOR = 0.20            # m/s -- creep over a lip / after a bump
+    V_SPIKE = 0.22
+    SPIKE_HOLD_S = 0.80
+    CURB_NEAR_M = 0.45        # at this forward range, v -> V_FLOOR
+    CURB_FAR_M = CURB_X_MAX
+    TAU_DOWN_S = 0.08
+    TAU_UP_S = 0.40
+
+    def __init__(self):
+        self._v_filt = None
+        self._spike_t = 0.0
+        self._spike_v = self.V_SPIKE
+
+    def limit(self, linear, angular, imu=None, xyz=None, dt=None):
+        """Return ``(linear_x, angular_z)`` capped for stability and curb bounce."""
+        requested = float(linear)
+        ang = float(angular)
+        dt = 0.10 if dt is None else max(1e-3, float(dt))
+
+        if requested <= 1e-6:
+            self._spike_t = max(0.0, self._spike_t - dt)
+            return 0.0, ang
+
+        v_cap = abs(requested)
+        w_used = abs(ang)
+        roll = pitch = wx = ay = az = 0.0
+        if imu is not None:
+            wx, _, wz = _imu_xyz(getattr(imu, "angular_velocity", None))
+            _, ay, az = _imu_xyz(getattr(imu, "linear_acceleration", None))
+            roll, pitch = _quat_roll_pitch(getattr(imu, "orientation", None))
+            w_used = max(w_used, abs(wz))
+
+        v_cap = min(v_cap, self.A_LAT_MAX / (w_used + 1e-3))
+        tilt = max(abs(roll), abs(pitch))
+        v_cap = min(
+            v_cap,
+            _lerp_cap(tilt, self.ROLL_START, self.ROLL_HARD, abs(requested), self.V_FLOOR),
+            _lerp_cap(abs(wx), self.ROLL_RATE_START, self.ROLL_RATE_HARD,
+                      abs(requested), self.V_FLOOR),
+            _lerp_cap(abs(ay), self.AY_START, self.AY_HARD, abs(requested), self.V_FLOOR),
+        )
+
+        if imu is not None and (_az_jolt(az) >= self.AZ_SPIKE or abs(ay) >= self.AY_SPIKE):
+            self._spike_v = self.V_SPIKE
+            self._spike_t = self.SPIKE_HOLD_S
+
+        n_curb, x_curb = curb_hits_ahead(xyz)
+        if n_curb > 0:
+            v_curb = _lerp_cap(x_curb, self.CURB_NEAR_M, self.CURB_FAR_M,
+                               self.V_FLOOR, abs(requested))
+            v_cap = min(v_cap, v_curb)
+
+        if self._spike_t > 0.0:
+            v_cap = min(v_cap, self._spike_v)
+            self._spike_t = max(0.0, self._spike_t - dt)
+
+        if self._v_filt is None:
+            self._v_filt = v_cap
+        else:
+            tau = self.TAU_DOWN_S if v_cap < self._v_filt else self.TAU_UP_S
+            alpha = dt / (tau + dt)
+            self._v_filt += alpha * (v_cap - self._v_filt)
+
+        out_lin = min(requested, self._v_filt)
+        out_ang = ang
+        if out_lin > 1e-3:
+            w_max = 1.8 * out_lin / self.STEERING_TRACK
+            out_ang = _clamp(ang, -w_max, w_max)
+        return out_lin, out_ang
 
 
 # ---------------------------------------------------------------------------
