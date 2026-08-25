@@ -178,7 +178,7 @@ python3 -m manip_dataset.to_rlds \
 `--camera auto` exports each episode's recorded `primary_camera`; pass `base` or `gripper`
 to force a view (it falls back to the other one if the requested view is absent).
 
-Produces `episodes/episode_XXXX.npz`, `manifest.json`, and `dataset_statistics.json` (action mean/std). Wire those into your OpenVLA dataset transform / OXE RLDS builder; this repo does not run training.
+Produces `episodes/episode_XXXX.npz`, `manifest.json`, and `dataset_statistics.json` nested under `marc_pnp` with OpenVLA `action.{q01,q99,min,max,mean,std,mask}` (gripper `mask=false`). Point LoRA fine-tuning at `unnorm_key=marc_pnp` so decode uses the same bounds as inference. This repo does not run training.
 
 `language_instruction` is pick-only (`"pick up the tumbler"`). Place (`P`) is still used as a keep-filter but is not in the action labels, so the text does not mention the basket.
 

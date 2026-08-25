@@ -1,0 +1,74 @@
+# Hand-computed OpenVLA token decode fixtures.
+# bins = linspace(-1, 1, 256); bin_centers are the 255 midpoints.
+# token_id = vocab_size - (bin_index + 1); vocab_size = 32000.
+# Unnormalize: 0.5 * (x + 1) * (q99 - q01) + q01 where mask is true.
+# Gripper mask is false, so the last dim stays on the bin center.
+
+vocab_size: 32000
+n_bins: 256
+unnorm_key: marc_pnp
+q01: [-0.05, -0.04, -0.03, -0.20, -0.20, -0.20, -1.0]
+q99: [ 0.05,  0.04,  0.03,  0.20,  0.20,  0.20,  1.0]
+mask: [true, true, true, true, true, true, false]
+
+decode_cases:
+  - id: all_low
+    token_ids: [31999, 31999, 31999, 31999, 31999, 31999, 31999]
+    action: [-0.04980392156862745, -0.03984313725490196, -0.02988235294117647,
+             -0.1992156862745098, -0.1992156862745098, -0.1992156862745098,
+             -0.996078431372549]
+    grip_close: false
+    grip_cmd: 0.0
+  - id: all_high
+    token_ids: [31745, 31745, 31745, 31745, 31745, 31745, 31745]
+    action: [0.04980392156862745, 0.03984313725490197, 0.02988235294117647,
+             0.1992156862745098, 0.1992156862745098, 0.1992156862745098,
+             0.996078431372549]
+    grip_close: true
+    grip_cmd: 0.703
+  - id: mid
+    token_ids: [31872, 31872, 31872, 31872, 31872, 31872, 31872]
+    action: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    grip_close: false
+    grip_cmd: 0.0
+  - id: mixed
+    token_ids: [31989, 31979, 31969, 31959, 31949, 31939, 31745]
+    action: [-0.04588235294117648, -0.033568627450980396, -0.022823529411764704,
+             -0.13647058823529412, -0.12078431372549021, -0.10509803921568628,
+             0.996078431372549]
+    grip_close: true
+    grip_cmd: 0.703
+
+quat_cases:
+  - id: identity
+    q: [1.0, 0.0, 0.0, 0.0]
+    droll: 0.0
+    dpitch: 0.0
+    dyaw: 0.0
+    expected: [1.0, 0.0, 0.0, 0.0]
+  - id: yaw_90
+    q: [1.0, 0.0, 0.0, 0.0]
+    droll: 0.0
+    dpitch: 0.0
+    dyaw: 1.5707963267948966
+    expected: [0.7071067811865476, 0.0, 0.0, 0.7071067811865475]
+  - id: small_rpy
+    q: [1.0, 0.0, 0.0, 0.0]
+    droll: 0.01
+    dpitch: -0.02
+    dyaw: 0.03
+    # rotvec_to_quat([0.01, -0.02, 0.03]); angle = 0.037416573867739416
+    expected: [0.9998250051041071, 0.004999708338437458, -0.009999416676874916, 0.014999125015312373]
+
+grip_cases:
+  - {value: -1.0, signed: true, close: false, cmd: 0.0}
+  - {value: -0.1, signed: true, close: false, cmd: 0.0}
+  - {value: 0.0, signed: true, close: true, cmd: 0.703}
+  - {value: 1.0, signed: true, close: true, cmd: 0.703}
+  - {value: 0.0, signed: false, close: false, cmd: 0.0}
+  - {value: 0.49, signed: false, close: false, cmd: 0.0}
+  - {value: 0.5, signed: false, close: true, cmd: 0.703}
+  - {value: 1.0, signed: false, close: true, cmd: 0.703}
+  - {value: -0.8, signed: null, close: false, cmd: 0.0}
+  - {value: 0.0, signed: null, close: false, cmd: 0.0}
+  - {value: 0.6, signed: null, close: true, cmd: 0.703}

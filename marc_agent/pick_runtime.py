@@ -15,8 +15,13 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from marc_agent.openvla_policy import (
+from marc_agent.openvla_actions import (
     ACTION_DIM,
+    GRIPPER_CLOSE,
+    gripper_should_close,
+    pick_instruction,
+)
+from marc_agent.openvla_policy import (
     GeometricGraspStub,
     PolicyObservation,
     load_openvla,
@@ -197,7 +202,7 @@ class PickRuntime:
                 p["grasp_down"] = z
         arm_pick.run_motion(self.client, self._log, p, "pick")
 
-    def _snapshot_obs(self) -> PolicyObservation:
+    def _snapshot_obs(self, target=None) -> PolicyObservation:
         rgb = None
         try:
             img = self.client.get_robot_image("base_left")
@@ -207,8 +212,10 @@ class PickRuntime:
             rgb = None
         proprio = None
         ee = None
+        ee_quat = None
         try:
             from manip_dataset.arm_control import read_arm_q, read_grip_and_inner
+            import arm_kin
             q = read_arm_q(self.client)
             grip, _ = read_grip_and_inner(self.client)
             if q is not None:
@@ -216,38 +223,54 @@ class PickRuntime:
                     [np.asarray(q, dtype=np.float32),
                      np.array([float(grip)], dtype=np.float32)])
                 arm = self._teleop_arm()
-                ee = arm.kin.fk(q)[:3, 3]
+                pose = arm.kin.fk(q)
+                ee = pose[:3, 3]
+                ee_quat = arm_kin.R_to_quat(pose[:3, :3])
         except Exception:
             pass
-        return PolicyObservation(rgb=rgb, proprio=proprio, ee_xyz=ee)
+        return PolicyObservation(
+            rgb=rgb, proprio=proprio, ee_xyz=ee, ee_quat=ee_quat,
+            instruction=pick_instruction(target),
+        )
+
+    def _close_grip_cmd(self) -> float:
+        try:
+            from arm_pick import GRIPPER_CLOSE as close_default, load_params
+            return float(load_params().get("grip_close", close_default))
+        except Exception:
+            return float(GRIPPER_CLOSE)
 
     def _geom_or_openvla_grasp(self, target, policy_obj) -> None:
         arm = self._teleop_arm()
+        close_cmd = self._close_grip_cmd()
         for _ in range(self.policy_ticks):
             try:
                 if self.client.is_grasping() is True:
                     return
             except Exception:
                 pass
-            obs = self._snapshot_obs()
+            obs = self._snapshot_obs(target)
             action = np.asarray(policy_obj.act(obs), dtype=np.float32).reshape(-1)
             if action.size < ACTION_DIM:
                 action = np.pad(action, (0, ACTION_DIM - int(action.size)))
             dx, dy, dz = float(action[0]), float(action[1]), float(action[2])
             droll, dpitch, dyaw = float(action[3]), float(action[4]), float(action[5])
-            grip = float(action[6])
-            grip_cmd = None
-            if grip >= 0.5:
-                try:
-                    from arm_pick import GRIPPER_CLOSE, load_params
-                    grip_cmd = float(load_params().get("grip_close", GRIPPER_CLOSE))
-                except Exception:
-                    grip_cmd = 0.703
+            # EE delta first with grip unchanged so apply_delta composes the
+            # rotvec into target_quat. Mixed motion+grip would skip the ramp.
             arm.apply_delta(
                 dx=dx, dy=dy, dz=dz,
                 droll=droll, dpitch=dpitch, dyaw=dyaw,
-                grip=grip_cmd,
+                grip=None,
             )
+            try:
+                if self.client.is_grasping() is True:
+                    return
+            except Exception:
+                pass
+            stats = getattr(policy_obj, "stats", None)
+            signed = bool(stats.gripper_signed) if stats is not None else None
+            if gripper_should_close(float(action[6]), signed=signed):
+                arm.apply_delta(grip=close_cmd)
 
     def _grasp(self, target) -> None:
         if self._grasp_fn is not None:
