@@ -6,8 +6,10 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Mapping, Optional
+from urllib.parse import urlparse
 
 from marc_agent.perception.bundle_paths import (
     STAGE1_QWEN_CONTRACT,
@@ -17,6 +19,111 @@ from marc_agent.perception.bundle_paths import (
 
 class QwenModelUnavailable(RuntimeError):
     """Raised when the configured local model snapshot is incomplete."""
+
+
+class QwenConfigurationError(ValueError):
+    """Raised when the selected Qwen backend cannot be configured safely."""
+
+
+class QwenBackend(str, Enum):
+    LOCAL = "local"
+    REMOTE = "remote"
+
+
+def configured_backend(
+    environ: Optional[Mapping[str, str]] = None,
+) -> QwenBackend:
+    """Return the Qwen adapter selected for this process."""
+    env = os.environ if environ is None else environ
+    raw = str(env.get("MARC_QWEN_BACKEND") or QwenBackend.LOCAL.value).strip().lower()
+    try:
+        return QwenBackend(raw)
+    except ValueError as exc:
+        choices = ", ".join(item.value for item in QwenBackend)
+        raise QwenConfigurationError(
+            f"Unsupported MARC_QWEN_BACKEND {raw!r}; choose {choices}."
+        ) from exc
+
+
+def configured_max_crops(
+    environ: Optional[Mapping[str, str]] = None,
+) -> int:
+    """Bound per-person crops while annotated views still cover every candidate."""
+    env = os.environ if environ is None else environ
+    try:
+        value = int(env.get("MARC_QWEN_MAX_CROPS") or 12)
+    except (TypeError, ValueError) as exc:
+        raise QwenConfigurationError("MARC_QWEN_MAX_CROPS must be an integer") from exc
+    if value < 0:
+        raise QwenConfigurationError("MARC_QWEN_MAX_CROPS must be non-negative")
+    return value
+
+
+@dataclass(frozen=True)
+class QwenRemoteConfig:
+    """Connection and payload limits for an OpenAI-compatible vLLM server."""
+
+    base_url: str
+    api_key: str
+    model_name: str
+    timeout_s: float
+    max_new_tokens: int
+    jpeg_quality: int
+
+    @property
+    def chat_completions_url(self) -> str:
+        return f"{self.base_url}/chat/completions"
+
+    @classmethod
+    def load(
+        cls,
+        contract_path: Path = STAGE1_QWEN_CONTRACT,
+        *,
+        environ: Optional[Mapping[str, str]] = None,
+    ) -> "QwenRemoteConfig":
+        env = os.environ if environ is None else environ
+        payload = json.loads(contract_path.read_text(encoding="utf-8"))
+        inference = payload.get("inference") or {}
+        base_url = str(env.get("MARC_QWEN_BASE_URL") or "").strip().rstrip("/")
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise QwenConfigurationError(
+                "MARC_QWEN_BASE_URL must be an http(s) URL such as "
+                "http://192.168.1.20:8000/v1"
+            )
+        api_key = str(env.get("MARC_QWEN_API_KEY") or "").strip()
+        if not api_key:
+            raise QwenConfigurationError("MARC_QWEN_API_KEY is required in remote mode")
+        model_name = str(env.get("MARC_QWEN_MODEL") or "qwen3-vl-8b").strip()
+        if not model_name:
+            raise QwenConfigurationError("MARC_QWEN_MODEL must not be empty")
+        try:
+            timeout_s = float(env.get("MARC_QWEN_TIMEOUT_S") or 30.0)
+            max_new_tokens = int(
+                env.get("MARC_QWEN_MAX_NEW_TOKENS")
+                or inference.get("max_new_tokens", 8)
+            )
+            jpeg_quality = int(env.get("MARC_QWEN_JPEG_QUALITY") or 85)
+        except (TypeError, ValueError) as exc:
+            raise QwenConfigurationError(
+                "Qwen timeout, token limit, and JPEG quality must be numeric"
+            ) from exc
+        if timeout_s <= 0:
+            raise QwenConfigurationError("MARC_QWEN_TIMEOUT_S must be positive")
+        if max_new_tokens <= 0:
+            raise QwenConfigurationError("MARC_QWEN_MAX_NEW_TOKENS must be positive")
+        if not 1 <= jpeg_quality <= 95:
+            raise QwenConfigurationError(
+                "MARC_QWEN_JPEG_QUALITY must be between 1 and 95"
+            )
+        return cls(
+            base_url=base_url,
+            api_key=api_key,
+            model_name=model_name,
+            timeout_s=timeout_s,
+            max_new_tokens=max_new_tokens,
+            jpeg_quality=jpeg_quality,
+        )
 
 
 @dataclass(frozen=True)
@@ -148,7 +255,7 @@ def load_local_qwen(config: Optional[QwenRuntimeConfig] = None):
     cfg = require_local_bundle(config)
     try:
         import torch
-        from transformers import AutoModelForImageTextToText, AutoProcessor
+        from transformers import AutoModelForMultimodalLM, AutoProcessor
     except ImportError as exc:
         raise ImportError(
             "Qwen inference requires torch, transformers, accelerate, and safetensors "
@@ -170,7 +277,7 @@ def load_local_qwen(config: Optional[QwenRuntimeConfig] = None):
         str(cfg.model_dir),
         local_files_only=True,
     )
-    model = AutoModelForImageTextToText.from_pretrained(
+    model = AutoModelForMultimodalLM.from_pretrained(
         str(cfg.model_dir),
         local_files_only=True,
         dtype=dtype,

@@ -1,0 +1,29 @@
+# MARC 2026 submission entry point. Development Qwen overrides live under demo/.
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: demo/Dockerfile
+      target: agent
+    image: marc-agent:local
+    network_mode: host
+    environment:
+      MARC_TEAM_ID: "${MARC_TEAM_ID:-robust}"
+      MARC_TOKEN: "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
+      PYTHONPATH: "/agent:/agent/demo"
+      PYTHONUNBUFFERED: "1"
+      MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-fallback}"
+      MARC_QWEN_BACKEND: "${MARC_QWEN_BACKEND:-local}"
+      MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
+      MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -67,6 +67,17 @@ class SarSelectionTests(unittest.TestCase):
         self.assertIn("rig_a:trash_can:0", board.prompt)
         self.assertIn(self.text, board.prompt)
 
+    def test_board_limits_crops_but_keeps_every_candidate(self):
+        board = build_candidate_board(
+            self.text,
+            self.command,
+            _round(),
+            max_crops=1,
+        )
+        self.assertEqual(("rig_a:person:1", "rig_a:person:0"), board.candidate_ids)
+        self.assertEqual(2, len(board.images))  # one annotated camera + one crop
+        self.assertIn("rig_a:person:0", board.prompt)
+
     def test_valid_model_output_selects_only_supplied_id(self):
         result = select_sar_candidate(
             self.text,
@@ -77,6 +88,8 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual(SelectionStatus.SELECTED, result.status)
         self.assertEqual("rig_a:person:1", result.selected.candidate_id)
         self.assertEqual("qwen", result.method)
+        self.assertEqual("qwen", result.verifier_metrics.backend)
+        self.assertEqual(3, result.verifier_metrics.image_count)
 
     def test_invalid_model_output_uses_deterministic_fallback(self):
         result = select_sar_candidate(
@@ -88,6 +101,22 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:person:1", result.selected.candidate_id)
         self.assertEqual("deterministic_fallback", result.method)
         self.assertEqual("verifier_failed:ValueError", result.reason)
+
+    def test_remote_adapter_method_is_recorded(self):
+        class RemoteStub:
+            method = "qwen_remote"
+
+            def __call__(self, _board):
+                return "rig_a:person:1|emergency"
+
+        result = select_sar_candidate(
+            self.text,
+            self.command,
+            _round(),
+            verifier=RemoteStub(),
+        )
+        self.assertEqual("qwen_remote", result.method)
+        self.assertEqual("qwen_remote", result.verifier_metrics.backend)
 
     def test_output_parser_rejects_unknown_candidates_and_extra_text(self):
         with self.assertRaisesRegex(ValueError, "unknown candidate"):
@@ -141,6 +170,7 @@ class SarSelectionTests(unittest.TestCase):
         self.assertFalse(hasattr(result, "target_coord"))
         record = result.record(expected_candidate_id="rig_a:person:1")
         self.assertEqual(1.0, record["candidate_recall"])
+        self.assertEqual("qwen", record["verifier_metrics"]["backend"])
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rounds.jsonl"
@@ -176,6 +206,29 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual("deterministic_fallback", result.sar_selection.method)
         self.assertEqual(
             "verifier_failed:QwenModelUnavailable",
+            result.sar_selection.reason,
+        )
+
+    def test_remote_mode_without_connection_config_falls_back(self):
+        def detector(client, *, stub_path=None):
+            return _round()
+
+        env = {
+            "MARC_SAR_DETECTOR": "qwen",
+            "MARC_QWEN_BACKEND": "remote",
+            "MARC_QWEN_BASE_URL": "",
+            "MARC_QWEN_API_KEY": "",
+        }
+        with patch.dict("os.environ", env):
+            result = run_stage1_candidate_pipeline(
+                object(),
+                self.text,
+                detector=detector,
+            )
+        self.assertEqual("rig_a:person:1", result.selected_candidate_id)
+        self.assertEqual("deterministic_fallback", result.sar_selection.method)
+        self.assertEqual(
+            "verifier_failed:QwenConfigurationError",
             result.sar_selection.reason,
         )
 

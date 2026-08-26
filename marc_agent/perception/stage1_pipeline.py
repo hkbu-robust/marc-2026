@@ -16,6 +16,8 @@ from marc_agent.perception.sar_selection import (
     Verifier,
     select_sar_candidate,
 )
+from marc_agent.perception.qwen_remote import RemoteQwenSarVerifier
+from marc_agent.perception.qwen_runtime import QwenBackend, configured_backend
 from marc_agent.perception.stage1_detect import detect_stage1_round
 from marc_agent.types import CctvDetectionRound, CctvRoundMetrics
 
@@ -59,6 +61,11 @@ class Stage1CandidateResult:
             ),
             "selection_method": self.sar_selection.method if self.sar_selection else None,
             "selection_reason": self.sar_selection.reason if self.sar_selection else None,
+            "verifier_metrics": (
+                asdict(self.sar_selection.verifier_metrics)
+                if self.sar_selection and self.sar_selection.verifier_metrics
+                else None
+            ),
             "failure_reason": self.failure_reason,
             "candidate_recall": recall,
             "metrics": asdict(self.detections.metrics),
@@ -68,7 +75,20 @@ class Stage1CandidateResult:
 
 def _default_verifier() -> Optional[Verifier]:
     mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
-    return QwenSarVerifier() if mode == "qwen" else None
+    if mode not in {"qwen", "qwen-remote"}:
+        return None
+    backend = QwenBackend.REMOTE if mode == "qwen-remote" else configured_backend()
+    if backend is QwenBackend.REMOTE:
+        return RemoteQwenSarVerifier()
+    return QwenSarVerifier()
+
+
+def _failed_verifier(exc: Exception) -> Verifier:
+    """Delay backend setup failures until the shared fallback can classify them."""
+    def verify(_board):
+        raise exc
+
+    return verify
 
 
 def run_stage1_candidate_pipeline(
@@ -108,7 +128,13 @@ def run_stage1_candidate_pipeline(
     selection = None
     failure_reason = None
     if parsed.target_type == "person":
-        selected_verifier = verifier if verifier is not None else _default_verifier()
+        if verifier is not None:
+            selected_verifier = verifier
+        else:
+            try:
+                selected_verifier = _default_verifier()
+            except Exception as exc:
+                selected_verifier = _failed_verifier(exc)
         selection = select_sar_candidate(
             command_text,
             parsed,

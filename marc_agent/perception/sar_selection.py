@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import math
+import logging
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Iterable, Optional
 
 from marc_agent.command_parser import ParsedCommand
 from marc_agent.perception.pose_to_situation import situation_for_pose
-from marc_agent.perception.qwen_runtime import QwenRuntimeConfig, load_local_qwen
+from marc_agent.perception.qwen_runtime import (
+    QwenRuntimeConfig,
+    configured_max_crops,
+    load_local_qwen,
+)
 from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidate
 
 _SITUATIONS = frozenset({"normal", "abnormal", "emergency", "accident"})
+log = logging.getLogger("marc_agent.sar_selection")
 
 
 class SelectionStatus(str, Enum):
@@ -45,6 +52,14 @@ class CandidateBoard:
 
 
 @dataclass(frozen=True)
+class VerifierMetrics:
+    backend: str
+    image_count: int
+    latency_ms: Optional[float]
+    request_bytes: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class SarSelectionResult:
     status: SelectionStatus
     selected: Optional[PersonCandidate]
@@ -53,9 +68,28 @@ class SarSelectionResult:
     method: str
     reason: str
     raw_output: Optional[str] = None
+    verifier_metrics: Optional[VerifierMetrics] = None
 
 
 Verifier = Callable[[CandidateBoard], str]
+
+
+def _verifier_metrics(verifier: Verifier, board: CandidateBoard) -> VerifierMetrics:
+    backend = str(getattr(verifier, "method", "qwen"))
+    remote = getattr(verifier, "last_metrics", None)
+    if remote is not None:
+        return VerifierMetrics(
+            backend=backend,
+            image_count=int(getattr(remote, "image_count", len(board.images))),
+            latency_ms=float(getattr(remote, "latency_ms")),
+            request_bytes=int(getattr(remote, "request_bytes")),
+        )
+    local_latency = getattr(verifier, "last_latency_ms", None)
+    return VerifierMetrics(
+        backend=backend,
+        image_count=len(board.images),
+        latency_ms=float(local_latency) if local_latency is not None else None,
+    )
 
 
 def _center(box: tuple[float, float, float, float]) -> tuple[float, float]:
@@ -256,15 +290,20 @@ def build_candidate_board(
     command_text: str,
     command: ParsedCommand,
     round_: CctvDetectionRound,
+    *,
+    max_crops: Optional[int] = None,
 ) -> CandidateBoard:
-    """Build one bounded multi-image board containing all retained people."""
+    """Build bounded visual evidence while keeping every candidate in the prompt."""
     evidence = candidate_evidence(command, round_)
+    crop_limit = configured_max_crops() if max_crops is None else max_crops
+    if crop_limit < 0:
+        raise ValueError("max_crops must be non-negative")
     images: list[object] = []
     for camera_id in sorted({item.person.camera_id for item in evidence}):
         frame = round_.frames.get(camera_id)
         if frame is not None:
             images.append(_annotated_view(frame, evidence))
-    for item in evidence:
+    for item in evidence[:crop_limit]:
         frame = round_.frames.get(item.person.camera_id)
         if frame is not None:
             images.append(_context_crop(frame, item))
@@ -324,40 +363,53 @@ class QwenSarVerifier:
         self.config = config or QwenRuntimeConfig.load()
         self._model = None
         self._processor = None
+        self.last_latency_ms: Optional[float] = None
+
+    method = "qwen_local"
 
     def __call__(self, board: CandidateBoard) -> str:
-        if self._model is None or self._processor is None:
-            self._model, self._processor = load_local_qwen(self.config)
+        started = time.perf_counter()
+        try:
+            if self._model is None or self._processor is None:
+                self._model, self._processor = load_local_qwen(self.config)
 
-        content = [{"type": "image", "image": image} for image in board.images]
-        content.append({"type": "text", "text": board.prompt})
-        messages = [{"role": "user", "content": content}]
-        inputs = self._processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-        )
-        inputs = inputs.to(self._model.device)
-
-        import torch
-
-        with torch.inference_mode():
-            generated = self._model.generate(
-                **inputs,
-                do_sample=False,
-                max_new_tokens=self.config.max_new_tokens,
+            content = [{"type": "image", "image": image} for image in board.images]
+            content.append({"type": "text", "text": board.prompt})
+            messages = [{"role": "user", "content": content}]
+            inputs = self._processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
             )
-        trimmed = [
-            output_ids[len(input_ids) :]
-            for input_ids, output_ids in zip(inputs.input_ids, generated)
-        ]
-        return self._processor.batch_decode(
-            trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )[0]
+            inputs = inputs.to(self._model.device)
+
+            import torch
+
+            with torch.inference_mode():
+                generated = self._model.generate(
+                    **inputs,
+                    do_sample=False,
+                    max_new_tokens=self.config.max_new_tokens,
+                )
+            trimmed = [
+                output_ids[len(input_ids) :]
+                for input_ids, output_ids in zip(inputs.input_ids, generated)
+            ]
+            text = self._processor.batch_decode(
+                trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+        finally:
+            self.last_latency_ms = (time.perf_counter() - started) * 1000.0
+        log.info(
+            "[qwen-local] images=%d latency=%.0fms",
+            len(board.images),
+            self.last_latency_ms,
+        )
+        return text
 
 
 def select_sar_candidate(
@@ -389,9 +441,11 @@ def select_sar_candidate(
         )
 
     board = build_candidate_board(command_text, command, round_)
+    metrics = None
     if verifier is not None:
         try:
             raw_output = verifier(board)
+            metrics = _verifier_metrics(verifier, board)
             candidate_id, evidence_situation = parse_verifier_output(
                 raw_output, board.candidate_ids
             )
@@ -405,11 +459,13 @@ def select_sar_candidate(
                 selected,
                 requested,
                 evidence_situation,
-                "qwen",
+                str(getattr(verifier, "method", "qwen")),
                 "valid_model_output",
                 raw_output,
+                metrics,
             )
         except Exception as exc:
+            metrics = _verifier_metrics(verifier, board)
             fallback_reason = f"verifier_failed:{type(exc).__name__}"
             raw_output = locals().get("raw_output")
     else:
@@ -428,4 +484,5 @@ def select_sar_candidate(
         "deterministic_fallback",
         fallback_reason,
         raw_output,
+        metrics,
     )

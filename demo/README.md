@@ -72,9 +72,56 @@ Stage 1 candidate settings:
 | Variable | Default | Meaning |
 |---|---|---|
 | `MARC_STAGE1_DETECTOR` | bundled YOLO when present | `yolo` for live candidates; `stub` is test-only |
-| `MARC_SAR_DETECTOR` | `fallback` | `qwen` uses the bundled local verifier; fallback uses deterministic pose/anchor evidence |
+| `MARC_SAR_DETECTOR` | `fallback` | `qwen` enables Qwen verification; fallback uses deterministic pose/anchor evidence |
+| `MARC_QWEN_BACKEND` | `local` | `local` loads Transformers in the agent; `remote` calls a workstation vLLM server |
 | `MARC_QWEN_MODEL_DIR` | `/agent/models/runtime/stage1-sar-qwen/model` | Complete pinned local Transformers snapshot |
+| `MARC_QWEN_BASE_URL` | -- | Remote vLLM URL including `/v1`, e.g. `http://192.168.1.20:8000/v1` |
+| `MARC_QWEN_API_KEY` | -- | Bearer key configured on the vLLM server; never written to metrics |
+| `MARC_QWEN_MODEL` | `qwen3-vl-8b` | Name supplied through vLLM `--served-model-name` |
+| `MARC_QWEN_TIMEOUT_S` | `30` | Remote request deadline before deterministic fallback |
+| `MARC_QWEN_MAX_CROPS` | `12` | Per-person crops; annotated camera views still cover every candidate |
 | `MARC_STAGE1_METRICS_PATH` | `artifacts/stage1_rounds.jsonl` | Per-round candidate counts, latency, selection method, and failures |
+
+### Qwen on the participant/platform machine
+
+For practice, mount the downloaded snapshot instead of copying 17.5 GB into every image:
+
+```bash
+export MARC_QWEN_HOST_MODEL_DIR="$HOME/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct"
+docker compose -f demo/docker-compose.yml \
+  -f demo/docker-compose.qwen-local.yml up --build agent
+```
+
+The root submission image must eventually bundle this same pinned snapshot because judging
+runs offline and does not apply the development override.
+
+### Qwen on a separate workstation
+
+Start vLLM on the workstation:
+
+```bash
+conda activate marc
+vllm serve "$HOME/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct" \
+  --host 0.0.0.0 --port 8000 \
+  --served-model-name qwen3-vl-8b \
+  --dtype bfloat16 --gpu-memory-utilization 0.90 \
+  --max-model-len 8192 --limit-mm-per-prompt '{"image":24}' \
+  --api-key marc-qwen-secret
+```
+
+Then start the participant on the MARC PC:
+
+```bash
+export MARC_QWEN_BASE_URL="http://WORKSTATION_IP:8000/v1"
+export MARC_QWEN_API_KEY="marc-qwen-secret"
+docker compose -f demo/docker-compose.yml \
+  -f demo/docker-compose.qwen-remote.yml up --build agent
+```
+
+Remote mode sends JPEG data URLs plus the finite candidate prompt. It does not stream raw
+CCTV video, and any connection, authentication, timeout, response, or grammar failure uses
+the same deterministic candidate fallback. This mode is for practice; submission cannot
+depend on a separately started workstation process.
 
 ## Environment variables
 

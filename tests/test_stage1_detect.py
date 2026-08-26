@@ -48,6 +48,28 @@ class FetchCctvRoundTests(unittest.TestCase):
         self.assertEqual(["rig_1_a", "rig_2_c"], camera_ids)
         self.assertEqual(["rig_2_c"], list(frames))
 
+    def test_waits_for_first_round_camera_discovery(self):
+        class DelayedClient(_FakeClient):
+            def __init__(self):
+                super().__init__(camera_ids=["rig_1_a", "rig_2_c"])
+                self.calls = 0
+
+            def list_cctv(self):
+                self.calls += 1
+                if self.calls < 3:
+                    return []
+                return super().list_cctv()
+
+        client = DelayedClient()
+        frames, camera_ids = fetch_cctv_round(
+            client,
+            discovery_timeout_s=0.1,
+            discovery_settle_s=0.0,
+            poll_interval_s=0.001,
+        )
+        self.assertEqual(["rig_1_a", "rig_2_c"], camera_ids)
+        self.assertEqual(set(camera_ids), set(frames))
+
 
 class StubDetectionTests(unittest.TestCase):
     def test_loads_fixture_candidates(self):

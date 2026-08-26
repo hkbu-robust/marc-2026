@@ -37,7 +37,9 @@ services:
       PYTHONPATH: "/agent"
       # Keep Qwen disabled until models/runtime/stage1-sar-qwen/model is complete.
       MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-fallback}"
+      MARC_QWEN_BACKEND: "${MARC_QWEN_BACKEND:-local}"
       MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
+      MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     # GPU for VLA inference (uses the participant machine's GPU). If no GPU is needed, the deploy block can be removed.
@@ -55,6 +57,7 @@ services:
     #   - ./my_scenario.yaml:/agent/my_scenario.yaml:ro
 
   agent-manip-probe:
+    profiles: ["tools"]
     build:
       context: ..
       dockerfile: demo/Dockerfile
@@ -101,6 +104,7 @@ services:
   # Practice Stage 2 with YOLO (torch lives in manip-probe). Graded `agent` stays torch-free.
   #   MARC_TEAM_ID=... docker compose up --build agent-nearfield
   agent-nearfield:
+    profiles: ["tools"]
     build:
       context: ..
       dockerfile: demo/Dockerfile
