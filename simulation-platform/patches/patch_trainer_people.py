@@ -448,6 +448,13 @@ NEW_COMBOS = '''    combos = []
                 print("[people-patch] ERROR: could not load %s: %s" % (path, _e))
         print("[people-patch] ERROR: sar_recipes.yaml not found; recipes disabled")
         return []
+    def _marc_recipe_rel(rec):
+        # PyYAML 1.1 parses a bare `on` as True. Seat-lie recipes must
+        # still get on_landmark_type.
+        r = rec.get("relation") if rec else None
+        if r is True:
+            return "on"
+        return str(r or "").strip().lower()
     def _marc_dump_recipe(rec, pose=None, character=None):
         if not rec:
             return
@@ -465,7 +472,7 @@ NEW_COMBOS = '''    combos = []
                     "surface_anchor": rec.get("surface_anchor"),
                     "extra_landmarks": list(rec.get("extra_landmarks") or []),
                     "tip_landmark": rec.get("tip_landmark"),
-                    "relation": rec.get("relation"),
+                    "relation": _marc_recipe_rel(rec),
                     "above": bool(rec.get("above")),
                     "command": rec.get("command"),
                     "situation": rec.get("situation"),
@@ -545,8 +552,8 @@ NEW_COMBOS = '''    combos = []
                 "surface_class": _recipe.get("surface_class"),
             }
             _lm = _recipe.get("support_landmark")
-            if _lm and (_recipe.get("above") or _recipe.get("relation") in (
-                    "on", "above")):
+            _rel = _marc_recipe_rel(_recipe)
+            if _lm and (_recipe.get("above") or _rel in ("on", "above")):
                 _pl["on_landmark_type"] = _lm
                 _pl["above"] = bool(_recipe.get("above"))
                 if _pl["above"]:
@@ -558,10 +565,10 @@ NEW_COMBOS = '''    combos = []
                 else:
                     _pl["z_offset_from_top"] = 0.02
             _beside_lm = _lm if (
-                _lm and (_recipe.get("beside") or _recipe.get("relation") == "beside")
+                _lm and (_recipe.get("beside") or _rel == "beside")
             ) else None
             if not _beside_lm and (
-                    _recipe.get("beside") or _recipe.get("relation") == "beside"):
+                    _recipe.get("beside") or _rel == "beside"):
                 _beside_lm = _recipe.get("surface_anchor")
             if _beside_lm:
                 _pl["beside_landmark_type"] = _beside_lm
@@ -1457,6 +1464,43 @@ def main():
                 and "Extra climb cabinets sit on the FOV rim" not in src
                 and _new_extra_dump):
             src = src.replace(_old_extra_dump, _new_extra_dump, 1)
+            changed = True
+        if "def _marc_recipe_rel(" not in src and "def _marc_dump_recipe(" in src:
+            helper = NEW_COMBOS[
+                NEW_COMBOS.find("    def _marc_recipe_rel("):
+                NEW_COMBOS.find("    def _marc_dump_recipe(")
+            ]
+            if helper:
+                src = src.replace(
+                    "    def _marc_dump_recipe(",
+                    helper + "    def _marc_dump_recipe(",
+                    1,
+                )
+                changed = True
+        _old_on_gate = (
+            '            if _lm and (_recipe.get("above") or '
+            '_recipe.get("relation") in (\n'
+            '                    "on", "above")):\n'
+        )
+        _new_on_gate = (
+            '            _rel = _marc_recipe_rel(_recipe)\n'
+            '            if _lm and (_recipe.get("above") or '
+            '_rel in ("on", "above")):\n'
+        )
+        if _old_on_gate in src:
+            src = src.replace(_old_on_gate, _new_on_gate, 1)
+            changed = True
+        if ('_rel = _marc_recipe_rel(_recipe)' in src
+                and '_recipe.get("relation") == "beside"' in src):
+            src = src.replace(
+                '_recipe.get("relation") == "beside"',
+                '_rel == "beside"',
+            )
+            changed = True
+        _old_dump_rel_raw = '"relation": rec.get("relation"),'
+        _new_dump_rel_norm = '"relation": _marc_recipe_rel(rec),'
+        if _old_dump_rel_raw in src:
+            src = src.replace(_old_dump_rel_raw, _new_dump_rel_norm, 1)
             changed = True
         if changed:
             if not _write(src):

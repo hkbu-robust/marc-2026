@@ -128,6 +128,13 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("_marc_place_seat_people", patch.NEW_SETTLE)
         self.assertIn("_marc_place_seat_people", patch.NEW_SNAP)
         self.assertIn("TRAINER_SAR_ON_XY_MAX", patch.NEW_SAVE)
+        self.assertIn("if _rel is True", patch.NEW_SAVE)
+        self.assertIn('_rel = "on"', patch.NEW_SAVE)
+        self.assertIn('_rel in ("on", "above")', patch.NEW_SAVE)
+        self.assertNotIn(
+            'str(rec.get("relation") or "") in ("on", "above")',
+            patch.NEW_SAVE,
+        )
         self.assertIn('"0.42") or "0.42"', patch.ABOVE_HELPER)
         self.assertIn("_drape_xy", patch.ABOVE_HELPER)
         self.assertIn("rim * half * dx / n", patch.ABOVE_HELPER)

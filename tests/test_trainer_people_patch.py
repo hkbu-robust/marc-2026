@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PATCH_PATH = ROOT / "simulation-platform" / "patches" / "patch_trainer_people.py"
@@ -903,6 +905,129 @@ class AboveModePatchTests(unittest.TestCase):
         self.assertTrue(all(c in chars for c in seen))
         self.assertNotEqual(seen, [chars[0]] * len(seen))
         self.assertGreater(len(set(seen)), 1)
+
+    def test_sar_recipes_yaml_relations_are_strings(self):
+        path = ROOT / "simulation-platform" / "patches" / "sar_recipes.yaml"
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        allowed = {
+            "near", "beside", "behind", "front", "left", "right", "on", "above",
+        }
+        recipes = list(payload.get("recipes") or [])
+        self.assertGreaterEqual(len(recipes), 14)
+        for rec in recipes:
+            rel = rec.get("relation")
+            self.assertIsInstance(
+                rel, str, "%s relation=%r" % (rec.get("id"), rel))
+            self.assertIn(rel, allowed, rec.get("id"))
+            self.assertIsNot(rel, True)
+
+    def _exec_combos(self, name):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, name, "exec"), namespace)
+        self.assertIn("def _marc_recipe_rel(", patch.NEW_COMBOS)
+        return namespace
+
+    def test_seat_lie_recipes_set_on_landmark_type(self):
+        poses = [
+            "person_sitting", "person_walking", "person_lying_down",
+            "person_prone", "person_reaching",
+        ]
+        chars = ["female_student_01", "male_student_01", "professor_01"]
+        cases = (
+            (2, "sar03_bench_lie", "bench"),
+            (3, "sar04_table_lie", "picnic_table"),
+            (12, "sarH5_taxi_benchlie", "bench"),
+        )
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            for cursor, recipe_id, landmark in cases:
+                namespace = self._exec_combos(
+                    "<sar-seat-lie-%s>" % recipe_id)
+                os.environ["TRAINER_SAR_RECIPE_CURSOR"] = str(cursor)
+                _, specs = namespace["build"](
+                    [{"name": "bench_0"}], list(chars), list(poses),
+                )
+                people = [o for o in specs if o.get("character")]
+                targets = [
+                    o for o in people
+                    if (o.get("placement") or {}).get("recipe_id")
+                ]
+                self.assertEqual(len(targets), 1, people)
+                pl = targets[0].get("placement") or {}
+                self.assertEqual(pl.get("recipe_id"), recipe_id)
+                self.assertEqual(pl.get("on_landmark_type"), landmark, recipe_id)
+                self.assertFalse(pl.get("above"))
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    @unittest.skipIf(
+        os.path.isfile("/marc-patches/sar_recipes.yaml"),
+        "container recipe path shadows cwd yaml",
+    )
+    def test_unquoted_yaml_on_still_sets_on_landmark_type(self):
+        namespace = self._exec_combos("<sar-yaml-true-on>")
+        poses = ["person_lying_down", "person_walking", "person_sitting"]
+        chars = ["female_student_01", "male_student_01", "professor_01"]
+        yaml_text = (
+            "recipes:\n"
+            "  - id: sar03_bench_lie\n"
+            "    pose: person_lying_down\n"
+            "    support_landmark: bench\n"
+            "    support_class: bench\n"
+            "    relation: on\n"
+            "    above: false\n"
+        )
+        old = dict(os.environ)
+        cwd = os.getcwd()
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "0"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            with tempfile.TemporaryDirectory() as tmp:
+                rec_dir = Path(tmp) / "simulation-platform" / "patches"
+                rec_dir.mkdir(parents=True)
+                (rec_dir / "sar_recipes.yaml").write_text(
+                    yaml_text, encoding="utf-8")
+                loaded = yaml.safe_load(yaml_text)
+                self.assertIs(loaded["recipes"][0]["relation"], True)
+                os.chdir(tmp)
+                _, specs = namespace["build"](
+                    [{"name": "bench_0"}], list(chars), list(poses),
+                )
+            people = [o for o in specs if o.get("character")]
+            targets = [
+                o for o in people
+                if (o.get("placement") or {}).get("recipe_id")
+            ]
+            self.assertEqual(len(targets), 1, people)
+            pl = targets[0].get("placement") or {}
+            self.assertEqual(pl.get("on_landmark_type"), "bench")
+            with open("/tmp/marc_sar_recipe.json", encoding="utf-8") as f:
+                dumped = json.load(f)
+            self.assertEqual(dumped.get("relation"), "on")
+        finally:
+            os.chdir(cwd)
+            os.environ.clear()
+            os.environ.update(old)
 
 
 if __name__ == "__main__":
