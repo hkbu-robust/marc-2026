@@ -29,6 +29,13 @@ def _env_str(name: str, default: str) -> str:
     return str(raw).strip()
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return float(raw)
+
+
 def _resolve_device(requested: str) -> str:
     req = (requested or "0").strip()
     if req.lower() in ("cpu", "cpu:0"):
@@ -61,7 +68,10 @@ class RuntimeContract:
         return cls(
             weights=STAGE1_CCTV_WEIGHTS,
             imgsz=int(inference.get("imgsz", 1920)),
-            confidence=float(inference.get("confidence", 0.3)),
+            confidence=_env_float(
+                "MARC_CCTV_YOLO_CONF",
+                float(inference.get("confidence", 0.3)),
+            ),
             nms_iou=float(inference.get("nms_iou", 0.5)),
             candidate_limit=int(inference.get("candidate_limit", 50)),
             use_fp16=str(inference.get("quantize", "")).lower() == "fp16",
@@ -162,6 +172,8 @@ class CctvYoloDetector:
             self.contract.nms_iou,
             self.contract.candidate_limit,
         )
+        logging.getLogger("matplotlib").setLevel(logging.WARNING)
+        logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)
         self.model = YOLO(str(self.contract.weights))
         raw_names = getattr(self.model, "names", None) or {}
         self.names = {int(k): str(v) for k, v in dict(raw_names).items()}
@@ -184,17 +196,18 @@ class CctvYoloDetector:
         except ImportError:
             pass
 
-        use_half = self.contract.use_fp16 and self.device != "cpu"
-        results = self.model.predict(
-            src,
-            verbose=False,
-            conf=self.contract.confidence,
-            iou=self.contract.nms_iou,
-            imgsz=self.contract.imgsz,
-            max_det=self.contract.candidate_limit,
-            device=self.device,
-            half=use_half,
-        )
+        use_fp16 = self.contract.use_fp16 and self.device != "cpu"
+        predict_kwargs = {
+            "verbose": False,
+            "conf": self.contract.confidence,
+            "iou": self.contract.nms_iou,
+            "imgsz": self.contract.imgsz,
+            "max_det": self.contract.candidate_limit,
+            "device": self.device,
+        }
+        if use_fp16:
+            predict_kwargs["quantize"] = "fp16"
+        results = self.model.predict(src, **predict_kwargs)
         if not results:
             return []
 

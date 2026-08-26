@@ -37,7 +37,11 @@ services:
       PYTHONPATH: "/agent"
       # Keep Qwen disabled until models/runtime/stage1-sar-qwen/model is complete.
       MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-fallback}"
+      MARC_QWEN_BACKEND: "${MARC_QWEN_BACKEND:-local}"
       MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
+      MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
+      MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"
+      MARC_CCTV_YOLO_CONF: "${MARC_CCTV_YOLO_CONF:-0.15}"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     # GPU for VLA inference (uses the participant machine's GPU). If no GPU is needed, the deploy block can be removed.
@@ -49,12 +53,15 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    volumes:
+      - "${MARC_ARTIFACTS_DIR:-../artifacts}:/agent/demo/artifacts"
     # (Optional) To use a scenario file for obstacle injection, mount it and set MARC_SCENARIO_FILE:
     #   add  MARC_SCENARIO_FILE: "/agent/my_scenario.yaml"  to environment
     # volumes:
     #   - ./my_scenario.yaml:/agent/my_scenario.yaml:ro
 
   agent-manip-probe:
+    profiles: ["tools"]
     build:
       context: ..
       dockerfile: demo/Dockerfile
@@ -101,6 +108,7 @@ services:
   # Practice Stage 2 with YOLO (torch lives in manip-probe). Graded `agent` stays torch-free.
   #   MARC_TEAM_ID=... docker compose up --build agent-nearfield
   agent-nearfield:
+    profiles: ["tools"]
     build:
       context: ..
       dockerfile: demo/Dockerfile

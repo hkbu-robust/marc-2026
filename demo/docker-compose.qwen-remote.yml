@@ -1,0 +1,14 @@
+# Practice override: send bounded candidate boards to a workstation vLLM server.
+# MARC_QWEN_BASE_URL should include /v1, for example http://192.168.1.20:8000/v1.
+services:
+  agent:
+    environment:
+      MARC_SAR_DETECTOR: "qwen"
+      MARC_QWEN_BACKEND: "remote"
+      MARC_QWEN_BASE_URL: "${MARC_QWEN_BASE_URL:?Set the workstation vLLM /v1 URL}"
+      MARC_QWEN_API_KEY: "${MARC_QWEN_API_KEY:?Set the workstation vLLM API key}"
+      MARC_QWEN_MODEL: "${MARC_QWEN_MODEL:-qwen3-vl-8b}"
+      MARC_QWEN_TIMEOUT_S: "${MARC_QWEN_TIMEOUT_S:-90}"
+      MARC_QWEN_MAX_NEW_TOKENS: "${MARC_QWEN_MAX_NEW_TOKENS:-48}"
+      MARC_QWEN_JPEG_QUALITY: "${MARC_QWEN_JPEG_QUALITY:-85}"
+      MARC_CCTV_YOLO_CONF: "${MARC_CCTV_YOLO_CONF:-0.15}"

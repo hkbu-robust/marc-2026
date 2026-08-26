@@ -2,25 +2,119 @@
 
 from __future__ import annotations
 
+import importlib.util
+import inspect
 import json
+import logging
 import os
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
-from marc_agent.command_parser import CommandParseError, ParsedCommand, parse_command
+from marc_agent.command_parser import (
+    CommandParseError,
+    Intent,
+    ParsedCommand,
+    Relation,
+    parse_command,
+)
+from marc_agent.perception.cctv_project import (
+    CctvProjector,
+)
+from marc_agent.perception.object_selection import (
+    ObjectSelection,
+    rank_object_candidates,
+    select_object_candidate,
+)
 from marc_agent.perception.sar_selection import (
     QwenSarVerifier,
     SarSelectionResult,
     Verifier,
+    candidate_evidence,
     select_sar_candidate,
+)
+from marc_agent.perception.qwen_remote import (
+    RemoteQwenSarVerifier,
+    check_remote_health,
+)
+from marc_agent.perception.qwen_runtime import (
+    QwenBackend,
+    QwenRemoteConfig,
+    configured_backend,
 )
 from marc_agent.perception.stage1_detect import detect_stage1_round
 from marc_agent.types import CctvDetectionRound, CctvRoundMetrics
 
+if TYPE_CHECKING:
+    from marc_sdk.types import GroundingResult
+
 
 Detector = Callable[..., CctvDetectionRound]
+log = logging.getLogger("marc_agent.stage1_pipeline")
+_GroundingResult = None
+
+
+def _grounding_result_cls():
+    """Load GroundingResult without importing marc_sdk.client (rclpy) in unit tests."""
+    global _GroundingResult
+    if _GroundingResult is not None:
+        return _GroundingResult
+    try:
+        from marc_sdk.types import GroundingResult as cls
+    except ImportError:
+        path = Path(__file__).resolve().parents[2] / "marc_sdk" / "types.py"
+        spec = importlib.util.spec_from_file_location(
+            "_marc_sdk_types_nors",
+            path,
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        cls = module.GroundingResult
+    _GroundingResult = cls
+    return cls
+
+
+def log_qwen_startup_status() -> None:
+    """Log configured Qwen mode and non-fatally probe a remote vLLM server."""
+    mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
+    if mode not in {"qwen", "qwen-remote"}:
+        log.info("[qwen-startup] disabled mode=%s", mode)
+        return
+    try:
+        backend = QwenBackend.REMOTE if mode == "qwen-remote" else configured_backend()
+        if backend is QwenBackend.LOCAL:
+            verifier = QwenSarVerifier()
+            log.info(
+                "[qwen-startup] configured backend=local model_dir=%s",
+                verifier.config.model_dir,
+            )
+            return
+        config = QwenRemoteConfig.load()
+        log.info(
+            "[qwen-startup] configured backend=remote models_url=%s model=%s "
+            "timeout=%.1fs",
+            config.models_url,
+            config.model_name,
+            config.timeout_s,
+        )
+        started = time.perf_counter()
+        model_ids = check_remote_health(config)
+        log.info(
+            "[qwen-startup] health=ok model=%s available=%s latency=%.0fms",
+            config.model_name,
+            ",".join(model_ids),
+            (time.perf_counter() - started) * 1000.0,
+        )
+    except Exception as exc:
+        log.warning(
+            "[qwen-startup] health=failed error=%s detail=%s; "
+            "SAR rounds will use deterministic fallback if the failure persists",
+            type(exc).__name__,
+            exc,
+        )
 
 
 @dataclass(frozen=True)
@@ -33,11 +127,14 @@ class Stage1CandidateResult:
     sar_selection: Optional[SarSelectionResult]
     failure_reason: Optional[str]
     total_ms: float
+    object_selection: Optional[ObjectSelection] = None
 
     @property
     def selected_candidate_id(self) -> Optional[str]:
         if self.sar_selection and self.sar_selection.selected:
             return self.sar_selection.selected.candidate_id
+        if self.object_selection is not None:
+            return self.object_selection.target.candidate_id
         return None
 
     def record(self, *, expected_candidate_id: Optional[str] = None) -> dict:
@@ -57,8 +154,17 @@ class Stage1CandidateResult:
             "selection_status": (
                 self.sar_selection.status.value if self.sar_selection else None
             ),
-            "selection_method": self.sar_selection.method if self.sar_selection else None,
+            "selection_method": (
+                self.sar_selection.method
+                if self.sar_selection
+                else (self.object_selection.method if self.object_selection else None)
+            ),
             "selection_reason": self.sar_selection.reason if self.sar_selection else None,
+            "verifier_metrics": (
+                asdict(self.sar_selection.verifier_metrics)
+                if self.sar_selection and self.sar_selection.verifier_metrics
+                else None
+            ),
             "failure_reason": self.failure_reason,
             "candidate_recall": recall,
             "metrics": asdict(self.detections.metrics),
@@ -68,7 +174,50 @@ class Stage1CandidateResult:
 
 def _default_verifier() -> Optional[Verifier]:
     mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
-    return QwenSarVerifier() if mode == "qwen" else None
+    if mode not in {"qwen", "qwen-remote"}:
+        log.info("[qwen] verifier disabled mode=%s", mode)
+        return None
+    backend = QwenBackend.REMOTE if mode == "qwen-remote" else configured_backend()
+    if backend is QwenBackend.REMOTE:
+        verifier = RemoteQwenSarVerifier()
+        log.info(
+            "[qwen] verifier configured backend=remote endpoint=%s model=%s "
+            "timeout=%.1fs",
+            verifier.config.chat_completions_url,
+            verifier.config.model_name,
+            verifier.config.timeout_s,
+        )
+        return verifier
+    verifier = QwenSarVerifier()
+    log.info(
+        "[qwen] verifier configured backend=local model_dir=%s",
+        verifier.config.model_dir,
+    )
+    return verifier
+
+
+def _call_detector(
+    detector: Detector,
+    client,
+    stub_path: Optional[str],
+    discovery_timeout_s: Optional[float],
+) -> CctvDetectionRound:
+    kwargs: dict = {"stub_path": stub_path}
+    try:
+        parameters = inspect.signature(detector).parameters
+        if "discovery_timeout_s" in parameters:
+            kwargs["discovery_timeout_s"] = discovery_timeout_s
+    except (TypeError, ValueError):
+        pass
+    return detector(client, **kwargs)
+
+
+def _failed_verifier(exc: Exception) -> Verifier:
+    """Delay backend setup failures until the shared fallback can classify them."""
+    def verify(_board):
+        raise exc
+
+    return verify
 
 
 def run_stage1_candidate_pipeline(
@@ -77,12 +226,14 @@ def run_stage1_candidate_pipeline(
     *,
     detector: Detector = detect_stage1_round,
     verifier: Optional[Verifier] = None,
+    projector: Optional[CctvProjector] = None,
     stub_path: Optional[str] = None,
+    discovery_timeout_s: Optional[float] = None,
 ) -> Stage1CandidateResult:
-    """Parse one request, collect all-camera candidates, and select SAR if requested."""
+    """Parse one request, collect all-camera candidates, and select SAR or objects."""
     started = time.perf_counter()
     try:
-        parsed = parse_command(command_text)
+        parsed = parse_command(command_text, expected_intent=Intent.FIND)
     except CommandParseError as exc:
         return Stage1CandidateResult(
             command_text,
@@ -93,8 +244,18 @@ def run_stage1_candidate_pipeline(
             (time.perf_counter() - started) * 1000.0,
         )
 
+    log.info(
+        "[stage1-pipeline] parsed target_type=%s situation=%s landmark=%s relation=%s",
+        parsed.target_type,
+        parsed.situation.value if parsed.situation else None,
+        parsed.landmark,
+        parsed.relation.value if parsed.relation else None,
+    )
+
     try:
-        detections = detector(client, stub_path=stub_path)
+        detections = _call_detector(
+            detector, client, stub_path, discovery_timeout_s
+        )
     except Exception as exc:
         reason = f"candidate_collection:{type(exc).__name__}"
         return Stage1CandidateResult(
@@ -106,9 +267,23 @@ def run_stage1_candidate_pipeline(
             (time.perf_counter() - started) * 1000.0,
         )
     selection = None
+    object_selection = None
     failure_reason = None
+    if verifier is not None:
+        selected_verifier = verifier
+    else:
+        try:
+            selected_verifier = _default_verifier()
+        except Exception as exc:
+            selected_verifier = _failed_verifier(exc)
+
     if parsed.target_type == "person":
-        selected_verifier = verifier if verifier is not None else _default_verifier()
+        log.info(
+            "[qwen] SAR request situation=%s people=%d cameras=%d",
+            parsed.situation.value if parsed.situation else None,
+            len(detections.people),
+            len(detections.camera_ids),
+        )
         selection = select_sar_candidate(
             command_text,
             parsed,
@@ -117,6 +292,41 @@ def run_stage1_candidate_pipeline(
         )
         if selection.selected is None:
             failure_reason = f"sar_selection:{selection.reason}"
+        metrics = selection.verifier_metrics
+        log.info(
+            "[qwen] selection method=%s status=%s selected=%s reason=%s "
+            "images=%s latency_ms=%s request_bytes=%s",
+            selection.method,
+            selection.status.value,
+            selection.selected.candidate_id if selection.selected else None,
+            selection.reason,
+            metrics.image_count if metrics else None,
+            (
+                round(metrics.latency_ms)
+                if metrics and metrics.latency_ms is not None
+                else None
+            ),
+            metrics.request_bytes if metrics else None,
+        )
+    else:
+        object_selection = select_object_candidate(
+            parsed,
+            detections,
+            command_text=command_text,
+            verifier=selected_verifier,
+            projector=projector,
+        )
+        if object_selection is None:
+            failure_reason = "object_selection:no_match"
+        log.info(
+            "[qwen] object request target_type=%s relation=%s landmark=%s "
+            "method=%s selected=%s",
+            parsed.target_type,
+            parsed.relation.value if parsed.relation else None,
+            parsed.landmark,
+            object_selection.method if object_selection else None,
+            object_selection.target.candidate_id if object_selection else None,
+        )
 
     return Stage1CandidateResult(
         command_text,
@@ -125,7 +335,266 @@ def run_stage1_candidate_pipeline(
         selection,
         failure_reason,
         (time.perf_counter() - started) * 1000.0,
+        object_selection=object_selection,
     )
+
+
+@dataclass(frozen=True)
+class Stage1RoundResult:
+    """Candidate collection plus an optional world-coordinate GroundingResult."""
+
+    candidates: Stage1CandidateResult
+    grounding: Optional[GroundingResult]
+    method: Optional[str]
+    failure_reason: Optional[str]
+    target_id: Optional[str] = None
+    anchor_id: Optional[str] = None
+
+
+def _xyz_list(xyz: tuple[float, float, float]) -> list[float]:
+    return [float(xyz[0]), float(xyz[1]), float(xyz[2])]
+
+
+def _project_pair(
+    projector: CctvProjector,
+    camera_id: str,
+    target_box: tuple[float, float, float, float],
+    anchor_box: Optional[tuple[float, float, float, float]],
+    *,
+    relation: Optional[Relation],
+    support_class: Optional[str],
+) -> Optional[tuple[tuple[float, float, float], tuple[float, float, float]]]:
+    target_xyz = projector.project_contact(
+        camera_id,
+        target_box,
+        relation=relation,
+        support_class=support_class,
+    )
+    if target_xyz is None:
+        return None
+    if anchor_box is None:
+        return target_xyz, target_xyz
+    anchor_xyz = projector.project_contact(camera_id, anchor_box)
+    if anchor_xyz is None:
+        return target_xyz, target_xyz
+    return target_xyz, anchor_xyz
+
+
+def _grounding_payload(
+    parsed: ParsedCommand,
+    camera_id: str,
+    target_xyz: tuple[float, float, float],
+    anchor_xyz: tuple[float, float, float],
+) -> GroundingResult:
+    return _grounding_result_cls()(
+        camera_id=camera_id,
+        target_type=parsed.target_type,
+        anchor_coord=_xyz_list(anchor_xyz),
+        target_coord=_xyz_list(target_xyz),
+        landmark=parsed.landmark or "",
+        relation=parsed.relation.value if parsed.relation else None,
+        situation=parsed.situation.value if parsed.situation else None,
+    )
+
+
+def _compose_person(
+    candidates: Stage1CandidateResult,
+    projector: CctvProjector,
+) -> Stage1RoundResult:
+    parsed = candidates.parsed
+    selection = candidates.sar_selection
+    if parsed is None or selection is None or selection.selected is None:
+        reason = candidates.failure_reason or "sar_selection:no_candidate"
+        log.info("[stage1] skip submit reason=%s", reason)
+        return Stage1RoundResult(candidates, None, None, reason)
+
+    person = selection.selected
+    evidence = candidate_evidence(parsed, candidates.detections)
+    item = next(
+        (row for row in evidence if row.person.candidate_id == person.candidate_id),
+        None,
+    )
+    anchor = item.anchor if item is not None else None
+    projected = _project_pair(
+        projector,
+        person.camera_id,
+        person.bbox_xyxy,
+        anchor.bbox_xyxy if anchor is not None else None,
+        relation=parsed.relation,
+        support_class=anchor.class_name if anchor is not None else None,
+    )
+    if projected is None:
+        log.info(
+            "[stage1] skip submit reason=projection_failed camera=%s candidate=%s",
+            person.camera_id,
+            person.candidate_id,
+        )
+        return Stage1RoundResult(
+            candidates,
+            None,
+            selection.method,
+            "projection_failed",
+            person.candidate_id,
+            anchor.candidate_id if anchor is not None else None,
+        )
+    target_xyz, anchor_xyz = projected
+    grounding = _grounding_payload(parsed, person.camera_id, target_xyz, anchor_xyz)
+    log.info(
+        "[stage1] grounding camera=%s target_id=%s anchor_id=%s method=%s "
+        "situation=%s target_xyz=(%.3f, %.3f, %.3f) anchor_xyz=(%.3f, %.3f, %.3f)",
+        grounding.camera_id,
+        person.candidate_id,
+        anchor.candidate_id if anchor is not None else person.candidate_id,
+        selection.method,
+        grounding.situation,
+        *grounding.target_coord,
+        *grounding.anchor_coord,
+    )
+    return Stage1RoundResult(
+        candidates,
+        grounding,
+        selection.method,
+        None,
+        person.candidate_id,
+        anchor.candidate_id if anchor is not None else None,
+    )
+
+
+def _project_selection(
+    projector: CctvProjector,
+    parsed: ParsedCommand,
+    selection: ObjectSelection,
+) -> Optional[tuple[tuple[float, float, float], tuple[float, float, float]]]:
+    return _project_pair(
+        projector,
+        selection.target.camera_id,
+        selection.target.bbox_xyxy,
+        selection.anchor.bbox_xyxy if selection.anchor is not None else None,
+        relation=parsed.relation,
+        support_class=(
+            selection.anchor.class_name if selection.anchor is not None else None
+        ),
+    )
+
+
+def _same_object_pair(left: ObjectSelection, right: ObjectSelection) -> bool:
+    left_anchor = left.anchor.candidate_id if left.anchor is not None else None
+    right_anchor = right.anchor.candidate_id if right.anchor is not None else None
+    return (
+        left.target.candidate_id == right.target.candidate_id
+        and left_anchor == right_anchor
+    )
+
+
+def _compose_object(
+    candidates: Stage1CandidateResult,
+    projector: CctvProjector,
+) -> Stage1RoundResult:
+    parsed = candidates.parsed
+    if parsed is None:
+        reason = candidates.failure_reason or "command_parse"
+        log.info("[stage1] skip submit reason=%s", reason)
+        return Stage1RoundResult(candidates, None, None, reason)
+
+    chosen = candidates.object_selection
+    ranked = rank_object_candidates(
+        parsed, candidates.detections, projector=projector
+    )
+    ordered: list[ObjectSelection] = []
+    if chosen is not None:
+        ordered.append(chosen)
+    for item in ranked:
+        if chosen is not None and _same_object_pair(item, chosen):
+            continue
+        ordered.append(item)
+    if not ordered:
+        log.info(
+            "[stage1] skip submit reason=object_selection:no_match target_type=%s",
+            parsed.target_type,
+        )
+        return Stage1RoundResult(
+            candidates, None, "object_relation", "object_selection:no_match"
+        )
+
+    for selection in ordered:
+        projected = _project_selection(projector, parsed, selection)
+        if projected is None:
+            continue
+        target_xyz, anchor_xyz = projected
+        grounding = _grounding_payload(
+            parsed, selection.target.camera_id, target_xyz, anchor_xyz
+        )
+        anchor_id = (
+            selection.anchor.candidate_id if selection.anchor is not None else None
+        )
+        log.info(
+            "[stage1] grounding camera=%s target_id=%s anchor_id=%s method=%s "
+            "relation=%s landmark=%s target_xyz=(%.3f, %.3f, %.3f) "
+            "anchor_xyz=(%.3f, %.3f, %.3f)",
+            grounding.camera_id,
+            selection.target.candidate_id,
+            anchor_id or selection.target.candidate_id,
+            selection.method,
+            grounding.relation,
+            grounding.landmark,
+            *grounding.target_coord,
+            *grounding.anchor_coord,
+        )
+        return Stage1RoundResult(
+            candidates,
+            grounding,
+            selection.method,
+            None,
+            selection.target.candidate_id,
+            anchor_id,
+        )
+
+    log.info("[stage1] skip submit reason=projection_failed")
+    return Stage1RoundResult(
+        candidates,
+        None,
+        chosen.method if chosen is not None else "object_relation",
+        "projection_failed",
+    )
+
+
+def compose_stage1_grounding(
+    candidates: Stage1CandidateResult,
+    projector: CctvProjector,
+) -> Stage1RoundResult:
+    """Project a selected candidate into a GroundingResult, or skip without zeros."""
+    parsed = candidates.parsed
+    if parsed is None:
+        reason = candidates.failure_reason or "command_parse"
+        return Stage1RoundResult(candidates, None, None, reason)
+    if parsed.target_type == "person":
+        return _compose_person(candidates, projector)
+    return _compose_object(candidates, projector)
+
+
+def run_stage1_round(
+    client,
+    command_text: str,
+    *,
+    detector: Detector = detect_stage1_round,
+    verifier: Optional[Verifier] = None,
+    projector: Optional[CctvProjector] = None,
+    stub_path: Optional[str] = None,
+    discovery_timeout_s: Optional[float] = None,
+) -> Stage1RoundResult:
+    """Parse, detect, select, and project one Stage 1 command into world coordinates."""
+    if projector is None:
+        projector = CctvProjector.from_client(client)
+    candidates = run_stage1_candidate_pipeline(
+        client,
+        command_text,
+        detector=detector,
+        verifier=verifier,
+        projector=projector,
+        stub_path=stub_path,
+        discovery_timeout_s=discovery_timeout_s,
+    )
+    return compose_stage1_grounding(candidates, projector)
 
 
 def append_stage1_record(

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -26,12 +27,18 @@ class CctvYoloTests(unittest.TestCase):
         self.assertTrue(STAGE1_CCTV_CONTRACT.is_file())
 
     def test_runtime_contract_loads(self):
-        contract = RuntimeContract.load()
+        with patch.dict(os.environ, {"MARC_CCTV_YOLO_CONF": ""}):
+            contract = RuntimeContract.load()
         self.assertEqual(1920, contract.imgsz)
         self.assertAlmostEqual(0.3, contract.confidence)
         self.assertEqual(33, len(contract.ordered_classes))
         self.assertIn("mug", contract.ordered_classes)
         self.assertIn("person_reclining", contract.ordered_classes)
+
+    def test_runtime_contract_reads_confidence_from_env(self):
+        with patch.dict(os.environ, {"MARC_CCTV_YOLO_CONF": "0.15"}):
+            contract = RuntimeContract.load()
+        self.assertAlmostEqual(0.15, contract.confidence)
 
     def test_detections_to_candidates_retains_people_by_default(self):
         detections = [

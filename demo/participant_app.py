@@ -20,14 +20,18 @@ Precondition: the simulation platform must be running first.
 import logging
 import math
 import os
+import threading
 
 from marc_sdk import MARCClient
 
 from marc_agent.navigation_runtime import Stage2Navigator
 from marc_agent.perception.cctv_dump import maybe_dump_cctv_round
+from marc_agent.perception.cctv_project import CctvProjector
+from marc_agent.perception.cctv_round import discovery_timeout_from_limit
 from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
-    run_stage1_candidate_pipeline,
+    log_qwen_startup_status,
+    run_stage1_round,
 )
 from marc_agent.pick_runtime import PickRuntime
 from marc_agent.retrieval_state import RetrievalState, search_area_approach_goal
@@ -72,6 +76,8 @@ class DemoParticipant:
         self._reveal = None
         self._last_detections = None
         self._last_stage1_candidates = None
+        self._stage1_lock = threading.Lock()
+        self._stage1_projector = None
         self._register_handlers()
 
     # -- handler registration --
@@ -91,21 +97,46 @@ class DemoParticipant:
     def _on_mission(self, mission):
         log.info("[Stage1] round %s/%s: \"%s\"",
                  mission.round, mission.total_rounds, mission.voice_command)
-        self._last_stage1_candidates = run_stage1_candidate_pipeline(
+        thread = threading.Thread(
+            target=self._run_stage1_mission,
+            args=(mission,),
+            name=f"stage1-round-{mission.round}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_stage1_mission(self, mission):
+        with self._stage1_lock:
+            try:
+                self._execute_stage1(mission)
+            except Exception:
+                log.exception("[Stage1] round %s failed", mission.round)
+
+    def _execute_stage1(self, mission):
+        timeout_s = discovery_timeout_from_limit(getattr(mission, "time_limit", None))
+        if self._stage1_projector is None:
+            self._stage1_projector = CctvProjector.from_client(self.client)
+        round_result = run_stage1_round(
             self.client,
             mission.voice_command,
+            discovery_timeout_s=timeout_s,
+            projector=self._stage1_projector,
         )
-        self._last_detections = self._last_stage1_candidates.detections
+        self._last_stage1_candidates = round_result.candidates
+        self._last_detections = round_result.candidates.detections
         maybe_dump_cctv_round(self._last_detections, round_num=mission.round)
         log.info(
                  "[Stage1] CCTV round: %d cameras, %d frames, %d objects, "
-                 "%d people, selected=%s reason=%s",
+                 "%d people, selected=%s method=%s reason=%s",
                  len(self._last_detections.camera_ids),
                  len(self._last_detections.frames),
                  len(self._last_detections.objects),
                  len(self._last_detections.people),
-                 self._last_stage1_candidates.selected_candidate_id,
-                 self._last_stage1_candidates.failure_reason)
+                 round_result.target_id
+                 or self._last_stage1_candidates.selected_candidate_id,
+                 round_result.method,
+                 round_result.failure_reason
+                 or self._last_stage1_candidates.failure_reason)
         metrics_path = os.environ.get(
             "MARC_STAGE1_METRICS_PATH",
             "artifacts/stage1_rounds.jsonl",
@@ -115,11 +146,28 @@ class DemoParticipant:
         except OSError as exc:
             log.warning("[Stage1] could not append metrics to %s: %s", metrics_path, exc)
 
-        # Issue #7 ends at a selected pixel-space candidate. Issues #8/#9 own object
-        # relation choice and projection into the GroundingResult world coordinate.
-        # Never submit the scenario-backed mock answer from the production Stage 1 path.
+        grounding = round_result.grounding
+        if grounding is None:
+            log.info(
+                "[Stage1] skip submit reason=%s (no zero-coordinate fallback)",
+                round_result.failure_reason,
+            )
+            return
+        seq = self.client.submit_grounding(grounding)
         log.info(
-            "[Stage1] candidate handoff ready; awaiting #8/#9 projection before submission"
+            "[Stage1] submitted grounding seq=%s camera=%s target_id=%s "
+            "anchor_id=%s method=%s target_xyz=%s anchor_xyz=%s "
+            "relation=%s landmark=%s situation=%s",
+            seq,
+            grounding.camera_id,
+            round_result.target_id,
+            round_result.anchor_id,
+            round_result.method,
+            grounding.target_coord,
+            grounding.anchor_coord,
+            grounding.relation,
+            grounding.landmark,
+            grounding.situation,
         )
 
     # -- Stage 2: submit interpretation -> drive --
@@ -379,6 +427,7 @@ def main():
         format="[%(asctime)s] %(name)s %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    log_qwen_startup_status()
     DemoParticipant().run()
 
 

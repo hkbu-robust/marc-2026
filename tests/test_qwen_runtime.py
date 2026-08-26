@@ -9,9 +9,14 @@ from pathlib import Path
 
 from marc_agent.perception.bundle_paths import STAGE1_QWEN_CONTRACT
 from marc_agent.perception.qwen_runtime import (
+    QwenBackend,
+    QwenConfigurationError,
     QwenModelUnavailable,
+    QwenRemoteConfig,
     QwenRuntimeConfig,
     bundle_status,
+    configured_backend,
+    configured_max_crops,
     require_local_bundle,
 )
 
@@ -38,6 +43,66 @@ class QwenRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = QwenRuntimeConfig.load(environ={"MARC_QWEN_MODEL_DIR": tmp})
             self.assertEqual(Path(tmp).resolve(), config.model_dir)
+
+    def test_backend_defaults_local_and_accepts_remote(self):
+        self.assertEqual(QwenBackend.LOCAL, configured_backend({}))
+        self.assertEqual(
+            QwenBackend.REMOTE,
+            configured_backend({"MARC_QWEN_BACKEND": "remote"}),
+        )
+        with self.assertRaises(QwenConfigurationError):
+            configured_backend({"MARC_QWEN_BACKEND": "cloud"})
+
+    def test_remote_config_requires_url_and_key(self):
+        with self.assertRaisesRegex(QwenConfigurationError, "BASE_URL"):
+            QwenRemoteConfig.load(environ={})
+        with self.assertRaisesRegex(QwenConfigurationError, "API_KEY"):
+            QwenRemoteConfig.load(
+                environ={"MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1"}
+            )
+
+    def test_remote_config_builds_chat_endpoint(self):
+        config = QwenRemoteConfig.load(
+            environ={
+                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1/",
+                "MARC_QWEN_API_KEY": "secret",
+                "MARC_QWEN_MODEL": "qwen-test",
+                "MARC_QWEN_TIMEOUT_S": "4.5",
+                "MARC_QWEN_JPEG_QUALITY": "80",
+            }
+        )
+        self.assertEqual(
+            "http://10.0.0.2:8000/v1/chat/completions",
+            config.chat_completions_url,
+        )
+        self.assertEqual("http://10.0.0.2:8000/v1/models", config.models_url)
+        self.assertEqual("qwen-test", config.model_name)
+        self.assertEqual(4.5, config.timeout_s)
+        self.assertEqual(80, config.jpeg_quality)
+
+    def test_remote_timeout_defaults_to_ninety_seconds(self):
+        config = QwenRemoteConfig.load(
+            environ={
+                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1",
+                "MARC_QWEN_API_KEY": "secret",
+            }
+        )
+        self.assertEqual(90.0, config.timeout_s)
+
+    def test_remote_generation_defaults_to_forty_eight_tokens(self):
+        config = QwenRemoteConfig.load(
+            environ={
+                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1",
+                "MARC_QWEN_API_KEY": "secret",
+            }
+        )
+        self.assertEqual(48, config.max_new_tokens)
+
+    def test_crop_limit_is_bounded(self):
+        self.assertEqual(12, configured_max_crops({}))
+        self.assertEqual(0, configured_max_crops({"MARC_QWEN_MAX_CROPS": "0"}))
+        with self.assertRaises(QwenConfigurationError):
+            configured_max_crops({"MARC_QWEN_MAX_CROPS": "-1"})
 
     def test_complete_sharded_snapshot_is_ready(self):
         with tempfile.TemporaryDirectory() as tmp:

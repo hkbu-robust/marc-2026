@@ -17,7 +17,12 @@ python -m marc_agent.perception.qwen_runtime
 After the check succeeds, rebuild the participant image. Runtime loading is local-only; it
 never falls back to the Hub.
 
-After the check passes, set `MARC_SAR_DETECTOR=qwen`. The Stage 1 candidate pipeline will
-build one bounded multi-image board, run one local generation, validate the returned
-candidate ID and situation token, and use deterministic evidence if loading or generation
-fails. Until the snapshot arrives, leave the mode on `fallback`.
+After the check passes, set `MARC_SAR_DETECTOR=qwen` and
+`MARC_QWEN_BACKEND=local`. The Stage 1 candidate pipeline builds one bounded multi-image
+board, runs one local generation, validates the returned candidate ID and situation token,
+and uses deterministic evidence if loading or generation fails.
+
+For practice with Qwen on another LAN workstation, set `MARC_QWEN_BACKEND=remote`,
+`MARC_QWEN_BASE_URL`, `MARC_QWEN_API_KEY`, and `MARC_QWEN_MODEL`. Remote mode uses the same
+board and strict output grammar through vLLM's OpenAI-compatible chat endpoint. It does not
+require this local snapshot, but it is not the self-contained offline submission mode.

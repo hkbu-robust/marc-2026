@@ -18,6 +18,7 @@ from marc_agent.perception.sar_selection import (
 )
 from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
+    log_qwen_startup_status,
     run_stage1_candidate_pipeline,
 )
 from marc_agent.types import (
@@ -67,27 +68,60 @@ class SarSelectionTests(unittest.TestCase):
         self.assertIn("rig_a:trash_can:0", board.prompt)
         self.assertIn(self.text, board.prompt)
 
-    def test_valid_model_output_selects_only_supplied_id(self):
-        result = select_sar_candidate(
+    def test_board_limits_crops_but_keeps_every_candidate(self):
+        board = build_candidate_board(
             self.text,
             self.command,
             _round(),
-            verifier=lambda board: "rig_a:person:1|emergency",
+            max_crops=1,
         )
+        self.assertEqual(("rig_a:person:1", "rig_a:person:0"), board.candidate_ids)
+        self.assertEqual(2, len(board.images))  # one annotated camera + one crop
+        self.assertIn("rig_a:person:0", board.prompt)
+
+    def test_valid_model_output_selects_only_supplied_id(self):
+        with self.assertLogs("marc_agent.sar_selection", level="INFO") as captured:
+            result = select_sar_candidate(
+                self.text,
+                self.command,
+                _round(),
+                verifier=lambda board: "rig_a:person:1|emergency",
+            )
         self.assertEqual(SelectionStatus.SELECTED, result.status)
         self.assertEqual("rig_a:person:1", result.selected.candidate_id)
         self.assertEqual("qwen", result.method)
+        self.assertEqual("qwen", result.verifier_metrics.backend)
+        self.assertEqual(3, result.verifier_metrics.image_count)
+        self.assertIn("output=rig_a:person:1|emergency", "\n".join(captured.output))
 
     def test_invalid_model_output_uses_deterministic_fallback(self):
+        with self.assertLogs("marc_agent.sar_selection", level="INFO") as captured:
+            result = select_sar_candidate(
+                self.text,
+                self.command,
+                _round(),
+                verifier=lambda board: "I choose rig_a:person:0",
+            )
+        self.assertEqual("rig_a:person:1", result.selected.candidate_id)
+        self.assertEqual("deterministic_fallback", result.method)
+        self.assertEqual("verifier_failed:ValueError", result.reason)
+        self.assertIn("output=I choose rig_a:person:0", "\n".join(captured.output))
+
+    def test_remote_adapter_method_is_recorded(self):
+        class RemoteStub:
+            method = "qwen_remote"
+
+            def __call__(self, _board):
+                return "rig_a:person:1|emergency"
+
         result = select_sar_candidate(
             self.text,
             self.command,
             _round(),
-            verifier=lambda board: "I choose rig_a:person:0",
+            verifier=RemoteStub(),
         )
-        self.assertEqual("rig_a:person:1", result.selected.candidate_id)
-        self.assertEqual("deterministic_fallback", result.method)
-        self.assertEqual("verifier_failed:ValueError", result.reason)
+        self.assertEqual("qwen_remote", result.method)
+        self.assertEqual("qwen_remote", result.verifier_metrics.backend)
 
     def test_output_parser_rejects_unknown_candidates_and_extra_text(self):
         with self.assertRaisesRegex(ValueError, "unknown candidate"):
@@ -141,6 +175,7 @@ class SarSelectionTests(unittest.TestCase):
         self.assertFalse(hasattr(result, "target_coord"))
         record = result.record(expected_candidate_id="rig_a:person:1")
         self.assertEqual(1.0, record["candidate_recall"])
+        self.assertEqual("qwen", record["verifier_metrics"]["backend"])
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rounds.jsonl"
@@ -179,18 +214,99 @@ class SarSelectionTests(unittest.TestCase):
             result.sar_selection.reason,
         )
 
-    def test_object_request_returns_candidates_without_sar_selection(self):
+    def test_remote_mode_without_connection_config_falls_back(self):
         def detector(client, *, stub_path=None):
             return _round()
 
-        result = run_stage1_candidate_pipeline(
-            object(),
-            "Find the mug beside the bench.",
-            detector=detector,
+        env = {
+            "MARC_SAR_DETECTOR": "qwen",
+            "MARC_QWEN_BACKEND": "remote",
+            "MARC_QWEN_BASE_URL": "",
+            "MARC_QWEN_API_KEY": "",
+        }
+        with patch.dict("os.environ", env):
+            result = run_stage1_candidate_pipeline(
+                object(),
+                self.text,
+                detector=detector,
+            )
+        self.assertEqual("rig_a:person:1", result.selected_candidate_id)
+        self.assertEqual("deterministic_fallback", result.sar_selection.method)
+        self.assertEqual(
+            "verifier_failed:QwenConfigurationError",
+            result.sar_selection.reason,
         )
+
+    def test_object_request_selects_without_sar(self):
+        def detector(client, *, stub_path=None):
+            return _round()
+
+        with self.assertLogs("marc_agent.stage1_pipeline", level="INFO") as captured:
+            result = run_stage1_candidate_pipeline(
+                object(),
+                "Find the mug beside the bench.",
+                detector=detector,
+            )
         self.assertEqual("mug", result.parsed.target_type)
         self.assertIsNone(result.sar_selection)
-        self.assertIsNone(result.failure_reason)
+        self.assertIsNone(result.object_selection)
+        self.assertEqual("object_selection:no_match", result.failure_reason)
+        output = "\n".join(captured.output)
+        self.assertIn("object request", output)
+        self.assertNotIn("reason=non_sar_request", output)
+
+    def test_narrative_stage1_command_uses_find_intent(self):
+        def detector(client, *, stub_path=None, discovery_timeout_s=None):
+            return CctvDetectionRound()
+
+        result = run_stage1_candidate_pipeline(
+            object(),
+            "I was taking notes at an outdoor table and left my pencil case behind.",
+            detector=detector,
+        )
+        self.assertIsNotNone(result.parsed)
+        self.assertEqual("pencilcase", result.parsed.target_type)
+        self.assertEqual("picnic_table", result.parsed.landmark)
+        self.assertNotIn("unknown_intent", result.failure_reason or "")
+
+    def test_remote_startup_health_is_visible_and_does_not_log_key(self):
+        env = {
+            "MARC_SAR_DETECTOR": "qwen",
+            "MARC_QWEN_BACKEND": "remote",
+            "MARC_QWEN_BASE_URL": "http://workstation:8000/v1",
+            "MARC_QWEN_API_KEY": "private-test-key",
+        }
+        with (
+            patch.dict("os.environ", env),
+            patch(
+                "marc_agent.perception.stage1_pipeline.check_remote_health",
+                return_value=("qwen3-vl-8b",),
+            ),
+            self.assertLogs("marc_agent.stage1_pipeline", level="INFO") as captured,
+        ):
+            log_qwen_startup_status()
+        output = "\n".join(captured.output)
+        self.assertIn("health=ok", output)
+        self.assertIn("qwen3-vl-8b", output)
+        self.assertNotIn("private-test-key", output)
+
+    def test_remote_startup_failure_is_nonfatal(self):
+        env = {
+            "MARC_SAR_DETECTOR": "qwen",
+            "MARC_QWEN_BACKEND": "remote",
+            "MARC_QWEN_BASE_URL": "http://workstation:8000/v1",
+            "MARC_QWEN_API_KEY": "private-test-key",
+        }
+        with (
+            patch.dict("os.environ", env),
+            patch(
+                "marc_agent.perception.stage1_pipeline.check_remote_health",
+                side_effect=ConnectionError("connection refused"),
+            ),
+            self.assertLogs("marc_agent.stage1_pipeline", level="INFO") as captured,
+        ):
+            log_qwen_startup_status()
+        self.assertIn("health=failed", "\n".join(captured.output))
 
     def test_parse_failure_does_not_fetch_cctv(self):
         called = False
