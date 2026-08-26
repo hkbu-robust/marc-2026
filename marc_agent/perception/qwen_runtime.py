@@ -86,8 +86,7 @@ class QwenRemoteConfig:
         environ: Optional[Mapping[str, str]] = None,
     ) -> "QwenRemoteConfig":
         env = os.environ if environ is None else environ
-        payload = json.loads(contract_path.read_text(encoding="utf-8"))
-        inference = payload.get("inference") or {}
+        json.loads(contract_path.read_text(encoding="utf-8"))
         base_url = str(env.get("MARC_QWEN_BASE_URL") or "").strip().rstrip("/")
         parsed = urlparse(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -102,11 +101,8 @@ class QwenRemoteConfig:
         if not model_name:
             raise QwenConfigurationError("MARC_QWEN_MODEL must not be empty")
         try:
-            timeout_s = float(env.get("MARC_QWEN_TIMEOUT_S") or 30.0)
-            max_new_tokens = int(
-                env.get("MARC_QWEN_MAX_NEW_TOKENS")
-                or inference.get("max_new_tokens", 8)
-            )
+            timeout_s = float(env.get("MARC_QWEN_TIMEOUT_S") or 90.0)
+            max_new_tokens = int(env.get("MARC_QWEN_MAX_NEW_TOKENS") or 48)
             jpeg_quality = int(env.get("MARC_QWEN_JPEG_QUALITY") or 85)
         except (TypeError, ValueError) as exc:
             raise QwenConfigurationError(

@@ -11,8 +11,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from PIL import Image
 
 from marc_agent.perception.qwen_remote import (
+    QwenRemoteAuthenticationError,
     QwenRemoteConnectionError,
     QwenRemoteResponseError,
+    QwenRemoteTimeout,
     RemoteQwenSarVerifier,
     build_remote_payload,
     check_remote_health,
@@ -63,7 +65,9 @@ class QwenRemoteTests(unittest.TestCase):
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        self.assertEqual("rig_a:person:0|emergency", verifier(_board()))
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as logged:
+            self.assertEqual("rig_a:person:0|emergency", verifier(_board()))
+        self.assertIn("text=rig_a:person:0|emergency", "\n".join(logged.output))
         self.assertEqual(
             "http://workstation:8000/v1/chat/completions", captured["url"]
         )
@@ -156,6 +160,51 @@ class QwenRemoteTests(unittest.TestCase):
         self.assertEqual("/v1/chat/completions", captured["path"])
         self.assertEqual("Bearer test-secret", captured["authorization"])
         self.assertEqual("qwen3-vl-8b", captured["payload"]["model"])
+
+    def test_timeout_retries_once_then_returns(self):
+        calls = []
+
+        def post(*_args):
+            calls.append(1)
+            if len(calls) == 1:
+                raise QwenRemoteTimeout("vLLM did not respond within 5.0s")
+            return json.dumps(
+                {"choices": [{"message": {"content": "rig_a:person:0|emergency"}}]}
+            ).encode("utf-8")
+
+        verifier = RemoteQwenSarVerifier(_config(), post=post)
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
+            self.assertEqual("rig_a:person:0|emergency", verifier(_board()))
+        self.assertEqual(2, len(calls))
+        output = "\n".join(captured.output)
+        self.assertIn("attempt=1/2", output)
+        self.assertIn("attempt=2/2", output)
+
+    def test_timeout_retry_exhausted_raises(self):
+        calls = []
+
+        def post(*_args):
+            calls.append(1)
+            raise QwenRemoteTimeout("vLLM did not respond within 5.0s")
+
+        verifier = RemoteQwenSarVerifier(_config(), post=post)
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
+            with self.assertRaises(QwenRemoteTimeout):
+                verifier(_board())
+        self.assertEqual(2, len(calls))
+
+    def test_auth_error_is_not_retried(self):
+        calls = []
+
+        def post(*_args):
+            calls.append(1)
+            raise QwenRemoteAuthenticationError("vLLM rejected the configured API key (HTTP 401)")
+
+        verifier = RemoteQwenSarVerifier(_config(), post=post)
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
+            with self.assertRaises(QwenRemoteAuthenticationError):
+                verifier(_board())
+        self.assertEqual(1, len(calls))
 
 
 if __name__ == "__main__":

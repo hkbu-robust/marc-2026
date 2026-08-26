@@ -80,28 +80,32 @@ class SarSelectionTests(unittest.TestCase):
         self.assertIn("rig_a:person:0", board.prompt)
 
     def test_valid_model_output_selects_only_supplied_id(self):
-        result = select_sar_candidate(
-            self.text,
-            self.command,
-            _round(),
-            verifier=lambda board: "rig_a:person:1|emergency",
-        )
+        with self.assertLogs("marc_agent.sar_selection", level="INFO") as captured:
+            result = select_sar_candidate(
+                self.text,
+                self.command,
+                _round(),
+                verifier=lambda board: "rig_a:person:1|emergency",
+            )
         self.assertEqual(SelectionStatus.SELECTED, result.status)
         self.assertEqual("rig_a:person:1", result.selected.candidate_id)
         self.assertEqual("qwen", result.method)
         self.assertEqual("qwen", result.verifier_metrics.backend)
         self.assertEqual(3, result.verifier_metrics.image_count)
+        self.assertIn("output=rig_a:person:1|emergency", "\n".join(captured.output))
 
     def test_invalid_model_output_uses_deterministic_fallback(self):
-        result = select_sar_candidate(
-            self.text,
-            self.command,
-            _round(),
-            verifier=lambda board: "I choose rig_a:person:0",
-        )
+        with self.assertLogs("marc_agent.sar_selection", level="INFO") as captured:
+            result = select_sar_candidate(
+                self.text,
+                self.command,
+                _round(),
+                verifier=lambda board: "I choose rig_a:person:0",
+            )
         self.assertEqual("rig_a:person:1", result.selected.candidate_id)
         self.assertEqual("deterministic_fallback", result.method)
         self.assertEqual("verifier_failed:ValueError", result.reason)
+        self.assertIn("output=I choose rig_a:person:0", "\n".join(captured.output))
 
     def test_remote_adapter_method_is_recorded(self):
         class RemoteStub:
@@ -233,7 +237,7 @@ class SarSelectionTests(unittest.TestCase):
             result.sar_selection.reason,
         )
 
-    def test_object_request_returns_candidates_without_sar_selection(self):
+    def test_object_request_selects_without_sar(self):
         def detector(client, *, stub_path=None):
             return _round()
 
@@ -245,10 +249,25 @@ class SarSelectionTests(unittest.TestCase):
             )
         self.assertEqual("mug", result.parsed.target_type)
         self.assertIsNone(result.sar_selection)
-        self.assertIsNone(result.failure_reason)
+        self.assertIsNone(result.object_selection)
+        self.assertEqual("object_selection:no_match", result.failure_reason)
         output = "\n".join(captured.output)
-        self.assertIn("backend=local", output)
-        self.assertIn("reason=non_sar_request", output)
+        self.assertIn("object request", output)
+        self.assertNotIn("reason=non_sar_request", output)
+
+    def test_narrative_stage1_command_uses_find_intent(self):
+        def detector(client, *, stub_path=None, discovery_timeout_s=None):
+            return CctvDetectionRound()
+
+        result = run_stage1_candidate_pipeline(
+            object(),
+            "I was taking notes at an outdoor table and left my pencil case behind.",
+            detector=detector,
+        )
+        self.assertIsNotNone(result.parsed)
+        self.assertEqual("pencilcase", result.parsed.target_type)
+        self.assertEqual("picnic_table", result.parsed.landmark)
+        self.assertNotIn("unknown_intent", result.failure_reason or "")
 
     def test_remote_startup_health_is_visible_and_does_not_log_key(self):
         env = {

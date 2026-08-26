@@ -43,6 +43,7 @@ def detect_stage1_round(
     client: MARCClient,
     *,
     stub_path: Optional[str] = None,
+    discovery_timeout_s: Optional[float] = None,
 ) -> CctvDetectionRound:
     """Fetch CCTV frames once, then produce candidates for this mission round.
 
@@ -60,7 +61,9 @@ def detect_stage1_round(
     - ``qwen`` — raw people are verified after parsing in ``stage1_pipeline``
     """
     t0 = time.perf_counter()
-    frames, camera_ids = fetch_cctv_round(client)
+    frames, camera_ids = fetch_cctv_round(
+        client, discovery_timeout_s=discovery_timeout_s
+    )
     fetch_ms = (time.perf_counter() - t0) * 1000.0
 
     mode = _default_detector_mode()

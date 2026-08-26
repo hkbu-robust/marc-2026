@@ -78,7 +78,8 @@ Stage 1 candidate settings:
 | `MARC_QWEN_BASE_URL` | -- | Remote vLLM URL including `/v1`, e.g. `http://192.168.1.20:8000/v1` |
 | `MARC_QWEN_API_KEY` | -- | Bearer key configured on the vLLM server; never written to metrics |
 | `MARC_QWEN_MODEL` | `qwen3-vl-8b` | Name supplied through vLLM `--served-model-name` |
-| `MARC_QWEN_TIMEOUT_S` | `30` | Remote request deadline before deterministic fallback |
+| `MARC_QWEN_TIMEOUT_S` | `90` | Remote request deadline before deterministic fallback |
+| `MARC_QWEN_MAX_NEW_TOKENS` | `48` | Remote generation budget; 8 tokens truncates `TARGET_ID\|ANCHOR_ID` |
 | `MARC_QWEN_MAX_CROPS` | `12` | Per-person crops; annotated camera views still cover every candidate |
 | `MARC_STAGE1_METRICS_PATH` | `artifacts/stage1_rounds.jsonl` | Per-round candidate counts, latency, selection method, and failures |
 

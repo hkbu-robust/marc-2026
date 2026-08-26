@@ -184,36 +184,58 @@ class RemoteQwenSarVerifier:
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
-        log.info(
-            "[qwen-remote] dispatch endpoint=%s model=%s images=%d "
-            "candidates=%d request=%dB timeout=%.1fs",
-            self.config.chat_completions_url,
-            self.config.model_name,
-            len(board.images),
-            len(board.candidate_ids),
-            len(body),
-            self.config.timeout_s,
-        )
+        max_attempts = 2
         started = time.perf_counter()
+        raw = b""
         try:
-            raw = self._post(
-                self.config.chat_completions_url,
-                body,
-                headers,
-                self.config.timeout_s,
-            )
-        except Exception as exc:
-            latency_ms = (time.perf_counter() - started) * 1000.0
-            log.warning(
-                "[qwen-remote] failed endpoint=%s model=%s latency=%.0fms "
-                "error=%s detail=%s",
-                self.config.chat_completions_url,
-                self.config.model_name,
-                latency_ms,
-                type(exc).__name__,
-                exc,
-            )
-            raise
+            for attempt in range(1, max_attempts + 1):
+                log.info(
+                    "[qwen-remote] dispatch endpoint=%s model=%s images=%d "
+                    "candidates=%d request=%dB timeout=%.1fs attempt=%d/%d",
+                    self.config.chat_completions_url,
+                    self.config.model_name,
+                    len(board.images),
+                    len(board.candidate_ids),
+                    len(body),
+                    self.config.timeout_s,
+                    attempt,
+                    max_attempts,
+                )
+                try:
+                    raw = self._post(
+                        self.config.chat_completions_url,
+                        body,
+                        headers,
+                        self.config.timeout_s,
+                    )
+                    break
+                except QwenRemoteTimeout:
+                    latency_ms = (time.perf_counter() - started) * 1000.0
+                    log.warning(
+                        "[qwen-remote] timeout endpoint=%s model=%s "
+                        "latency=%.0fms attempt=%d/%d",
+                        self.config.chat_completions_url,
+                        self.config.model_name,
+                        latency_ms,
+                        attempt,
+                        max_attempts,
+                    )
+                    if attempt >= max_attempts:
+                        raise
+                except Exception as exc:
+                    latency_ms = (time.perf_counter() - started) * 1000.0
+                    log.warning(
+                        "[qwen-remote] failed endpoint=%s model=%s latency=%.0fms "
+                        "error=%s detail=%s attempt=%d/%d",
+                        self.config.chat_completions_url,
+                        self.config.model_name,
+                        latency_ms,
+                        type(exc).__name__,
+                        exc,
+                        attempt,
+                        max_attempts,
+                    )
+                    raise
         finally:
             latency_ms = (time.perf_counter() - started) * 1000.0
             self.last_metrics = QwenRemoteMetrics(
@@ -230,13 +252,15 @@ class RemoteQwenSarVerifier:
             ) from exc
         if not isinstance(text, str):
             raise QwenRemoteResponseError("vLLM message content must be text")
+        preview = " ".join(text.split())
         log.info(
             "[qwen-remote] response status=ok model=%s images=%d request=%dB "
-            "response=%dB latency=%.0fms",
+            "response=%dB latency=%.0fms text=%s",
             self.config.model_name,
             len(board.images),
             len(body),
             len(raw),
             latency_ms,
+            preview,
         )
         return text

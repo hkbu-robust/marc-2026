@@ -461,10 +461,11 @@ def select_sar_candidate(
                 if item.person.candidate_id == candidate_id
             )
             log.info(
-                "[qwen] validated output candidate=%s situation=%s backend=%s",
+                "[qwen] validated output candidate=%s situation=%s backend=%s output=%s",
                 candidate_id,
                 evidence_situation,
                 str(getattr(verifier, "method", "qwen")),
+                " ".join((raw_output or "").split()),
             )
             return SarSelectionResult(
                 SelectionStatus.SELECTED,
@@ -480,12 +481,16 @@ def select_sar_candidate(
             metrics = _verifier_metrics(verifier, board)
             fallback_reason = f"verifier_failed:{type(exc).__name__}"
             raw_output = locals().get("raw_output")
+            preview = (
+                " ".join(raw_output.split()) if isinstance(raw_output, str) else None
+            )
             log.warning(
-                "[qwen] verifier failed backend=%s error=%s detail=%s; "
+                "[qwen] verifier failed backend=%s error=%s detail=%s output=%s; "
                 "using deterministic fallback",
                 str(getattr(verifier, "method", "qwen")),
                 type(exc).__name__,
                 exc,
+                preview,
             )
     else:
         fallback_reason = "verifier_not_configured"

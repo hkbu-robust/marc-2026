@@ -23,6 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # ABI-incompatible with Debian's h5py ("numpy.dtype size changed").
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-numpy python3-yaml python3-pip libgl1 libglib2.0-0 \
+        ros-humble-tf2-ros ros-humble-tf2-ros-py \
     && pip3 install --no-cache-dir placo h5py \
     && pip3 install --no-cache-dir \
         torch torchvision --index-url https://download.pytorch.org/whl/cu121 \

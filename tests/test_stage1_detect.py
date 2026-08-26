@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import time
+import types
 import unittest
 from unittest.mock import patch
 
@@ -44,9 +46,63 @@ class FetchCctvRoundTests(unittest.TestCase):
 
     def test_skips_cameras_without_images(self):
         client = _FakeClient(images={"rig_2_c": _FakeImage(640, 480)})
-        frames, camera_ids = fetch_cctv_round(client)
+        frames, camera_ids = fetch_cctv_round(
+            client,
+            discovery_timeout_s=0.0,
+            discovery_settle_s=0.0,
+        )
         self.assertEqual(["rig_1_a", "rig_2_c"], camera_ids)
         self.assertEqual(["rig_2_c"], list(frames))
+
+    def test_waits_for_delayed_images(self):
+        class DelayedImageClient(_FakeClient):
+            def __init__(self):
+                super().__init__(camera_ids=["rig_1_a", "rig_2_c"])
+                self.started = time.monotonic()
+                self.ready_after_s = 0.03
+
+            def get_cctv_image(self, camera_id: str):
+                if time.monotonic() - self.started < self.ready_after_s:
+                    return None
+                return _FakeImage(640, 480)
+
+        client = DelayedImageClient()
+        frames, camera_ids = fetch_cctv_round(
+            client,
+            discovery_timeout_s=0.2,
+            discovery_settle_s=0.0,
+            poll_interval_s=0.005,
+        )
+        self.assertEqual(["rig_1_a", "rig_2_c"], camera_ids)
+        self.assertEqual(set(camera_ids), set(frames))
+
+    def test_waits_for_delayed_intrinsics(self):
+        class DelayedInfoClient(_FakeClient):
+            def __init__(self):
+                super().__init__(camera_ids=["rig_1_a"])
+                self.info_calls = 0
+
+            def get_cctv_info(self, camera_id: str):
+                self.info_calls += 1
+                if self.info_calls < 3:
+                    return None
+                return types.SimpleNamespace(k=[500.0, 0.0, 320.0, 0.0, 500.0, 240.0, 0.0, 0.0, 1.0])
+
+            def get_cctv_ground_height(self, camera_id: str):
+                if self.info_calls < 3:
+                    return None
+                return 16.5
+
+        client = DelayedInfoClient()
+        frames, camera_ids = fetch_cctv_round(
+            client,
+            discovery_timeout_s=0.2,
+            discovery_settle_s=0.0,
+            poll_interval_s=0.005,
+        )
+        self.assertEqual(["rig_1_a"], camera_ids)
+        self.assertEqual(["rig_1_a"], list(frames))
+        self.assertGreaterEqual(client.info_calls, 3)
 
     def test_waits_for_first_round_camera_discovery(self):
         class DelayedClient(_FakeClient):
@@ -69,6 +125,32 @@ class FetchCctvRoundTests(unittest.TestCase):
         )
         self.assertEqual(["rig_1_a", "rig_2_c"], camera_ids)
         self.assertEqual(set(camera_ids), set(frames))
+
+    def test_discover_hook_populates_cameras_during_wait(self):
+        class DiscoveringClient(_FakeClient):
+            def __init__(self):
+                super().__init__(camera_ids=["rig_1_a"])
+                self._camera_ids = []
+                self._images = {}
+                self.discover_calls = 0
+
+            def _discover_cctv(self):
+                self.discover_calls += 1
+                if self.discover_calls < 3:
+                    return
+                self._camera_ids = ["rig_1_a"]
+                self._images = {"rig_1_a": _FakeImage(640, 480)}
+
+        client = DiscoveringClient()
+        frames, camera_ids = fetch_cctv_round(
+            client,
+            discovery_timeout_s=0.2,
+            discovery_settle_s=0.0,
+            poll_interval_s=0.005,
+        )
+        self.assertEqual(["rig_1_a"], camera_ids)
+        self.assertEqual(["rig_1_a"], list(frames))
+        self.assertGreaterEqual(client.discover_calls, 3)
 
 
 class StubDetectionTests(unittest.TestCase):
@@ -93,8 +175,10 @@ class StubDetectionTests(unittest.TestCase):
         ]
         previous_detector = os.environ.get("MARC_STAGE1_DETECTOR")
         previous_sar = os.environ.get("MARC_SAR_DETECTOR")
+        previous_timeout = os.environ.get("MARC_CCTV_DISCOVERY_TIMEOUT_S")
         os.environ["MARC_STAGE1_DETECTOR"] = "yolo"
         os.environ["MARC_SAR_DETECTOR"] = "fallback"
+        os.environ["MARC_CCTV_DISCOVERY_TIMEOUT_S"] = "0"
         try:
             client = _FakeClient(
                 camera_ids=["rig_2_c", "rig_missing"],
@@ -114,6 +198,10 @@ class StubDetectionTests(unittest.TestCase):
                 os.environ.pop("MARC_SAR_DETECTOR", None)
             else:
                 os.environ["MARC_SAR_DETECTOR"] = previous_sar
+            if previous_timeout is None:
+                os.environ.pop("MARC_CCTV_DISCOVERY_TIMEOUT_S", None)
+            else:
+                os.environ["MARC_CCTV_DISCOVERY_TIMEOUT_S"] = previous_timeout
 
         self.assertEqual(people, round_.people)
         self.assertEqual(2, round_.metrics.cameras_discovered)

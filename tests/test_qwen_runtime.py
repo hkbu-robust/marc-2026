@@ -80,6 +80,24 @@ class QwenRuntimeTests(unittest.TestCase):
         self.assertEqual(4.5, config.timeout_s)
         self.assertEqual(80, config.jpeg_quality)
 
+    def test_remote_timeout_defaults_to_ninety_seconds(self):
+        config = QwenRemoteConfig.load(
+            environ={
+                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1",
+                "MARC_QWEN_API_KEY": "secret",
+            }
+        )
+        self.assertEqual(90.0, config.timeout_s)
+
+    def test_remote_generation_defaults_to_forty_eight_tokens(self):
+        config = QwenRemoteConfig.load(
+            environ={
+                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1",
+                "MARC_QWEN_API_KEY": "secret",
+            }
+        )
+        self.assertEqual(48, config.max_new_tokens)
+
     def test_crop_limit_is_bounded(self):
         self.assertEqual(12, configured_max_crops({}))
         self.assertEqual(0, configured_max_crops({"MARC_QWEN_MAX_CROPS": "0"}))
