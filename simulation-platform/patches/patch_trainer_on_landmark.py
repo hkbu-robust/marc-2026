@@ -1982,11 +1982,12 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             _pose = str(pose or "").lower()
             if typ == "vending_machine":
                 _v_key = "TRAINER_PEOPLE_VEND_FRAME_V"
-                # _marc_above_vend_sit_v80: 0.66 still cropped sitters off
-                # the top of these low CCTVs.
+                # _marc_sit_frame_head / _marc_above_vend_sit_v80: park
+                # torso (roof+0.55 m) on the ray at v≈0.55 so the sitter
+                # occupies the upper third, not an empty roof close-up.
                 _v_def = ("0.74" if (
                     "reaching" in _pose or "walking" in _pose
-                ) else "0.80")
+                ) else "0.55")
             elif typ == "postbox":
                 _v_key = "TRAINER_PEOPLE_POST_FRAME_V"
                 _v_def = "0.62"
@@ -2007,6 +2008,13 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             if abs(float(ray[2])) < 1e-6:
                 return rng
             plane_z = float(roof_z) if roof_z is not None else float(hi[2])
+            if typ == "vending_machine" and "sitting" in _pose:
+                try:
+                    _torso = float(__import__("os").environ.get(
+                        "TRAINER_PEOPLE_VEND_SIT_TORSO", "0.55") or "0.55")
+                except (TypeError, ValueError):
+                    _torso = 0.55
+                plane_z = float(plane_z) + _torso
             t = (plane_z - float(cam_t[2])) / float(ray[2])
             if t <= 0.0:
                 return rng
@@ -2340,68 +2348,51 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         return _butt_from_joints(joints) or support
 
     def _align_visual_on_trash_lid(person, tx, ty, top_z, character=None):
-        # _marc_above_trash_visual_seat: sitting clips hover 0.3-0.8m
-        # above the lid because the visual hips sit well above the
-        # joint cluster. Drop the mesh onto the rim; never raise.
-        # _marc_above_trash_weight_lid: student_weight hanging legs
-        # used to pull vis_z into the cavity (drop up to 1.15m).
+        # _marc_trash_butt_z / _marc_above_trash_weight_lid: pelvis on
+        # the lid, not mesh min in the hole. Hanging calves used to
+        # pull vis_z into the cavity.
+        del character
         pxyz = _world_xyz(person)
-        pts = _mesh_world_points(person)
-        if pxyz is None or not pts:
+        joints = _posed_joints(person)
+        if pxyz is None:
             return None
-        rad2 = 0.50 * 0.50
-        near = [p for p in pts
-                if (p[0] - float(tx)) ** 2 + (p[1] - float(ty)) ** 2 <= rad2]
-        if len(near) < 16:
-            rad2 = 0.90 * 0.90
-            near = [p for p in pts
-                    if (p[0] - float(tx)) ** 2
-                    + (p[1] - float(ty)) ** 2 <= rad2]
-        if len(near) < 8:
+        butt = _butt_from_joints(joints) if joints else None
+        if butt is None:
             return None
-        zs = [float(p[2]) for p in near]
-        min_z, max_z = min(zs), max(zs)
-        span = max(max_z - min_z, 0.01)
-        # Skip dangling calves/feet that hang into the bin.
-        body = [z for z in zs if z >= min_z + 0.38 * span]
-        if not body:
-            body = zs
-        vis_z = min(body)
-        cluster = [z for z in body if z <= vis_z + 0.08]
-        vis_z = sum(cluster) / float(len(cluster))
-        dz = float(top_z) - float(vis_z)
+        vis_z = float(butt[2])
+        dz = float(top_z) - vis_z
         if dz > 0.03:
             dz = 0.03
-        drop_cap = -1.15
-        if "weight" in str(character or "").lower():
-            try:
-                drop_cap = -abs(float(__import__("os").environ.get(
-                    "TRAINER_PEOPLE_TRASH_WEIGHT_DROP", "0.35") or "0.35"))
-            except (TypeError, ValueError):
-                drop_cap = -0.35
+        try:
+            drop_cap = -abs(float(__import__("os").environ.get(
+                "TRAINER_PEOPLE_TRASH_DROP", "0.25") or "0.25"))
+        except (TypeError, ValueError):
+            drop_cap = -0.25
         if dz < drop_cap:
             dz = drop_cap
-        hips = [p for p in near if min_z + 0.38 * span <= p[2] <= vis_z + 0.12]
-        if hips:
-            hx = sum(p[0] for p in hips) / float(len(hips))
-            hy = sum(p[1] for p in hips) / float(len(hips))
-            dx = float(tx) - float(hx)
-            dy = float(ty) - float(hy)
-            mag = (dx * dx + dy * dy) ** 0.5
-            if mag > 0.45:
-                s = 0.45 / mag
-                dx, dy = dx * s, dy * s
-        else:
-            dx = dy = 0.0
+        dx = float(tx) - float(butt[0])
+        dy = float(ty) - float(butt[1])
+        mag = (dx * dx + dy * dy) ** 0.5
+        if mag > 0.45:
+            s = 0.45 / mag
+            dx, dy = dx * s, dy * s
         if abs(dx) < 1e-4 and abs(dy) < 1e-4 and abs(dz) < 1e-4:
-            return [float(tx), float(ty), float(vis_z)]
+            if vis_z < float(top_z) - 0.12:
+                return None
+            return [float(butt[0]), float(butt[1]), vis_z]
         _set_xyz(person, [
             float(pxyz[0]) + dx,
             float(pxyz[1]) + dy,
             float(pxyz[2]) + dz,
         ])
         _marc_freeze_person(person)
-        return [float(tx), float(ty), float(top_z)]
+        joints = _posed_joints(person)
+        butt2 = _butt_from_joints(joints) if joints else None
+        if butt2 is None:
+            return None
+        if float(butt2[2]) < float(top_z) - 0.12:
+            return None
+        return [float(butt2[0]), float(butt2[1]), float(butt2[2])]
 
     def _vend_mesh_contact_on():
         # TRAINER_PEOPLE_VEND_MESH_CONTACT is ignored.
@@ -2825,6 +2816,32 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                  slot="lip"):
         # Sitting on a vending: hips on the glass-side lip in *cabinet*
         # local space so every CCTV sees the same physical pose.
+        if typ == "trash_can" and "sitting" in str(pose or ""):
+            # _marc_trash_sit_rim_xy: hips on the near rim, not the
+            # hollow opening. Legs already yaw toward the CCTV.
+            cam = _camera_xyz()
+            hx = hy = 0.35
+            if body_lo is not None and body_hi is not None:
+                hx = 0.5 * abs(float(body_hi[0]) - float(body_lo[0]))
+                hy = 0.5 * abs(float(body_hi[1]) - float(body_lo[1]))
+            half = min(hx, hy) if min(hx, hy) > 0.05 else max(hx, hy)
+            half = max(0.12, float(half))
+            try:
+                rim = float(__import__("os").environ.get(
+                    "TRAINER_PEOPLE_TRASH_RIM", "0.72") or "0.72")
+            except (TypeError, ValueError):
+                rim = 0.72
+            if cam is None:
+                return float(cx) + rim * half, float(cy)
+            dx = float(cam[0]) - float(cx)
+            dy = float(cam[1]) - float(cy)
+            n = (dx * dx + dy * dy) ** 0.5
+            if n < 1e-4:
+                return float(cx), float(cy)
+            return (
+                float(cx) + rim * half * dx / n,
+                float(cy) + rim * half * dy / n,
+            )
         if typ != "vending_machine" or "sitting" not in str(pose or ""):
             return float(cx), float(cy)
         fx, fy = _vending_front_xy(lm, body_lo, body_hi) if lm is not None else (1.0, 0.0)
@@ -2859,6 +2876,17 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 lip += 0.0727
         origin = _vending_roof_xy(lm, body_lo, body_hi) if lm is not None else None
         ox, oy = origin if origin is not None else (float(cx), float(cy))
+        # _marc_vend_cam_lip: glass can be the far face. Camera wins
+        # so the sit is on the CCTV-facing roof, not behind the cabinet.
+        cam = _camera_xyz()
+        if cam is not None:
+            cdx = float(cam[0]) - float(ox)
+            cdy = float(cam[1]) - float(oy)
+            cn = (cdx * cdx + cdy * cdy) ** 0.5
+            if cn > 1e-4:
+                cdx, cdy = cdx / cn, cdy / cn
+                if cdx * float(fx) + cdy * float(fy) < 0.15:
+                    fx, fy = cdx, cdy
         # _marc_above_vend_on_roof: keep the butt on the cabinet. Female
         # / professor used to get half+0.04 past the face and sit in air.
         half_front = 0.35
@@ -3278,6 +3306,8 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                     spec.get("character"))
                 if vis is not None:
                     support = vis
+                else:
+                    support = None
             if support is not None:
                 pcx, pcy = float(support[0]), float(support[1])
                 gap = float(support[2]) - float(top_z)
@@ -3288,8 +3318,17 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                     max_xy=max_xy))
                 if (seated and typ == "vending_machine"
                         and "sitting" in pose):
+                    # _marc_vend_visual_roof: visual hips, not joint butt.
+                    hip = _mesh_hip_xy(
+                        person, pcx, pcy, float(top_z))
+                    hx = float(hip[0]) if hip else pcx
+                    hy = float(hip[1]) if hip else pcy
                     seated = bool(_on_vending_roof(
-                        lm, body_lo, body_hi, pcx, pcy, 0.04))
+                        lm, body_lo, body_hi, hx, hy, 0.04))
+                if (seated and typ == "trash_can"
+                        and "sitting" in pose):
+                    seated = bool(
+                        float(support[2]) >= float(top_z) - 0.12)
             if seated:
                 break
         if (not seated) and typ == "vending_machine" and "sitting" in pose:
@@ -3324,11 +3363,15 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                         support = vis
                     pcx, pcy = float(support[0]), float(support[1])
                     gap = float(support[2]) - float(top_z)
+                    hip = _mesh_hip_xy(
+                        person, pcx, pcy, float(top_z))
+                    hx = float(hip[0]) if hip else pcx
+                    hy = float(hip[1]) if hip else pcy
                     seated = bool(_contact_ok(
                         support, sx, sy, float(top_z),
                         min_gap=(-(abs(sink) + 0.15) if sink else -0.05),
                         max_xy=0.55) and _on_vending_roof(
-                            lm, body_lo, body_hi, pcx, pcy, 0.04))
+                            lm, body_lo, body_hi, hx, hy, 0.04))
         if (not seated) and typ == "trash_can" and "sitting" in pose:
             vis = _align_visual_on_trash_lid(
                 person, float(sx), float(sy), float(top_z),
@@ -3337,19 +3380,10 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 support = vis
                 pcx, pcy = float(support[0]), float(support[1])
                 gap = float(support[2]) - float(top_z)
-                # _marc_above_trash_weight_lid: never force-accept a
-                # body punched through the lid.
-                body_z = None
-                pts = _mesh_world_points(person)
-                if pts:
-                    zs = [float(p[2]) for p in pts]
-                    min_z, max_z = min(zs), max(zs)
-                    span = max(max_z - min_z, 0.01)
-                    body = [z for z in zs if z >= min_z + 0.38 * span]
-                    if body:
-                        body_z = min(body)
-                seated = bool(
-                    body_z is None or body_z >= float(top_z) - 0.20)
+                seated = bool(_contact_ok(
+                    support, sx, sy, float(top_z),
+                    min_gap=(-(abs(sink) + 0.15) if sink else -0.05),
+                    max_xy=0.55) and float(support[2]) >= float(top_z) - 0.12)
         if not seated:
             _rej = (
                 str(person.GetPath()), str(lm.GetPath()),
@@ -3985,6 +4019,11 @@ def _ensure_above_helper(path):
         and "_marc_yaw_keep_root" in src
         and "_marc_above_vend_sit_v80" in src
         and "_marc_above_trash_weight_lid" in src
+        and "_marc_trash_sit_rim_xy" in src
+        and "_marc_trash_butt_z" in src
+        and "_marc_vend_cam_lip" in src
+        and "_marc_vend_visual_roof" in src
+        and "_marc_sit_frame_head" in src
         and "def visible_above_stack" in src
         and "RemoveAPI" in src
         and "GetPointsAttr" in src
