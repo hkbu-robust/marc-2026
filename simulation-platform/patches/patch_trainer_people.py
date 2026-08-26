@@ -243,18 +243,19 @@ NEW_COMBOS = '''    combos = []
                     "TRAINER_PEOPLE_VEND_BUTT_SINK", "0.12") or "0.12")
             except (TypeError, ValueError):
                 return 0.12
+        if str(typ or "") == "trash_can":
+            # _marc_trash_sit_rim: sit on the lid, not inside the can.
+            try:
+                return float(os.environ.get(
+                    "TRAINER_PEOPLE_SIT_SINK_TRASH", "0.42") or "0.42")
+            except (TypeError, ValueError):
+                return 0.42
         try:
             sink = float(os.environ.get(
                 "TRAINER_PEOPLE_SIT_SINK", "0.70") or "0.70")
         except (TypeError, ValueError):
             sink = 0.70
-        if str(typ or "") == "trash_can":
-            try:
-                sink += float(os.environ.get(
-                    "TRAINER_PEOPLE_SIT_SINK_TRASH", "0.15") or "0.15")
-            except (TypeError, ValueError):
-                sink += 0.15
-        elif str(typ or "") in ("postbox", "hydrant"):
+        if str(typ or "") in ("postbox", "hydrant"):
             try:
                 sink += float(os.environ.get(
                     "TRAINER_PEOPLE_SIT_SINK_SHORT", "0.35") or "0.35")
@@ -462,6 +463,7 @@ NEW_COMBOS = '''    combos = []
                     "surface_class": rec.get("surface_class"),
                     "support_landmark": rec.get("support_landmark"),
                     "surface_anchor": rec.get("surface_anchor"),
+                    "extra_landmarks": list(rec.get("extra_landmarks") or []),
                     "tip_landmark": rec.get("tip_landmark"),
                     "relation": rec.get("relation"),
                     "above": bool(rec.get("above")),
@@ -497,6 +499,27 @@ NEW_COMBOS = '''    combos = []
             for _extra in _extras:
                 if _extra and not any(_marc_lm_typ(s) == _extra for s in landmarks):
                     landmarks.append({"name": "%s_0" % _extra})
+            if _recipe.get("above"):
+                # Extra climb cabinets sit on the FOV rim and show as a
+                # cropped "vending with nobody on it." Keep the recipe
+                # support plus seats / non-climb clutter.
+                _keep = set()
+                for _k in (
+                        _recipe.get("support_landmark"),
+                        _recipe.get("surface_anchor"),
+                        _recipe.get("tip_landmark"),
+                ):
+                    if _k:
+                        _keep.add(_k)
+                for _extra in list(_recipe.get("extra_landmarks") or []):
+                    if _extra:
+                        _keep.add(_extra)
+                landmarks[:] = [
+                    s for s in landmarks
+                    if (_marc_lm_typ(s) in _keep
+                        or _marc_is_seat(_marc_lm_typ(s))
+                        or not _marc_is_above_ok(_marc_lm_typ(s)))
+                ]
             _marc_dump_recipe(_recipe)
     if (_above_mode or _recipe is not None) and combos:
         # Climber identity is random per scene. Recipe mode used catalog
@@ -969,6 +992,45 @@ def main():
                 src = src.replace(_old_grouped, _new_split, 1)
                 changed = True
         if ("_marc_sit_sink" in src
+                and "_marc_trash_sit_rim" not in src):
+            _old_trash_add = (
+                '        if str(typ or "") == "trash_can":\n'
+                '            try:\n'
+                '                sink += float(os.environ.get(\n'
+                '                    "TRAINER_PEOPLE_SIT_SINK_TRASH", '
+                '"0.15") or "0.15")\n'
+                '            except (TypeError, ValueError):\n'
+                '                sink += 0.15\n'
+                '        elif str(typ or "") in ("postbox", "hydrant"):\n'
+            )
+            _new_trash_rim = (
+                '        if str(typ or "") == "trash_can":\n'
+                '            # _marc_trash_sit_rim: sit on the lid, not '
+                'inside the can.\n'
+                '            try:\n'
+                '                return float(os.environ.get(\n'
+                '                    "TRAINER_PEOPLE_SIT_SINK_TRASH", '
+                '"0.42") or "0.42")\n'
+                '            except (TypeError, ValueError):\n'
+                '                return 0.42\n'
+                '        if str(typ or "") in ("postbox", "hydrant"):\n'
+            )
+            if _old_trash_add in src:
+                src = src.replace(_old_trash_add, _new_trash_rim, 1)
+                changed = True
+        if ("_marc_sit_sink" in src
+                and '"TRAINER_PEOPLE_SIT_SINK_TRASH", "0.18"' in src):
+            src = src.replace(
+                '"TRAINER_PEOPLE_SIT_SINK_TRASH", "0.18") or "0.18")\n'
+                '            except (TypeError, ValueError):\n'
+                '                return 0.18\n',
+                '"TRAINER_PEOPLE_SIT_SINK_TRASH", "0.42") or "0.42")\n'
+                '            except (TypeError, ValueError):\n'
+                '                return 0.42\n',
+                1,
+            )
+            changed = True
+        if ("_marc_sit_sink" in src
                 and "TRAINER_PEOPLE_CROUCH_SINK_HYDRANT" not in src):
             _old_sit_only = (
                 '    def _marc_sit_sink(typ, pose):\n'
@@ -1278,6 +1340,17 @@ def main():
                 "        elif _above_mode and _target and not _climber_placed:\n",
                 1,
             )
+        if ('"surface_anchor": rec.get("surface_anchor"),' in src
+                and '"extra_landmarks": list(rec.get("extra_landmarks")'
+                not in src):
+            src = src.replace(
+                '"surface_anchor": rec.get("surface_anchor"),\n',
+                '"surface_anchor": rec.get("surface_anchor"),\n'
+                '                    "extra_landmarks": list('
+                'rec.get("extra_landmarks") or []),\n',
+                1,
+            )
+            changed = True
         if "TRAINER_SAR_RECIPES" not in src and "_pose_set = set(all_poses)" in src:
             _shuf_if = "    if (_above_mode or _recipe is not None) and combos:\n"
             _old_pose_set = "    _pose_set = set(all_poses)\n    if _above_mode and combos:\n"
@@ -1368,6 +1441,22 @@ def main():
         )
         if _old_shuf_plain in src:
             src = src.replace(_old_shuf_plain, _new_shuf_plain, 1)
+            changed = True
+        _old_extra_dump = (
+            "            for _extra in _extras:\n"
+            "                if _extra and not any(_marc_lm_typ(s) == _extra for s in landmarks):\n"
+            "                    landmarks.append({\"name\": \"%s_0\" % _extra})\n"
+            "            _marc_dump_recipe(_recipe)\n"
+        )
+        _new_extra_dump = NEW_COMBOS[
+            NEW_COMBOS.find("            for _extra in _extras:\n"):
+            NEW_COMBOS.find("            _marc_dump_recipe(_recipe)\n")
+            + len("            _marc_dump_recipe(_recipe)\n")
+        ]
+        if (_old_extra_dump in src
+                and "Extra climb cabinets sit on the FOV rim" not in src
+                and _new_extra_dump):
+            src = src.replace(_old_extra_dump, _new_extra_dump, 1)
             changed = True
         if changed:
             if not _write(src):

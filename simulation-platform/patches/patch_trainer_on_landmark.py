@@ -23,6 +23,7 @@
 #
 # boot.py runs this before dataset-gen. Idempotent via MARKER. Pair with
 # patch_trainer_people.py, which actually stamps placement onto people specs.
+import inspect
 import os
 import re
 import sys
@@ -31,7 +32,22 @@ TRAINER = "/metacom2026/simulation_app/marc2026/trainer.py"
 DEPLOYER = "/metacom2026/simulation_app/marc2026/world/object_deployer.py"
 MARKER = "_marc_obj_placement"
 
-ABOVE_SCENE_FN = '''
+RECIPE_SCENE_FN = '''
+def _marc_recipe_scene():
+    """True when this scene is a TRAINER_SAR_RECIPES archetype."""
+    if str(__import__("os").environ.get("TRAINER_SAR_RECIPES", "0")).strip().lower() in (
+            "0", "false", "no", "off", ""):
+        return False
+    try:
+        import json as _json_rs
+        with open("/tmp/marc_sar_recipe.json", encoding="utf-8") as _rf:
+            rec = _json_rs.load(_rf) or {}
+        return bool(rec.get("recipe_id"))
+    except Exception:
+        return False
+'''
+
+ABOVE_SCENE_FN = RECIPE_SCENE_FN + '''
 def _marc_above_scene():
     """True when this scene should frame a climb stack (env or recipe.above)."""
     if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0")).strip().lower() not in (
@@ -65,12 +81,24 @@ def _rewrite_above_gates(src: str) -> str:
 
 
 def _ensure_module_above_scene(src: str) -> str:
-    if "def _marc_above_scene(" in src:
-        return src
-    idx = src.find("\ndef ")
-    if idx < 0:
-        return ABOVE_SCENE_FN + "\n" + src
-    return src[:idx] + "\n" + ABOVE_SCENE_FN + src[idx:]
+    if "def _marc_recipe_scene(" not in src:
+        if "def _marc_above_scene(" in src:
+            src = src.replace(
+                "def _marc_above_scene(",
+                RECIPE_SCENE_FN.strip() + "\n\ndef _marc_above_scene(",
+                1,
+            )
+        else:
+            idx = src.find("\ndef ")
+            if idx < 0:
+                return ABOVE_SCENE_FN + "\n" + src
+            src = src[:idx] + "\n" + ABOVE_SCENE_FN + src[idx:]
+    elif "def _marc_above_scene(" not in src:
+        idx = src.find("\ndef ")
+        if idx < 0:
+            return ABOVE_SCENE_FN + "\n" + src
+        src = src[:idx] + "\n" + ABOVE_SCENE_FN + src[idx:]
+    return src
 
 
 OLD_PLACE_POSE = '''    placement = (pose or {}).get("placement") or {}
@@ -206,6 +234,12 @@ NEW_SNAP = '''        _snap_landmarks_to_ground([mission])
                 mission["id"], mission.get("objects") or [], configurations)
         except Exception as _e:
             log.warning(f"place-beside people failed (non-fatal): {_e}")
+        try:
+            from world.object_deployer import _marc_place_seat_people
+            _marc_place_seat_people(
+                mission["id"], mission.get("objects") or [], configurations)
+        except Exception as _e:
+            log.warning(f"place-seat people failed (non-fatal): {_e}")
 '''
 
 OLD_SETTLE = '''        simulation_context.play()
@@ -262,6 +296,46 @@ NEW_SETTLE = '''        if _marc_above_scene():
                     configurations)
             except Exception as _e:
                 log.warning(f"place-above after settle failed (non-fatal): {_e}")
+        elif _marc_recipe_scene():
+            # Seat-lie / beside never freeze as a climb stack. Re-place the
+            # recipe target every settle tick so PhysX cannot throw them
+            # 10 m from the support the camera actually sees.
+            try:
+                simulation_context.pause()
+            except Exception:
+                pass
+            _snap_landmarks_to_ground([mission])
+            def _marc_reseat_recipe():
+                try:
+                    from world.object_deployer import (
+                        reposition_on_landmark_people,
+                        _marc_place_beside_people,
+                        _marc_place_seat_people,
+                    )
+                    reposition_on_landmark_people(
+                        mission["id"], mission.get("objects") or [],
+                        configurations)
+                    _marc_place_seat_people(
+                        mission["id"], mission.get("objects") or [],
+                        configurations)
+                    _marc_place_beside_people(
+                        mission["id"], mission.get("objects") or [],
+                        configurations)
+                except Exception as _e:
+                    log.warning(f"recipe reseat failed (non-fatal): {_e}")
+            _marc_reseat_recipe()
+            simulation_context.play()
+            for _ in range(_SETTLE_FRAMES):
+                try:
+                    _marc_reseat_recipe()
+                except Exception:
+                    pass
+                simulation_context.step(render=False)
+            try:
+                simulation_context.pause()
+            except Exception:
+                pass
+            _marc_reseat_recipe()
         else:
             simulation_context.play()
             for _ in range(_SETTLE_FRAMES):
@@ -606,30 +680,181 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                     str(d.get("class") or "") == _t
                     or str(d.get("class") or "").startswith(_t)
                     for d in _dets)
+            _img = (active_payload or {}).get("image") or {}
+            try:
+                _ih = float(_img.get("height") or 0.0)
+            except (TypeError, ValueError):
+                _ih = 0.0
+            _margin = max(8.0, 0.03 * _ih) if _ih else 8.0
+            _headroom = True
+            for _d in _dets:
+                _b = _d.get("bbox") or []
+                if len(_b) != 4:
+                    continue
+                try:
+                    _y0 = min(float(_b[1]), float(_b[3]))
+                except (TypeError, ValueError):
+                    continue
+                _cls = str(_d.get("class") or "")
+                if _d.get("recipe_id") and _y0 <= _margin:
+                    _headroom = False
+                    break
+                if _target and (
+                        _cls == _target or _cls.startswith(_target)
+                        ) and _y0 <= _margin:
+                    _headroom = False
+                    break
             try:
                 from world import object_deployer as _od_view
-                _od_view._marc_above_target_in_view = _target_in_view
+                _od_view._marc_above_target_in_view = (
+                    _target_in_view and _headroom)
             except Exception:
                 pass
-            # 3D raycast+joint contact only. 2D boxes and AABBs disagree
-            # with a pitched CCTV view and are not a placement oracle.
-            # Skip save (and retry) if the climb landmark is not in the
-            # camera at all — scene 0 often captures before the CCTV
-            # looks at the spawned cabinet.
-            _active_valid = _n_placed > 0 and _target_in_view
+            _stack_ok = True
+            _lm_d = None
+            if _target:
+                _t = str(_target)
+                for _d in _dets:
+                    _cls = str(_d.get("class") or "")
+                    if _cls == _t or _cls.startswith(_t):
+                        _lm_d = _d
+                        break
+            # _marc_recipe_climb_visible: landmark-in-view saved empty
+            # vending close-ups; require the person stacked on it.
+            try:
+                from world.object_deployer import visible_above_stack
+                _people_d = [
+                    _d for _d in _dets
+                    if str(_d.get("class") or "").startswith("person_")]
+                _rid_people = [p for p in _people_d if p.get("recipe_id")]
+                _try = _rid_people or _people_d
+                if _lm_d is None or not _try:
+                    _stack_ok = False
+                else:
+                    _stack_ok = any(
+                        visible_above_stack(p, _lm_d, _ih) for p in _try)
+            except Exception:
+                _stack_ok = any(
+                    str(d.get("class") or "").startswith("person_")
+                    for d in _dets)
+            # Skip save if the climb landmark is off camera, or if the
+            # roof / climber is cropped at the top of the CCTV frame.
+            _active_valid = (
+                _n_placed > 0 and _target_in_view and _headroom and _stack_ok)
             if _n_placed <= 0:
                 log.warning(
                     f"Above scene {scene_id}: constructed stack invariant "
                     f"failed (target={_target or '-'} placed={_n_placed}); "
                     f"skip save")
-            if not _target_in_view:
+            elif not _target_in_view:
                 log.warning(
                     f"Above scene {scene_id}: target={_target or '-'} "
                     f"not in CCTV detections; skip save")
+            elif not _headroom:
+                log.warning(
+                    f"Above scene {scene_id}: target={_target or '-'} "
+                    f"roof/climber top-clipped; skip save")
+            elif not _stack_ok:
+                log.warning(
+                    f"Above scene {scene_id}: target={_target or '-'} "
+                    f"climber not visible on support; skip save")
             else:
                 log.info(
                     f"Above scene {scene_id}: target={_target or '-'} "
                     f"saved placed={_n_placed}")
+        elif _marc_recipe_scene():
+            _dets = list((active_payload or {}).get("detections") or [])
+            rec = {}
+            try:
+                import json as _json_sv
+                rec = _json_sv.load(open("/tmp/marc_sar_recipe.json")) or {}
+            except Exception:
+                rec = {}
+            _rid = str(rec.get("recipe_id") or "")
+            _pose = str(rec.get("target_pose") or "")
+            _sup = str(
+                rec.get("support_class")
+                or rec.get("support_landmark")
+                or rec.get("surface_anchor")
+                or "")
+            _tgt = None
+            for _d in _dets:
+                if str(_d.get("class") or "").startswith("person_"):
+                    if _rid and str(_d.get("recipe_id") or "") == _rid:
+                        _tgt = _d
+                        break
+            _sup_d = None
+            if _sup:
+                _best = None
+                _pxyz = (_tgt or {}).get("world_xyz")
+                for _d in _dets:
+                    if str(_d.get("class") or "") != _sup:
+                        continue
+                    _w = _d.get("world_xyz")
+                    if (_pxyz and _w and len(_pxyz) >= 2 and len(_w) >= 2):
+                        _dd = ((_pxyz[0] - _w[0]) ** 2
+                               + (_pxyz[1] - _w[1]) ** 2) ** 0.5
+                        if _best is None or _dd < _best[0]:
+                            _best = (_dd, _d)
+                    elif _sup_d is None:
+                        _sup_d = _d
+                if _best is not None:
+                    _sup_d = _best[1]
+            _pair_ok = True
+            if _tgt is not None and _sup_d is not None:
+                _pxyz = _tgt.get("world_xyz")
+                _w = _sup_d.get("world_xyz")
+                if _pxyz and _w and len(_pxyz) >= 2 and len(_w) >= 2:
+                    _dxy = ((_pxyz[0] - _w[0]) ** 2
+                            + (_pxyz[1] - _w[1]) ** 2) ** 0.5
+                    try:
+                        _max = float(__import__("os").environ.get(
+                            "TRAINER_SAR_PAIR_XY_MAX", "2.8") or "2.8")
+                    except (TypeError, ValueError):
+                        _max = 2.8
+                    if str(rec.get("relation") or "") in ("on", "above"):
+                        try:
+                            _max = min(_max, float(__import__("os").environ.get(
+                                "TRAINER_SAR_ON_XY_MAX", "1.4") or "1.4"))
+                        except (TypeError, ValueError):
+                            _max = min(_max, 1.4)
+                    if _dxy > _max:
+                        _pair_ok = False
+            if (str(rec.get("relation") or "") in ("on", "above")
+                    and _tgt is not None and _sup_d is not None):
+                # _marc_recipe_climb_visible: no same-pose distractor
+                # fallback; person must be stacked on the support in-frame.
+                try:
+                    from world.object_deployer import visible_above_stack
+                    _imgh = 0.0
+                    try:
+                        _imgh = float(
+                            ((active_payload or {}).get("image") or {}).get(
+                                "height") or 0.0)
+                    except (TypeError, ValueError):
+                        _imgh = 0.0
+                    if not visible_above_stack(_tgt, _sup_d, _imgh):
+                        _pair_ok = False
+                except Exception:
+                    pass
+            _active_valid = (
+                _tgt is not None
+                and ((not _sup) or _sup_d is not None)
+                and _pair_ok)
+            try:
+                from world import object_deployer as _od_view
+                _od_view._marc_above_target_in_view = bool(_active_valid)
+            except Exception:
+                pass
+            if not _active_valid:
+                log.warning(
+                    f"Recipe scene {scene_id}: "
+                    f"id={_rid or '-'} pose={_pose or '-'} "
+                    f"support={_sup or '-'} pair={_pair_ok}; skip save")
+            else:
+                log.info(
+                    f"Recipe scene {scene_id}: "
+                    f"id={_rid or '-'} pose={_pose or '-'} saved")
         if save_offline_enabled and _active_valid:
             # 선택된 카메라만 저장 (배치 콘텐츠가 있는 active 미션).
             if active_payload is not None:
@@ -646,21 +871,37 @@ OLD_RENDER_STEP = (
     "            scene_id, simulation_app, stamp=stamp,\n"
     "            render_step=lambda: simulation_context.step(render=True))\n"
 )
-NEW_RENDER_STEP = '''        if _marc_above_scene():
+NEW_RENDER_STEP = '''        if _marc_above_scene() or _marc_recipe_scene():
             try:
                 simulation_context.pause()
             except Exception:
                 pass
             try:
-                from world.object_deployer import _marc_place_above_people
                 _miss = next(
                     m for m in missions if m.get("id") == active_mission_id)
-                _marc_place_above_people(
-                    _miss["id"], _miss.get("objects") or [],
-                    configurations)
+                if _marc_above_scene():
+                    from world.object_deployer import _marc_place_above_people
+                    _marc_place_above_people(
+                        _miss["id"], _miss.get("objects") or [],
+                        configurations)
+                elif _marc_recipe_scene():
+                    from world.object_deployer import (
+                        reposition_on_landmark_people,
+                        _marc_place_beside_people,
+                        _marc_place_seat_people,
+                    )
+                    reposition_on_landmark_people(
+                        _miss["id"], _miss.get("objects") or [],
+                        configurations)
+                    _marc_place_seat_people(
+                        _miss["id"], _miss.get("objects") or [],
+                        configurations)
+                    _marc_place_beside_people(
+                        _miss["id"], _miss.get("objects") or [],
+                        configurations)
             except Exception as _pe:
                 log.warning(
-                    f"place-above before GT capture failed (non-fatal): {_pe}")
+                    f"recipe reseat before GT capture failed (non-fatal): {_pe}")
         simulation_context.play()
         def _marc_gt_step():
             # Playback ticks restore spawn poses. Freeze/re-seat the climber
@@ -677,6 +918,27 @@ NEW_RENDER_STEP = '''        if _marc_above_scene():
                     except Exception as _pe:
                         log.warning(
                             f"place-above GT step failed (non-fatal): {_pe}")
+                elif _marc_recipe_scene():
+                    try:
+                        from world.object_deployer import (
+                            reposition_on_landmark_people,
+                            _marc_place_beside_people,
+                            _marc_place_seat_people,
+                        )
+                        _miss = next(
+                            m for m in missions if m.get("id") == active_mission_id)
+                        reposition_on_landmark_people(
+                            _miss["id"], _miss.get("objects") or [],
+                            configurations)
+                        _marc_place_seat_people(
+                            _miss["id"], _miss.get("objects") or [],
+                            configurations)
+                        _marc_place_beside_people(
+                            _miss["id"], _miss.get("objects") or [],
+                            configurations)
+                    except Exception as _pe:
+                        log.warning(
+                            f"recipe reseat GT step failed (non-fatal): {_pe}")
             _marc_reseat()
             simulation_context.step(render=True)
             _marc_reseat()
@@ -710,6 +972,45 @@ NEW_RENDER_STEP_V1 = '''        simulation_context.play()
 
 OLD_CAPTURE_RETURN = "        return gt.last_render_ok\n"
 NEW_CAPTURE_RETURN = '''        if _marc_above_scene():
+            # Scene 0 often has a valid RGB but the climb landmark is off
+            # camera. Return False so the stock black-frame redeploy retries
+            # instead of keeping a cabinet-less first frame.
+            try:
+                from world import object_deployer as _od_cap
+                _n = int(getattr(_od_cap, "_marc_above_placed_n", 0) or 0)
+                _in = bool(getattr(
+                    _od_cap, "_marc_above_target_in_view", True))
+            except Exception:
+                _n, _in = 0, True
+            return bool(gt.last_render_ok) and _n > 0 and _in
+        if _marc_recipe_scene():
+            try:
+                _pld = (gt_by_mission or {}).get(active_mission_id) or {}
+                _dets = list(_pld.get("detections") or [])
+                import json as _json_cap
+                rec = _json_cap.load(open("/tmp/marc_sar_recipe.json")) or {}
+                _rid = str(rec.get("recipe_id") or "")
+                _pose = str(rec.get("target_pose") or "")
+                _sup = str(
+                    rec.get("support_class")
+                    or rec.get("support_landmark")
+                    or rec.get("surface_anchor")
+                    or "")
+                _people_ok = any(
+                    (_rid and str(d.get("recipe_id") or "") == _rid)
+                    or ((not _rid) and _pose
+                        and str(d.get("class") or "") == _pose)
+                    for d in _dets
+                    if str(d.get("class") or "").startswith("person_"))
+                _sup_ok = (not _sup) or any(
+                    str(d.get("class") or "") == _sup for d in _dets)
+                return bool(gt.last_render_ok) and _people_ok and _sup_ok
+            except Exception:
+                return bool(gt.last_render_ok)
+        return gt.last_render_ok
+'''
+
+NEW_CAPTURE_RETURN_V1 = '''        if _marc_above_scene():
             # Scene 0 often has a valid RGB but the climb landmark is off
             # camera. Return False so the stock black-frame redeploy retries
             # instead of keeping a cabinet-less first frame.
@@ -1187,7 +1488,7 @@ NEW_POSITIONS_V4 = '''        positions = generate_cell_positions(area, n_lm + n
                 obj_pos[_climber_i] = list(lm_pos[_lm_i])
 '''
 
-NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_obj)
+NEW_POSITIONS_V6 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
         lm_pos = positions[:n_lm]
         obj_pos = positions[n_lm:]
         if _marc_above_scene():
@@ -1262,6 +1563,143 @@ NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_ob
                               else 0.82 + random.random() * 0.10)
                         _v = 0.10 + random.random() * 0.55
                         lm_pos[_i] = _marc_quad(_u, _v)
+                        _extra_k += 1
+                    _oi = 0
+                    _extra_k = 0
+                    for _spec in objects or []:
+                        _n = max(1, int(_spec.get("count", 1) or 1))
+                        for _ in range(_n):
+                            if (_oi < len(obj_pos)
+                                    and _oi != _climber_i):
+                                _u = (0.06 + 0.16 * ((_extra_k // 2) % 3)
+                                      + random.random() * 0.08
+                                      if _extra_k % 2 == 0
+                                      else 0.70 + 0.16 * ((_extra_k // 2) % 3)
+                                      + random.random() * 0.08)
+                                _v = 0.06 + random.random() * 0.70
+                                obj_pos[_oi] = _marc_quad(_u, _v)
+                                _extra_k += 1
+                            _oi += 1
+                except Exception:
+                    if (_lm_i is not None and _climber_i is not None
+                            and _lm_i < len(lm_pos)
+                            and _climber_i < len(obj_pos)):
+                        obj_pos[_climber_i] = list(lm_pos[_lm_i])
+            elif (_lm_i is not None and _climber_i is not None
+                    and _lm_i < len(lm_pos)
+                    and _climber_i < len(obj_pos)):
+                obj_pos[_climber_i] = list(lm_pos[_lm_i])
+'''
+
+NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_obj)
+        lm_pos = positions[:n_lm]
+        obj_pos = positions[n_lm:]
+        if _marc_above_scene() or _marc_recipe_scene():
+            import re as _re_pos
+            _pl = ""
+            _climber_i = None
+            _obj_i = 0
+            for _spec in objects or []:
+                _n = max(1, int(_spec.get("count", 1) or 1))
+                _opl = (_spec.get("placement") or {})
+                if _climber_i is None and (
+                        _opl.get("above") or _opl.get("recipe_id")):
+                    _climber_i = _obj_i
+                    _pl = str(_opl.get("on_landmark_type")
+                              or _opl.get("beside_landmark_type") or "")
+                _obj_i += _n
+            _lm_i = None
+            if _pl:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t == _pl:
+                        _lm_i = _i
+                        break
+            if _lm_i is None:
+                for _i, _spec in enumerate(landmarks):
+                    _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                        (_spec or {}).get("name") or ""))
+                    if _t not in ("bench", "picnic_table"):
+                        _lm_i = _i
+                        break
+            if isinstance(area, dict):
+                try:
+                    _tl = list(area["top_left"])
+                    _tr = list(area["top_right"])
+                    _br = list(area["bottom_right"])
+                    _bl = list(area["bottom_left"])
+                    def _marc_quad(_u, _v):
+                        _bot = [(1.0 - _u) * _bl[_k] + _u * _br[_k]
+                                for _k in range(3)]
+                        _top = [(1.0 - _u) * _tl[_k] + _u * _tr[_k]
+                                for _k in range(3)]
+                        return [(1.0 - _v) * _bot[_k] + _v * _top[_k]
+                                for _k in range(3)]
+                    # Tall climb targets: nearer-mid so the roof stays below
+                    # the image top. Helper also frames the roof in camera.
+                    _climb_u = 0.30 + random.random() * 0.40
+                    if _pl == "vending_machine":
+                        # Nearer fallback if camera framing misses. Helper
+                        # then parks the roof on a mid-image downward ray.
+                        _climb_v = 0.20 + random.random() * 0.12
+                    elif _pl == "postbox":
+                        _climb_v = 0.22 + random.random() * 0.16
+                    else:
+                        _climb_v = 0.16 + random.random() * 0.18
+                    _climb = _marc_quad(_climb_u, _climb_v)
+                    try:
+                        from world import object_deployer as _od_near
+                        _od_near._marc_above_near_xy = (
+                            _bl[0] - _tl[0], _bl[1] - _tl[1])
+                    except Exception:
+                        pass
+                    if _lm_i is not None and _lm_i < len(lm_pos):
+                        lm_pos[_lm_i] = list(_climb)
+                    if (_climber_i is not None
+                            and _climber_i < len(obj_pos)):
+                        obj_pos[_climber_i] = list(lm_pos[_lm_i])
+                    _near_types = set()
+                    if _marc_recipe_scene():
+                        try:
+                            import json as _json_near
+                            with open(
+                                    "/tmp/marc_sar_recipe.json",
+                                    encoding="utf-8") as _nf:
+                                _recn = _json_near.load(_nf) or {}
+                            for _nk in (
+                                    _recn.get("surface_anchor"),
+                                    _recn.get("tip_landmark"),
+                            ):
+                                if _nk:
+                                    _near_types.add(str(_nk))
+                            for _nk in _recn.get("extra_landmarks") or []:
+                                if _nk:
+                                    _near_types.add(str(_nk))
+                        except Exception:
+                            _near_types = set()
+                    _near_types.discard(_pl)
+                    _extra_k = 0
+                    for _i in range(len(lm_pos)):
+                        if _i == _lm_i:
+                            continue
+                        _t = ""
+                        if _i < len(landmarks):
+                            _t = _re_pos.sub(r"_[0-9]+$", "", str(
+                                (landmarks[_i] or {}).get("name") or ""))
+                        if _t in _near_types:
+                            _du = (0.10 + random.random() * 0.08) * (
+                                1.0 if _extra_k % 2 == 0 else -1.0)
+                            _dv = 0.02 + random.random() * 0.08
+                            lm_pos[_i] = _marc_quad(
+                                min(0.82, max(0.18, _climb_u + _du)),
+                                min(0.50, max(0.12, _climb_v + _dv)))
+                        else:
+                            _u = (0.08 + random.random() * 0.10
+                                  if _extra_k % 2 == 0
+                                  else 0.82 + random.random() * 0.10)
+                            _v = 0.10 + random.random() * 0.55
+                            lm_pos[_i] = _marc_quad(_u, _v)
                         _extra_k += 1
                     _oi = 0
                     _extra_k = 0
@@ -1434,9 +1872,9 @@ def above_contact_ok(foot_xyz, lm_lo, lm_hi, top_z, max_gap=0.06):
 
 
 ABOVE_HELPER = r'''
-''' + ABOVE_SCENE_FN + r'''
+''' + ABOVE_SCENE_FN + inspect.getsource(visible_above_stack) + r'''
 def _marc_place_above_people(mission_id, objects, configurations=None):
-    """[marc-patch] _marc_above_aabb_stack: person on roof (_marc_above_freeze, _marc_above_always_on_top, _marc_above_joint_seat, _marc_above_ray_roof, _marc_above_sit_sink, _marc_above_sit_sink_70, _marc_above_sit_sink_short, _marc_above_vend_drape, _marc_above_vend_drape_lip, _marc_above_trash_raise, _marc_above_hydrant_crouch, _marc_above_trash_crouch, _marc_above_vend_farther, _marc_above_vend_farther2, _marc_above_vend_farther3, _marc_above_vend_farther4, _marc_above_vend_not_too_far, _marc_above_vend_closer, _marc_above_vend_sit_yaw, _marc_above_vend_glass_drape, _marc_above_vend_sit_fix, _marc_above_vend_sit_nudge, _marc_above_vend_sit_unraise, _marc_above_vend_lip_fwd, _marc_above_vend_lip_fwd2, _marc_above_vend_lip_fwd3, _marc_above_vend_lip_back, _marc_above_vend_prof, _marc_above_vend_prof2, _marc_above_vend_prof3, _marc_above_vend_prof4, _marc_above_vend_prof5, _marc_above_vend_prof6, _marc_above_vend_female, _marc_above_vend_female2, _marc_above_vend_female3, _marc_above_vend_female4, _marc_above_vend_female5, _marc_above_vend_female6, _marc_above_vend_female7, _marc_above_vend_male, _marc_above_vend_male2, _marc_above_vend_male3, _marc_above_vend_male4, _marc_above_vend_male5, _marc_above_vend_weight, _marc_above_vend_weight2, _marc_above_vend_weight3, _marc_above_vend_weight4, _marc_above_vend_weight5, _marc_above_no_closeup, _marc_above_mid_field, _marc_above_roof_in_view, _marc_above_vend_abs_frame, _marc_above_vend_leg_yaw, _marc_above_camera_frame, _marc_above_vend_mesh_seat, _marc_above_vend_mid_dist, _marc_above_vend_on_roof, _marc_above_vend_male6, _marc_above_vend_prof7, _marc_above_vend_female8, _marc_above_vend_weight6, _marc_above_vend_roof_visible, _marc_above_vend_joint_z, _marc_above_vend_prof8, _marc_above_vend_mesh_xy, _marc_above_vend_female_yaw, _marc_above_vend_prof9, _marc_above_vend_weight_yaw, _marc_above_vend_female_fwd, _marc_above_vend_stand, _marc_above_vend_prof10, _marc_above_vend_prof_yaw, _marc_above_vend_sit_hip, _marc_above_vend_weight7, _marc_above_vend_weight8, _marc_above_vend_mesh_contact, _marc_above_crouch_authored, _marc_above_vend_mesh_contact2, _marc_above_vend_mesh_nudge, _marc_above_vend_mesh_snap, _marc_above_lock_contact, _marc_above_joint_only, _marc_above_vend_prof11, _marc_above_vend_slot, _marc_above_vend_female9, _marc_above_vend_prof12, _marc_above_vend_male7, _marc_above_vend_weight9)."""
+    """[marc-patch] _marc_above_aabb_stack: person on roof (_marc_above_freeze, _marc_above_always_on_top, _marc_above_joint_seat, _marc_above_ray_roof, _marc_above_sit_sink, _marc_above_sit_sink_70, _marc_above_sit_sink_short, _marc_above_vend_drape, _marc_above_vend_drape_lip, _marc_above_trash_raise, _marc_above_hydrant_crouch, _marc_above_trash_crouch, _marc_above_vend_farther, _marc_above_vend_farther2, _marc_above_vend_farther3, _marc_above_vend_farther4, _marc_above_vend_not_too_far, _marc_above_vend_closer, _marc_above_vend_sit_yaw, _marc_above_vend_glass_drape, _marc_above_vend_sit_fix, _marc_above_vend_sit_nudge, _marc_above_vend_sit_unraise, _marc_above_vend_lip_fwd, _marc_above_vend_lip_fwd2, _marc_above_vend_lip_fwd3, _marc_above_vend_lip_back, _marc_above_vend_prof, _marc_above_vend_prof2, _marc_above_vend_prof3, _marc_above_vend_prof4, _marc_above_vend_prof5, _marc_above_vend_prof6, _marc_above_vend_female, _marc_above_vend_female2, _marc_above_vend_female3, _marc_above_vend_female4, _marc_above_vend_female5, _marc_above_vend_female6, _marc_above_vend_female7, _marc_above_vend_male, _marc_above_vend_male2, _marc_above_vend_male3, _marc_above_vend_male4, _marc_above_vend_male5, _marc_above_vend_weight, _marc_above_vend_weight2, _marc_above_vend_weight3, _marc_above_vend_weight4, _marc_above_vend_weight5, _marc_above_no_closeup, _marc_above_mid_field, _marc_above_roof_in_view, _marc_above_vend_abs_frame, _marc_above_vend_leg_yaw, _marc_above_camera_frame, _marc_above_vend_mesh_seat, _marc_above_vend_mid_dist, _marc_above_vend_on_roof, _marc_above_vend_male6, _marc_above_vend_prof7, _marc_above_vend_female8, _marc_above_vend_weight6, _marc_above_vend_roof_visible, _marc_above_vend_joint_z, _marc_above_vend_prof8, _marc_above_vend_mesh_xy, _marc_above_vend_female_yaw, _marc_above_vend_prof9, _marc_above_vend_weight_yaw, _marc_above_vend_female_fwd, _marc_above_vend_stand, _marc_above_vend_prof10, _marc_above_vend_prof_yaw, _marc_above_vend_sit_hip, _marc_above_vend_weight7, _marc_above_vend_weight8, _marc_above_vend_mesh_contact, _marc_above_crouch_authored, _marc_above_vend_mesh_contact2, _marc_above_vend_mesh_nudge, _marc_above_vend_mesh_snap, _marc_above_lock_contact, _marc_above_joint_only, _marc_above_vend_prof11, _marc_above_vend_slot, _marc_above_vend_female9, _marc_above_vend_prof12, _marc_above_vend_male7, _marc_above_vend_weight9, _marc_above_headroom, _marc_above_vend_visual_seat, _marc_recipe_scene, _marc_above_trash_sit_rim)."""
     jobs = []
     for spec in objects or []:
         pl = spec.get("placement") or {}
@@ -1518,7 +1956,7 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 pass
         return None
 
-    def _frame_landmark(lm, roof_z=None, typ=""):
+    def _frame_landmark(lm, roof_z=None, typ="", pose=""):
         """Put the landmark ROOF on a camera ray so it stays in view."""
         rng = _world_range(lm)
         cam = _camera_prim()
@@ -1538,10 +1976,29 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 return rng
             parity = sum(ord(ch) for ch in str(mission_id)) % 2
             u = 0.40 if parity == 0 else 0.60
-            # _marc_above_vend_roof_visible: these CCTVs sit ~1m above a
-            # vending roof. A 6m XY push parks the roof at y0=0 and crops
-            # the sitter. Close-ups are required for a visible stack.
-            v = 0.50 if typ == "vending_machine" else 0.55
+            # _marc_above_headroom: roof at v=0.50 crops the sitter off
+            # the top of these low CCTVs. Park the roof in the lower
+            # midfield so the person on it stays in frame.
+            _pose = str(pose or "").lower()
+            if typ == "vending_machine":
+                _v_key = "TRAINER_PEOPLE_VEND_FRAME_V"
+                # _marc_sit_frame_head / _marc_above_vend_sit_v80: park
+                # torso (roof+0.55 m) on the ray at v≈0.55 so the sitter
+                # occupies the upper third, not an empty roof close-up.
+                _v_def = ("0.74" if (
+                    "reaching" in _pose or "walking" in _pose
+                ) else "0.55")
+            elif typ == "postbox":
+                _v_key = "TRAINER_PEOPLE_POST_FRAME_V"
+                _v_def = "0.62"
+            else:
+                _v_key = "TRAINER_PEOPLE_CLIMB_FRAME_V"
+                _v_def = "0.58"
+            try:
+                v = float(__import__("os").environ.get(
+                    _v_key, _v_def) or _v_def)
+            except (TypeError, ValueError):
+                v = float(_v_def)
             ray_local = Gf.Vec3d(
                 (2.0 * u - 1.0) * 0.5 * h_ap,
                 (1.0 - 2.0 * v) * 0.5 * v_ap,
@@ -1551,6 +2008,13 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             if abs(float(ray[2])) < 1e-6:
                 return rng
             plane_z = float(roof_z) if roof_z is not None else float(hi[2])
+            if typ == "vending_machine" and "sitting" in _pose:
+                try:
+                    _torso = float(__import__("os").environ.get(
+                        "TRAINER_PEOPLE_VEND_SIT_TORSO", "0.55") or "0.55")
+                except (TypeError, ValueError):
+                    _torso = 0.55
+                plane_z = float(plane_z) + _torso
             t = (plane_z - float(cam_t[2])) / float(ray[2])
             if t <= 0.0:
                 return rng
@@ -1786,10 +2250,10 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         if not near:
             return None
         lo = float(joint_z) - 0.18
-        hi = float(joint_z) + 0.08
+        hi = float(joint_z) + 0.50
         band = [z for z in near if lo <= z <= hi]
         if not band:
-            band = near
+            return None
         return min(band)
 
     def _mesh_hip_xy(person, bx, by, bz):
@@ -1801,7 +2265,7 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         hip = []
         rad2 = 0.32 * 0.32
         lo = float(bz) - 0.12
-        hi = float(bz) + 0.32
+        hi = float(bz) + 0.50
         for p in pts:
             if (p[0] - bx) ** 2 + (p[1] - by) ** 2 > rad2:
                 continue
@@ -1823,6 +2287,112 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             return None
         n = float(len(hip))
         return (sum(p[0] for p in hip) / n, sum(p[1] for p in hip) / n)
+
+    def _align_visual_on_roof(person, tx, ty, top_z):
+        # _marc_above_vend_visual_seat: joint seat leaves professor/male
+        # meshes hovering ~1m beside the cabinet. Slide the prim so the
+        # visual hips meet the roof. Never raise (that sky-launched).
+        pxyz = _world_xyz(person)
+        joints = _posed_joints(person)
+        if pxyz is None or not joints:
+            return None
+        support = _butt_from_joints(joints) or _support_from_joints(joints)
+        if support is None:
+            return None
+        hip = _mesh_hip_xy(
+            person, float(support[0]), float(support[1]), float(support[2]))
+        vis_z = _mesh_seat_z(
+            person,
+            float(hip[0]) if hip else float(support[0]),
+            float(hip[1]) if hip else float(support[1]),
+            float(support[2]))
+        dx = dy = 0.0
+        if hip is not None:
+            dx = float(tx) - float(hip[0])
+            dy = float(ty) - float(hip[1])
+            mag = (dx * dx + dy * dy) ** 0.5
+            if mag > 1.4:
+                s = 1.4 / mag
+                dx, dy = dx * s, dy * s
+        dz = 0.0
+        if vis_z is not None:
+            dz = float(top_z) - float(vis_z)
+            if dz > 0.04:
+                dz = 0.04
+            if dz < -0.85:
+                dz = -0.85
+        if abs(dx) < 1e-4 and abs(dy) < 1e-4 and abs(dz) < 1e-4:
+            return [
+                float(hip[0]) if hip else float(support[0]),
+                float(hip[1]) if hip else float(support[1]),
+                float(vis_z) if vis_z is not None else float(support[2]),
+            ]
+        _set_xyz(person, [
+            float(pxyz[0]) + dx,
+            float(pxyz[1]) + dy,
+            float(pxyz[2]) + dz,
+        ])
+        _marc_freeze_person(person)
+        hip2 = _mesh_hip_xy(person, float(tx), float(ty), float(top_z))
+        vis2 = _mesh_seat_z(
+            person,
+            float(hip2[0]) if hip2 else float(tx),
+            float(hip2[1]) if hip2 else float(ty),
+            float(top_z))
+        if hip2 is not None:
+            return [
+                float(hip2[0]), float(hip2[1]),
+                float(vis2) if vis2 is not None else float(top_z),
+            ]
+        joints = _posed_joints(person)
+        return _butt_from_joints(joints) or support
+
+    def _align_visual_on_trash_lid(person, tx, ty, top_z, character=None):
+        # _marc_trash_butt_z / _marc_above_trash_weight_lid: pelvis on
+        # the lid, not mesh min in the hole. Hanging calves used to
+        # pull vis_z into the cavity.
+        del character
+        pxyz = _world_xyz(person)
+        joints = _posed_joints(person)
+        if pxyz is None:
+            return None
+        butt = _butt_from_joints(joints) if joints else None
+        if butt is None:
+            return None
+        vis_z = float(butt[2])
+        dz = float(top_z) - vis_z
+        if dz > 0.03:
+            dz = 0.03
+        try:
+            drop_cap = -abs(float(__import__("os").environ.get(
+                "TRAINER_PEOPLE_TRASH_DROP", "0.25") or "0.25"))
+        except (TypeError, ValueError):
+            drop_cap = -0.25
+        if dz < drop_cap:
+            dz = drop_cap
+        dx = float(tx) - float(butt[0])
+        dy = float(ty) - float(butt[1])
+        mag = (dx * dx + dy * dy) ** 0.5
+        if mag > 0.45:
+            s = 0.45 / mag
+            dx, dy = dx * s, dy * s
+        if abs(dx) < 1e-4 and abs(dy) < 1e-4 and abs(dz) < 1e-4:
+            if vis_z < float(top_z) - 0.12:
+                return None
+            return [float(butt[0]), float(butt[1]), vis_z]
+        _set_xyz(person, [
+            float(pxyz[0]) + dx,
+            float(pxyz[1]) + dy,
+            float(pxyz[2]) + dz,
+        ])
+        _marc_freeze_person(person)
+        joints = _posed_joints(person)
+        butt2 = _butt_from_joints(joints) if joints else None
+        if butt2 is None:
+            return None
+        if float(butt2[2]) < float(top_z) - 0.12:
+            return None
+        return [float(butt2[0]), float(butt2[1]), float(butt2[2])]
 
     def _vend_mesh_contact_on():
         # TRAINER_PEOPLE_VEND_MESH_CONTACT is ignored.
@@ -1991,19 +2561,45 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         ]
 
     def _yaw_person(prim, deg):
-        """Replace world yaw. Random spawn yaw must not leak through."""
+        """Compose world-Z yaw onto pose-root pitch/roll (_marc_yaw_keep_root).
+
+        people_poser uses q = R_z(yaw) * R_pose_root. Replacing with a
+        pure R_z stands lying / crouch / prone people up.
+        """
         xf = UsdGeom.Xformable(prim)
         if not xf:
             return
-        q = Gf.Rotation(Gf.Vec3d(0, 0, 1), float(deg)).GetQuat()
         ops = {op.GetOpName(): op for op in xf.GetOrderedXformOps()}
         orient = ops.get("xformOp:orient")
         if orient is None:
             orient = xf.AddOrientOp()
+        _math = __import__("math")
+        q_new = Gf.Rotation(Gf.Vec3d(0, 0, 1), float(deg)).GetQuat()
         try:
-            orient.Set(Gf.Quatf(q))
+            m = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            xdir = m.TransformDir(Gf.Vec3d(1, 0, 0))
+            ydir = m.TransformDir(Gf.Vec3d(0, 1, 0))
+            xn = float(xdir[0]) ** 2 + float(xdir[1]) ** 2
+            yn = float(ydir[0]) ** 2 + float(ydir[1]) ** 2
+            if xn >= yn:
+                cur = _math.degrees(_math.atan2(float(xdir[1]), float(xdir[0])))
+            else:
+                cur = _math.degrees(_math.atan2(float(ydir[1]), float(ydir[0])))
+            delta = (float(deg) - cur + 180.0) % 360.0 - 180.0
+            q_old = orient.Get()
+            if q_old is None:
+                q_old = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
+            q_delta = Gf.Rotation(Gf.Vec3d(0, 0, 1), float(delta)).GetQuat()
+            try:
+                q_new = Gf.Quatf(q_delta) * Gf.Quatf(q_old)
+            except Exception:
+                q_new = Gf.Quatd(q_delta) * Gf.Quatd(q_old)
         except Exception:
-            orient.Set(q)
+            pass
+        try:
+            orient.Set(Gf.Quatf(q_new))
+        except Exception:
+            orient.Set(q_new)
         ordered = []
         if "xformOp:translate" in ops:
             ordered.append(ops["xformOp:translate"])
@@ -2220,6 +2816,32 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                  slot="lip"):
         # Sitting on a vending: hips on the glass-side lip in *cabinet*
         # local space so every CCTV sees the same physical pose.
+        if typ == "trash_can" and "sitting" in str(pose or ""):
+            # _marc_trash_sit_rim_xy: hips on the near rim, not the
+            # hollow opening. Legs already yaw toward the CCTV.
+            cam = _camera_xyz()
+            hx = hy = 0.35
+            if body_lo is not None and body_hi is not None:
+                hx = 0.5 * abs(float(body_hi[0]) - float(body_lo[0]))
+                hy = 0.5 * abs(float(body_hi[1]) - float(body_lo[1]))
+            half = min(hx, hy) if min(hx, hy) > 0.05 else max(hx, hy)
+            half = max(0.12, float(half))
+            try:
+                rim = float(__import__("os").environ.get(
+                    "TRAINER_PEOPLE_TRASH_RIM", "0.72") or "0.72")
+            except (TypeError, ValueError):
+                rim = 0.72
+            if cam is None:
+                return float(cx) + rim * half, float(cy)
+            dx = float(cam[0]) - float(cx)
+            dy = float(cam[1]) - float(cy)
+            n = (dx * dx + dy * dy) ** 0.5
+            if n < 1e-4:
+                return float(cx), float(cy)
+            return (
+                float(cx) + rim * half * dx / n,
+                float(cy) + rim * half * dy / n,
+            )
         if typ != "vending_machine" or "sitting" not in str(pose or ""):
             return float(cx), float(cy)
         fx, fy = _vending_front_xy(lm, body_lo, body_hi) if lm is not None else (1.0, 0.0)
@@ -2254,6 +2876,17 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 lip += 0.0727
         origin = _vending_roof_xy(lm, body_lo, body_hi) if lm is not None else None
         ox, oy = origin if origin is not None else (float(cx), float(cy))
+        # _marc_vend_cam_lip: glass can be the far face. Camera wins
+        # so the sit is on the CCTV-facing roof, not behind the cabinet.
+        cam = _camera_xyz()
+        if cam is not None:
+            cdx = float(cam[0]) - float(ox)
+            cdy = float(cam[1]) - float(oy)
+            cn = (cdx * cdx + cdy * cdy) ** 0.5
+            if cn > 1e-4:
+                cdx, cdy = cdx / cn, cdy / cn
+                if cdx * float(fx) + cdy * float(fy) < 0.15:
+                    fx, fy = cdx, cdy
         # _marc_above_vend_on_roof: keep the butt on the cabinet. Female
         # / professor used to get half+0.04 past the face and sit in air.
         half_front = 0.35
@@ -2427,13 +3060,13 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             continue
         ordered, roof_lo, roof_hi, body_lo, body_hi = tops
         cx, cy, top_z = ordered[0]
-        _frame_landmark(lm, top_z, typ)
+        pose = str(spec.get("type") or "")
+        _frame_landmark(lm, top_z, typ, pose)
         tops = _top_candidates(lm)
         if tops is None:
             continue
         ordered, roof_lo, roof_hi, body_lo, body_hi = tops
         cx, cy, top_z = ordered[0]
-        pose = str(spec.get("type") or "")
         sink = 0.0
         if "sitting" in pose:
             if typ == "vending_machine":
@@ -2474,11 +3107,20 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 except (TypeError, ValueError):
                     sink = 0.70
                 if typ == "trash_can":
+                    # _marc_above_trash_sit_rim / _marc_above_trash_visual_seat:
+                    # joint start near the lid; visual hips drop onto the rim.
                     try:
-                        sink += float(__import__("os").environ.get(
-                            "TRAINER_PEOPLE_SIT_SINK_TRASH", "0.15") or "0.15")
+                        sink = float(__import__("os").environ.get(
+                            "TRAINER_PEOPLE_SIT_SINK_TRASH", "0.42") or "0.42")
                     except (TypeError, ValueError):
-                        sink += 0.15
+                        sink = 0.42
+                    if "weight" in str(spec.get("character") or "").lower():
+                        try:
+                            sink = float(__import__("os").environ.get(
+                                "TRAINER_PEOPLE_SIT_SINK_TRASH_WEIGHT",
+                                "0.28") or "0.28")
+                        except (TypeError, ValueError):
+                            sink = 0.28
                 elif typ in ("postbox", "hydrant"):
                     try:
                         sink += float(__import__("os").environ.get(
@@ -2502,9 +3144,8 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             _ch = str(spec.get("character") or "").lower()
             if ("female" in _ch or "weight" in _ch or "professor" in _ch
                     or "male_student" in _ch):
-                # Female sit is good with 180. Professor/weight clips
-                # share that bind flip. _marc_above_vend_male7: male
-                # sitting clip faces the other way and hangs off-cabinet.
+                # Per-clip extra defaults to 0; _yaw_legs_along already
+                # searches bind-forward. Env can still force a flip.
                 if "female" in _ch:
                     _yaw_key = "TRAINER_PEOPLE_VEND_FEMALE_YAW"
                 elif "professor" in _ch:
@@ -2515,11 +3156,35 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                     _yaw_key = "TRAINER_PEOPLE_VEND_MALE_YAW"
                 try:
                     extra = float(__import__("os").environ.get(
-                        _yaw_key, "180") or "180")
+                        _yaw_key, "0") or "0")
                 except (TypeError, ValueError):
-                    extra = 180.0
+                    extra = 0.0
+            # _marc_above_vend_yaw_no_double: _yaw_legs_along already
+            # searches 0/90/180 for bind-forward. Extra 180 used to
+            # flip every clip off the glass.
             _yaw_legs_along(person, fx, fy, extra)
             _marc_freeze_person(person)
+        elif typ == "vending_machine" and "reaching" in pose:
+            fx, fy = _vending_front_xy(lm, body_lo, body_hi)
+            _yaw_legs_along(person, fx, fy, 0.0)
+            _marc_freeze_person(person)
+        elif typ == "trash_can" and "sitting" in pose:
+            # _marc_above_trash_sit_yaw: hang legs toward the CCTV so
+            # they drape off the visible rim, not into the cavity.
+            # Yaw before seat; rotating after visual-align unseats.
+            cam = _camera_xyz()
+            if cam is not None:
+                try:
+                    _tyaw = float(__import__("os").environ.get(
+                        "TRAINER_PEOPLE_TRASH_SIT_YAW", "0") or "0")
+                except (TypeError, ValueError):
+                    _tyaw = 0.0
+                _yaw_legs_along(
+                    person,
+                    float(cam[0]) - float(cx),
+                    float(cam[1]) - float(cy),
+                    _tyaw)
+                _marc_freeze_person(person)
         _ch = str(spec.get("character") or "").lower()
         _slots = ["lip"]
         _sit_margin = 0.08
@@ -2543,6 +3208,8 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         xy_from = "support"
         if typ in ("hydrant", "trash_can") and "crouching" in pose and body_lo is not None:
             xy_from = "centroid"
+        elif typ == "trash_can" and "sitting" in pose:
+            xy_from = "butt"
         elif typ == "vending_machine" and "sitting" in pose:
             xy_from = "butt"
         seated = False
@@ -2628,6 +3295,19 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                                 _butt_from_joints(joints) if xy_from == "butt"
                                 else _support_from_joints(joints)
                             ) or support
+            if (typ == "vending_machine" and "sitting" in pose):
+                vis = _align_visual_on_roof(
+                    person, float(sx), float(sy), float(top_z))
+                if vis is not None:
+                    support = vis
+            if typ == "trash_can" and "sitting" in pose:
+                vis = _align_visual_on_trash_lid(
+                    person, float(sx), float(sy), float(top_z),
+                    spec.get("character"))
+                if vis is not None:
+                    support = vis
+                else:
+                    support = None
             if support is not None:
                 pcx, pcy = float(support[0]), float(support[1])
                 gap = float(support[2]) - float(top_z)
@@ -2638,8 +3318,17 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                     max_xy=max_xy))
                 if (seated and typ == "vending_machine"
                         and "sitting" in pose):
+                    # _marc_vend_visual_roof: visual hips, not joint butt.
+                    hip = _mesh_hip_xy(
+                        person, pcx, pcy, float(top_z))
+                    hx = float(hip[0]) if hip else pcx
+                    hy = float(hip[1]) if hip else pcy
                     seated = bool(_on_vending_roof(
-                        lm, body_lo, body_hi, pcx, pcy, 0.04))
+                        lm, body_lo, body_hi, hx, hy, 0.04))
+                if (seated and typ == "trash_can"
+                        and "sitting" in pose):
+                    seated = bool(
+                        float(support[2]) >= float(top_z) - 0.12)
             if seated:
                 break
         if (not seated) and typ == "vending_machine" and "sitting" in pose:
@@ -2668,13 +3357,33 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                         _marc_freeze_person(person)
                         joints = _posed_joints(person)
                         support = _butt_from_joints(joints) or support
+                    vis = _align_visual_on_roof(
+                        person, float(sx), float(sy), float(top_z))
+                    if vis is not None:
+                        support = vis
                     pcx, pcy = float(support[0]), float(support[1])
                     gap = float(support[2]) - float(top_z)
+                    hip = _mesh_hip_xy(
+                        person, pcx, pcy, float(top_z))
+                    hx = float(hip[0]) if hip else pcx
+                    hy = float(hip[1]) if hip else pcy
                     seated = bool(_contact_ok(
                         support, sx, sy, float(top_z),
                         min_gap=(-(abs(sink) + 0.15) if sink else -0.05),
                         max_xy=0.55) and _on_vending_roof(
-                            lm, body_lo, body_hi, pcx, pcy, 0.04))
+                            lm, body_lo, body_hi, hx, hy, 0.04))
+        if (not seated) and typ == "trash_can" and "sitting" in pose:
+            vis = _align_visual_on_trash_lid(
+                person, float(sx), float(sy), float(top_z),
+                spec.get("character"))
+            if vis is not None:
+                support = vis
+                pcx, pcy = float(support[0]), float(support[1])
+                gap = float(support[2]) - float(top_z)
+                seated = bool(_contact_ok(
+                    support, sx, sy, float(top_z),
+                    min_gap=(-(abs(sink) + 0.15) if sink else -0.05),
+                    max_xy=0.55) and float(support[2]) >= float(top_z) - 0.12)
         if not seated:
             _rej = (
                 str(person.GetPath()), str(lm.GetPath()),
@@ -2861,6 +3570,51 @@ def _marc_place_beside_people(mission_id, objects, configurations=None):
             op = xf.AddTranslateOp()
         op.Set(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
 
+    def _yaw_person(prim, deg):
+        # _marc_yaw_keep_root: compose world-Z onto pose-root pitch/roll.
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            return
+        ops = {op.GetOpName(): op for op in xf.GetOrderedXformOps()}
+        orient = ops.get("xformOp:orient")
+        if orient is None:
+            orient = xf.AddOrientOp()
+        _math = __import__("math")
+        q_new = Gf.Rotation(Gf.Vec3d(0, 0, 1), float(deg)).GetQuat()
+        try:
+            m = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            xdir = m.TransformDir(Gf.Vec3d(1, 0, 0))
+            ydir = m.TransformDir(Gf.Vec3d(0, 1, 0))
+            xn = float(xdir[0]) ** 2 + float(xdir[1]) ** 2
+            yn = float(ydir[0]) ** 2 + float(ydir[1]) ** 2
+            if xn >= yn:
+                cur = _math.degrees(_math.atan2(float(xdir[1]), float(xdir[0])))
+            else:
+                cur = _math.degrees(_math.atan2(float(ydir[1]), float(ydir[0])))
+            delta = (float(deg) - cur + 180.0) % 360.0 - 180.0
+            q_old = orient.Get()
+            if q_old is None:
+                q_old = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
+            q_delta = Gf.Rotation(Gf.Vec3d(0, 0, 1), float(delta)).GetQuat()
+            try:
+                q_new = Gf.Quatf(q_delta) * Gf.Quatf(q_old)
+            except Exception:
+                q_new = Gf.Quatd(q_delta) * Gf.Quatd(q_old)
+        except Exception:
+            pass
+        try:
+            orient.Set(Gf.Quatf(q_new))
+        except Exception:
+            orient.Set(q_new)
+        ordered = []
+        if "xformOp:translate" in ops:
+            ordered.append(ops["xformOp:translate"])
+        ordered.append(orient)
+        if "xformOp:scale" in ops:
+            ordered.append(ops["xformOp:scale"])
+        if ordered:
+            xf.SetXformOpOrder(ordered)
+
     def _find_lm(typ):
         group = stage.GetPrimAtPath("/world/landmarks/%s" % mission_id)
         if not (group and group.IsValid()):
@@ -2943,6 +3697,17 @@ def _marc_place_beside_people(mission_id, objects, configurations=None):
             except Exception:
                 pass
         _set_xyz(person, want)
+        pose = str(spec.get("type") or "")
+        # _marc_beside_face_yaw: leftover walk-spawn yaw made bending
+        # miss the can and lying people axis-align to the world, not
+        # the taxi/bike.
+        vx, vy = want[0] - lxyz[0], want[1] - lxyz[1]
+        if "lying" in pose or "prone" in pose:
+            deg = math.degrees(math.atan2(vy, vx)) + 90.0
+        else:
+            deg = math.degrees(math.atan2(
+                lxyz[1] - want[1], lxyz[0] - want[0]))
+        _yaw_person(person, deg)
         n += 1
         print(
             "[on-landmark-patch] beside: %s next to %s at %.2f,%.2f"
@@ -2950,6 +3715,200 @@ def _marc_place_beside_people(mission_id, objects, configurations=None):
         )
     if n:
         print("[on-landmark-patch] beside-mode: placed %d person(s)" % n)
+'''
+
+SEAT_HELPER = r'''
+
+def _marc_place_seat_people(mission_id, objects, configurations=None):
+    """[marc-patch] Seat-lie recipe targets on the bench/table top (_marc_recipe_seat)."""
+    try:
+        import math
+        import omni.usd
+        from pxr import Usd, UsdGeom, Gf, UsdPhysics
+    except Exception:
+        return
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return
+
+    def _norm(s):
+        return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+    def _world_xyz(prim):
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            return None
+        t = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()
+        return [float(t[0]), float(t[1]), float(t[2])]
+
+    def _set_xyz(prim, xyz):
+        path = str(prim.GetPath())
+        setter = globals().get("_set_prim_translate")
+        if callable(setter):
+            try:
+                setter(path, xyz)
+                return
+            except Exception:
+                pass
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            return
+        ops = {op.GetOpName(): op for op in xf.GetOrderedXformOps()}
+        op = ops.get("xformOp:translate")
+        if op is None:
+            op = xf.AddTranslateOp()
+        op.Set(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
+
+    def _yaw_person(prim, deg):
+        # _marc_yaw_keep_root: compose world-Z onto pose-root pitch/roll.
+        xf = UsdGeom.Xformable(prim)
+        if not xf:
+            return
+        ops = {op.GetOpName(): op for op in xf.GetOrderedXformOps()}
+        orient = ops.get("xformOp:orient")
+        if orient is None:
+            orient = xf.AddOrientOp()
+        _math = __import__("math")
+        q_new = Gf.Rotation(Gf.Vec3d(0, 0, 1), float(deg)).GetQuat()
+        try:
+            m = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            xdir = m.TransformDir(Gf.Vec3d(1, 0, 0))
+            ydir = m.TransformDir(Gf.Vec3d(0, 1, 0))
+            xn = float(xdir[0]) ** 2 + float(xdir[1]) ** 2
+            yn = float(ydir[0]) ** 2 + float(ydir[1]) ** 2
+            if xn >= yn:
+                cur = _math.degrees(_math.atan2(float(xdir[1]), float(xdir[0])))
+            else:
+                cur = _math.degrees(_math.atan2(float(ydir[1]), float(ydir[0])))
+            delta = (float(deg) - cur + 180.0) % 360.0 - 180.0
+            q_old = orient.Get()
+            if q_old is None:
+                q_old = Gf.Quatf(1.0, 0.0, 0.0, 0.0)
+            q_delta = Gf.Rotation(Gf.Vec3d(0, 0, 1), float(delta)).GetQuat()
+            try:
+                q_new = Gf.Quatf(q_delta) * Gf.Quatf(q_old)
+            except Exception:
+                q_new = Gf.Quatd(q_delta) * Gf.Quatd(q_old)
+        except Exception:
+            pass
+        try:
+            orient.Set(Gf.Quatf(q_new))
+        except Exception:
+            orient.Set(q_new)
+        ordered = []
+        if "xformOp:translate" in ops:
+            ordered.append(ops["xformOp:translate"])
+        ordered.append(orient)
+        if "xformOp:scale" in ops:
+            ordered.append(ops["xformOp:scale"])
+        if ordered:
+            xf.SetXformOpOrder(ordered)
+
+    def _long_axis_yaw(lm):
+        xf = UsdGeom.Xformable(lm)
+        if not xf:
+            return 0.0
+        m = xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        xdir = m.TransformDir(Gf.Vec3d(1, 0, 0))
+        ydir = m.TransformDir(Gf.Vec3d(0, 1, 0))
+        ax, ay = float(xdir[0]), float(xdir[1])
+        try:
+            bound = UsdGeom.Imageable(lm).ComputeLocalBound(
+                Usd.TimeCode.Default(), "default")
+            rng = bound.GetRange()
+            lo, hi = rng.GetMin(), rng.GetMax()
+            ex = abs(float(hi[0]) - float(lo[0]))
+            ey = abs(float(hi[1]) - float(lo[1]))
+            if ey > ex:
+                ax, ay = float(ydir[0]), float(ydir[1])
+        except Exception:
+            pass
+        return math.degrees(math.atan2(ay, ax))
+
+    def _top_xyz(prim):
+        try:
+            boundable = UsdGeom.Boundable(prim)
+            rng = boundable.ComputeWorldBound(
+                Usd.TimeCode.Default(), UsdGeom.Tokens.default_)
+            box = rng.ComputeAlignedBox()
+            mn, mx = box.GetMin(), box.GetMax()
+            return [
+                0.5 * (float(mn[0]) + float(mx[0])),
+                0.5 * (float(mn[1]) + float(mx[1])),
+                float(mx[2]),
+            ]
+        except Exception:
+            return _world_xyz(prim)
+
+    def _freeze(prim):
+        try:
+            rb = UsdPhysics.RigidBodyAPI.Get(stage, prim.GetPath())
+            if rb:
+                attr = rb.GetKinematicEnabledAttr()
+                if not attr:
+                    attr = rb.CreateKinematicEnabledAttr()
+                attr.Set(True)
+        except Exception:
+            pass
+
+    def _find_lm(typ):
+        group = stage.GetPrimAtPath("/world/landmarks/%s" % mission_id)
+        if not (group and group.IsValid()):
+            return None
+        for child in group.GetChildren():
+            name = str(child.GetName() or "")
+            blob = _norm(name) + _norm(str(child.GetPath()))
+            if (not typ) or name.startswith(typ) or _norm(typ) in blob:
+                return child
+        return None
+
+    def _find_person(spec):
+        pose = str(spec.get("type") or "")
+        ch = str(spec.get("character") or "")
+        try:
+            n = max(1, int(spec.get("count", 1) or 1))
+        except (TypeError, ValueError):
+            n = 1
+        for seq in range(n):
+            pp = "/world/people/%s_%s_%s_%s" % (mission_id, pose, ch, seq)
+            prim = stage.GetPrimAtPath(pp)
+            if prim and prim.IsValid():
+                return prim
+        return None
+
+    n = 0
+    for spec in objects or []:
+        pl = spec.get("placement") or {}
+        if pl.get("above") or pl.get("beside_landmark_type"):
+            continue
+        if not pl.get("recipe_id"):
+            continue
+        typ = str(pl.get("on_landmark_type") or "")
+        if not typ:
+            continue
+        lm = _find_lm(typ)
+        person = _find_person(spec)
+        if lm is None or person is None:
+            continue
+        top = _top_xyz(lm)
+        if top is None:
+            continue
+        _set_xyz(person, [top[0], top[1], top[2] + 0.06])
+        pose = str(spec.get("type") or "")
+        # _marc_recipe_seat_yaw: lie along the bench/table long axis,
+        # not leftover walk-spawn heading.
+        deg = _long_axis_yaw(lm)
+        if "sitting" in pose:
+            deg = deg + 90.0
+        _yaw_person(person, deg)
+        _freeze(person)
+        n += 1
+        print(
+            "[on-landmark-patch] seat: %s on %s at %.2f,%.2f,%.2f"
+            % (str(person.GetPath()), typ, top[0], top[1], top[2] + 0.06)
+        )
+    if n:
+        print("[on-landmark-patch] seat-mode: placed %d person(s)" % n)
 '''
 
 
@@ -3050,6 +4009,22 @@ def _ensure_above_helper(path):
         and "_marc_above_vend_female9" in src
         and "_marc_above_vend_prof12" in src
         and "_marc_above_camera_frame" in src
+        and "_marc_above_headroom" in src
+        and "_marc_above_vend_visual_seat" in src
+        and "_marc_recipe_scene" in src
+        and "_marc_above_trash_sit_rim" in src
+        and "_marc_above_trash_visual_seat" in src
+        and "_marc_above_trash_sit_yaw" in src
+        and "_marc_above_vend_yaw_no_double" in src
+        and "_marc_yaw_keep_root" in src
+        and "_marc_above_vend_sit_v80" in src
+        and "_marc_above_trash_weight_lid" in src
+        and "_marc_trash_sit_rim_xy" in src
+        and "_marc_trash_butt_z" in src
+        and "_marc_vend_cam_lip" in src
+        and "_marc_vend_visual_roof" in src
+        and "_marc_sit_frame_head" in src
+        and "def visible_above_stack" in src
         and "RemoveAPI" in src
         and "GetPointsAttr" in src
         and "def _marc_nudge_above_nearer" in src)
@@ -3099,17 +4074,64 @@ def _ensure_beside_helper(path):
         return False
     with open(path, "r", encoding="utf-8") as f:
         src = f.read()
-    if "def _marc_place_beside_people" in src:
+    have = "def _marc_place_beside_people" in src
+    if (have and "_marc_beside_face_yaw" in src
+            and "_marc_yaw_keep_root" in src):
         return False
+    if have:
+        i = src.find("\ndef _marc_place_beside_people")
+        if i < 0:
+            i = src.find("def _marc_place_beside_people")
+        j = src.find("\ndef _marc_place_seat_people")
+        if i >= 0 and j > i:
+            src = src[:i] + BESIDE_HELPER + src[j:]
+        elif i >= 0:
+            src = src[:i].rstrip() + BESIDE_HELPER
+        else:
+            src = src.rstrip() + BESIDE_HELPER
+        action = "replaced"
+    else:
+        src = src.rstrip() + BESIDE_HELPER
+        action = "appended"
     try:
         with open(path, "w", encoding="utf-8") as f:
-            f.write(src.rstrip() + BESIDE_HELPER)
+            f.write(src)
     except OSError as e:
         print(f"[on-landmark-patch] beside-helper write failed: {e}")
         return False
-    print("[on-landmark-patch] deployer: beside-mode helper appended")
+    print("[on-landmark-patch] deployer: beside-mode helper %s" % action)
     return True
 
+
+def _ensure_seat_helper(path):
+    if not os.path.exists(path):
+        return False
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+    have = "def _marc_place_seat_people" in src
+    if (have and "_marc_recipe_seat_yaw" in src
+            and "_marc_yaw_keep_root" in src):
+        return False
+    if have:
+        i = src.find("\ndef _marc_place_seat_people")
+        if i < 0:
+            i = src.find("def _marc_place_seat_people")
+        if i >= 0:
+            src = src[:i].rstrip() + SEAT_HELPER
+        else:
+            src = src.rstrip() + SEAT_HELPER
+        action = "replaced"
+    else:
+        src = src.rstrip() + SEAT_HELPER
+        action = "appended"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(src)
+    except OSError as e:
+        print(f"[on-landmark-patch] seat-helper write failed: {e}")
+        return False
+    print("[on-landmark-patch] deployer: seat-mode helper %s" % action)
+    return True
 
 
 def _patch_file(path, replacers, label):
@@ -3180,6 +4202,23 @@ def main():
                     elif (OLD_SNAP in tnew
                             and "reposition_on_landmark_people" not in tnew):
                         tnew = tnew.replace(OLD_SNAP, NEW_SNAP, 1)
+        if "_marc_reseat_recipe" not in tnew:
+            _old_settle_else = (
+                "            except Exception as _e:\n"
+                '                log.warning(f"place-above after settle failed '
+                '(non-fatal): {_e}")\n'
+                "        else:\n"
+                "            simulation_context.play()\n"
+                "            for _ in range(_SETTLE_FRAMES):\n"
+                "                simulation_context.step(render=False)\n"
+                "            _snap_landmarks_to_ground([mission])\n"
+            )
+            _new_settle_else = NEW_SETTLE[
+                NEW_SETTLE.find("            except Exception as _e:\n"
+                                '                log.warning(f"place-above after settle failed'):
+            ]
+            if _old_settle_else in tnew and _new_settle_else:
+                tnew = tnew.replace(_old_settle_else, _new_settle_else, 1)
         if NEW_SAVE not in tnew:
             if NEW_SAVE_V4 in tnew:
                 tnew = tnew.replace(NEW_SAVE_V4, NEW_SAVE, 1)
@@ -3191,6 +4230,36 @@ def main():
                 tnew = tnew.replace(NEW_SAVE_V1, NEW_SAVE, 1)
             elif OLD_SAVE in tnew:
                 tnew = tnew.replace(OLD_SAVE, NEW_SAVE, 1)
+        if "Recipe scene" not in tnew:
+            _old_save_tail = (
+                "            else:\n"
+                "                log.info(\n"
+                '                    f"Above scene {scene_id}: target={_target or \'-\'} "\n'
+                '                    f"saved placed={_n_placed}")\n'
+                "        if save_offline_enabled and _active_valid:\n"
+            )
+            _elif_a = NEW_SAVE.find("        elif _marc_recipe_scene():")
+            _elif_b = NEW_SAVE.find("        if save_offline_enabled and _active_valid:")
+            if _old_save_tail in tnew and _elif_a >= 0 and _elif_b > _elif_a:
+                tnew = tnew.replace(
+                    _old_save_tail,
+                    NEW_SAVE[_elif_a:_elif_b]
+                    + "        if save_offline_enabled and _active_valid:\n",
+                    1,
+                )
+        if ("_marc_recipe_scene()" in tnew
+                and "_marc_recipe_climb_visible" not in tnew):
+            # Stale NEW_SAVE (recipe gate without stack visibility).
+            _a = tnew.find("        if _marc_above_scene():")
+            _b = tnew.find("        if save_offline_enabled and _active_valid:")
+            _na = NEW_SAVE.find("        if _marc_above_scene():")
+            _nb = NEW_SAVE.find("        if save_offline_enabled and _active_valid:")
+            if (_a >= 0 and _b > _a and _na >= 0 and _nb > _na
+                    and "active_payload = gt_by_mission.get(active_mission_id)"
+                    in tnew[_a - 200:_a]):
+                tnew = tnew[:_a] + NEW_SAVE[_na:_nb] + tnew[_b:]
+                print("[on-landmark-patch] trainer.py: recipe climb-visible "
+                      "skip-save upgraded")
         _old_above_skip = (
             "            if not _active_valid:\n"
             "                log.warning(\n"
@@ -3232,7 +4301,55 @@ def main():
                 1,
             )
         if NEW_RENDER_STEP not in tnew:
-            if NEW_RENDER_STEP_V1 in tnew:
+            _old_render_above = (
+                "        if _marc_above_scene():\n"
+                "            try:\n"
+                "                simulation_context.pause()\n"
+                "            except Exception:\n"
+                "                pass\n"
+                "            try:\n"
+                "                from world.object_deployer import "
+                "_marc_place_above_people\n"
+                "                _miss = next(\n"
+                "                    m for m in missions if m.get(\"id\") "
+                "== active_mission_id)\n"
+                "                _marc_place_above_people(\n"
+                "                    _miss[\"id\"], _miss.get(\"objects\") or [],\n"
+                "                    configurations)\n"
+                "            except Exception as _pe:\n"
+                "                log.warning(\n"
+                '                    f"place-above before GT capture failed '
+                '(non-fatal): {_pe}")\n'
+            )
+            if _old_render_above in tnew:
+                tnew = tnew.replace(_old_render_above, NEW_RENDER_STEP[
+                    :NEW_RENDER_STEP.find("        simulation_context.play()\n")
+                ], 1)
+            _old_reseat = (
+                "                if _marc_above_scene():\n"
+                "                    try:\n"
+                "                        from world.object_deployer import "
+                "_marc_place_above_people\n"
+                "                        _miss = next(\n"
+                "                            m for m in missions if m.get(\"id\") "
+                "== active_mission_id)\n"
+                "                        _marc_place_above_people(\n"
+                "                            _miss[\"id\"], _miss.get(\"objects\") "
+                "or [],\n"
+                "                            configurations)\n"
+                "                    except Exception as _pe:\n"
+                "                        log.warning(\n"
+                '                            f"place-above GT step failed '
+                '(non-fatal): {_pe}")\n'
+            )
+            _new_reseat_a = NEW_RENDER_STEP.find(
+                "                if _marc_above_scene():\n")
+            _new_reseat_b = NEW_RENDER_STEP.find("            _marc_reseat()\n")
+            if (_old_reseat in tnew and _new_reseat_a >= 0
+                    and _new_reseat_b > _new_reseat_a):
+                tnew = tnew.replace(
+                    _old_reseat, NEW_RENDER_STEP[_new_reseat_a:_new_reseat_b], 1)
+            elif NEW_RENDER_STEP_V1 in tnew:
                 tnew = tnew.replace(NEW_RENDER_STEP_V1, NEW_RENDER_STEP, 1)
             elif OLD_RENDER_STEP in tnew:
                 tnew = tnew.replace(OLD_RENDER_STEP, NEW_RENDER_STEP, 1)
@@ -3281,14 +4398,18 @@ def main():
             "        return gt.last_render_ok\n"
         )
         if NEW_CAPTURE_RETURN not in tnew:
-            if _cap_lottery in tnew:
+            if NEW_CAPTURE_RETURN_V1 in tnew:
+                tnew = tnew.replace(NEW_CAPTURE_RETURN_V1, NEW_CAPTURE_RETURN, 1)
+            elif _cap_lottery in tnew:
                 tnew = tnew.replace(_cap_lottery, NEW_CAPTURE_RETURN, 1)
             elif OLD_CAPTURE_RETURN in tnew:
                 tnew = tnew.replace(OLD_CAPTURE_RETURN, NEW_CAPTURE_RETURN, 1)
         if OLD_INITIAL_WARN in tnew:
             tnew = tnew.replace(OLD_INITIAL_WARN, NEW_INITIAL_WARN, 1)
         if NEW_POSITIONS not in tnew:
-            if NEW_POSITIONS_V5 in tnew:
+            if NEW_POSITIONS_V6 in tnew:
+                tnew = tnew.replace(NEW_POSITIONS_V6, NEW_POSITIONS, 1)
+            elif NEW_POSITIONS_V5 in tnew:
                 tnew = tnew.replace(NEW_POSITIONS_V5, NEW_POSITIONS, 1)
             elif NEW_POSITIONS_V4 in tnew:
                 tnew = tnew.replace(NEW_POSITIONS_V4, NEW_POSITIONS, 1)
@@ -3314,6 +4435,53 @@ def main():
                 OLD_AUTO_FAILURE, NEW_AUTO_FAILURE, 1)
         tnew = _ensure_module_above_scene(tnew)
         tnew = _rewrite_above_gates(tnew)
+        if "_marc_place_seat_people" not in tnew and "_marc_place_beside_people" in tnew:
+            tnew = tnew.replace(
+                "                        _marc_place_beside_people,\n"
+                "                    )\n",
+                "                        _marc_place_beside_people,\n"
+                "                        _marc_place_seat_people,\n"
+                "                    )\n",
+            )
+            tnew = tnew.replace(
+                "                    _marc_place_beside_people(\n"
+                '                        mission["id"], mission.get("objects") or [],\n'
+                "                        configurations)\n",
+                "                    _marc_place_seat_people(\n"
+                '                        mission["id"], mission.get("objects") or [],\n'
+                "                        configurations)\n"
+                "                    _marc_place_beside_people(\n"
+                '                        mission["id"], mission.get("objects") or [],\n'
+                "                        configurations)\n",
+            )
+            tnew = tnew.replace(
+                "            from world.object_deployer import "
+                "_marc_place_beside_people\n"
+                "            _marc_place_beside_people(\n"
+                '                mission["id"], mission.get("objects") or [], '
+                "configurations)\n"
+                "        except Exception as _e:\n"
+                '            log.warning(f"place-beside people failed '
+                '(non-fatal): {_e}")\n',
+                "            from world.object_deployer import "
+                "_marc_place_beside_people\n"
+                "            _marc_place_beside_people(\n"
+                '                mission["id"], mission.get("objects") or [], '
+                "configurations)\n"
+                "        except Exception as _e:\n"
+                '            log.warning(f"place-beside people failed '
+                '(non-fatal): {_e}")\n'
+                "        try:\n"
+                "            from world.object_deployer import "
+                "_marc_place_seat_people\n"
+                "            _marc_place_seat_people(\n"
+                '                mission["id"], mission.get("objects") or [], '
+                "configurations)\n"
+                "        except Exception as _e:\n"
+                '            log.warning(f"place-seat people failed '
+                '(non-fatal): {_e}")\n',
+                1,
+            )
         if tnew != tsrc:
             try:
                 with open(TRAINER, "w", encoding="utf-8") as f:
@@ -3456,6 +4624,8 @@ def main():
     if _ensure_above_helper(DEPLOYER):
         n += 1
     if _ensure_beside_helper(DEPLOYER):
+        n += 1
+    if _ensure_seat_helper(DEPLOYER):
         n += 1
 
     if os.path.exists(TRAINER):

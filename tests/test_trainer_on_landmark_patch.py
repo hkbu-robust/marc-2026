@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import inspect
 import os
 import tempfile
 import textwrap
@@ -30,6 +31,8 @@ class OnLandmarkPatchTests(unittest.TestCase):
     def test_helper_and_positions_compile(self):
         patch = _load_patch()
         ast.parse(patch.ABOVE_HELPER)
+        ast.parse(patch.BESIDE_HELPER)
+        ast.parse(patch.SEAT_HELPER)
         ast.parse("def outer():\n    def _deploy_into():\n" + patch.NEW_POSITIONS)
         ast.parse("def outer():\n    def _settle():\n" + patch.NEW_SETTLE)
         ast.parse("def outer():\n    def _settle():\n" + patch.NEW_SNAP)
@@ -56,11 +59,48 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("not placement.get(\"recipe_id\")", patch.NEW_REPOSITION_PL)
         self.assertIn("_marc_place_beside_people", patch.NEW_SNAP)
         self.assertIn("def _marc_place_beside_people", patch.BESIDE_HELPER)
+        self.assertIn("_marc_beside_face_yaw", patch.BESIDE_HELPER)
+        self.assertIn("_marc_yaw_keep_root", patch.BESIDE_HELPER)
+        self.assertIn("_marc_recipe_seat_yaw", patch.SEAT_HELPER)
+        self.assertIn("_marc_yaw_keep_root", patch.SEAT_HELPER)
+        self.assertIn("def _long_axis_yaw", patch.SEAT_HELPER)
+        self.assertIn("_marc_above_trash_sit_yaw", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_vend_yaw_no_double", patch.ABOVE_HELPER)
+        self.assertIn("_marc_yaw_keep_root", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_vend_sit_v80", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_trash_weight_lid", patch.ABOVE_HELPER)
+        self.assertIn("_marc_trash_sit_rim_xy", patch.ABOVE_HELPER)
+        self.assertIn("_marc_trash_butt_z", patch.ABOVE_HELPER)
+        self.assertIn("_marc_vend_cam_lip", patch.ABOVE_HELPER)
+        self.assertIn("_marc_vend_visual_roof", patch.ABOVE_HELPER)
+        self.assertIn("_marc_sit_frame_head", patch.ABOVE_HELPER)
+        self.assertIn("TRAINER_PEOPLE_TRASH_SIT_YAW", patch.ABOVE_HELPER)
+        self.assertIn("TRAINER_PEOPLE_TRASH_RIM", patch.ABOVE_HELPER)
+        self.assertIn("TRAINER_PEOPLE_TRASH_DROP", patch.ABOVE_HELPER)
+        self.assertIn("TRAINER_PEOPLE_SIT_SINK_TRASH_WEIGHT", patch.ABOVE_HELPER)
+        self.assertIn("TRAINER_PEOPLE_VEND_SIT_TORSO", patch.ABOVE_HELPER)
+        self.assertIn("def visible_above_stack", patch.ABOVE_HELPER)
+        self.assertIn("_marc_recipe_climb_visible", patch.NEW_SAVE)
+        self.assertIn("visible_above_stack", patch.NEW_SAVE)
+        self.assertIn('in ("on", "above")', patch.NEW_SAVE)
+        self.assertNotIn(
+            'if _tgt is None and _pose:',
+            patch.NEW_SAVE)
         self.assertIn("def _marc_above_scene", patch.ABOVE_HELPER)
+        self.assertIn("def _marc_recipe_scene", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_scene()", patch.NEW_SAVE)
+        self.assertIn("_marc_recipe_scene()", patch.NEW_SAVE)
         self.assertIn("_marc_above_scene()", patch.NEW_SETTLE)
+        self.assertIn("_marc_recipe_scene()", patch.NEW_SETTLE)
+        self.assertIn("_marc_reseat_recipe", patch.NEW_SETTLE)
         self.assertIn("_marc_above_scene()", patch.NEW_POSITIONS)
+        self.assertIn("_marc_recipe_scene()", patch.NEW_POSITIONS)
+        self.assertIn("beside_landmark_type", patch.NEW_POSITIONS)
+        self.assertIn("_near_types", patch.NEW_POSITIONS)
         self.assertIn("_marc_above_scene()", patch.NEW_CAPTURE_RETURN)
+        self.assertIn("_marc_recipe_scene()", patch.NEW_CAPTURE_RETURN)
+        self.assertIn("Recipe scene", patch.NEW_SAVE)
+        self.assertIn("_marc_recipe_scene()", patch.NEW_RENDER_STEP)
         self.assertIn("_obj_pl", patch.NEW_PLACE_POSE)
         self.assertIn("TRAINER_PEOPLE_SIT_SINK", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_SIT_SINK_SHORT", patch.ABOVE_HELPER)
@@ -78,11 +118,33 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("(\"hydrant\", \"trash_can\")", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_VEND_BUTT_SINK", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_SIT_SINK_TRASH", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_trash_sit_rim", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_trash_visual_seat", patch.ABOVE_HELPER)
+        self.assertIn("def _align_visual_on_trash_lid", patch.ABOVE_HELPER)
+        self.assertIn("character=None", patch.ABOVE_HELPER)
+        self.assertIn("float(top_z) - 0.12", patch.ABOVE_HELPER)
+        self.assertNotIn("body_z >= float(top_z) - 0.20", patch.ABOVE_HELPER)
+        self.assertIn("def _marc_place_seat_people", patch.SEAT_HELPER)
+        self.assertIn("_marc_place_seat_people", patch.NEW_SETTLE)
+        self.assertIn("_marc_place_seat_people", patch.NEW_SNAP)
+        self.assertIn("TRAINER_SAR_ON_XY_MAX", patch.NEW_SAVE)
+        self.assertIn('"0.42") or "0.42"', patch.ABOVE_HELPER)
         self.assertIn("_drape_xy", patch.ABOVE_HELPER)
+        self.assertIn("rim * half * dx / n", patch.ABOVE_HELPER)
+        self.assertIn("hip = _mesh_hip_xy(", patch.ABOVE_HELPER)
+        self.assertIn("plane_z) + _torso", patch.ABOVE_HELPER)
+        _ensure_src = inspect.getsource(patch._ensure_above_helper)
+        self.assertIn("_marc_trash_sit_rim_xy", _ensure_src)
+        self.assertIn("_marc_trash_butt_z", _ensure_src)
+        self.assertIn("_marc_vend_cam_lip", _ensure_src)
+        self.assertIn("_marc_vend_visual_roof", _ensure_src)
+        self.assertIn("_marc_sit_frame_head", _ensure_src)
         self.assertIn("def _vending_front_xy", patch.ABOVE_HELPER)
         self.assertIn("def _butt_from_joints", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_VEND_LIP", patch.ABOVE_HELPER)
         self.assertIn("def _yaw_person", patch.ABOVE_HELPER)
+        self.assertIn("TransformDir", patch.ABOVE_HELPER)
+        self.assertIn("q_delta", patch.ABOVE_HELPER)
         self.assertIn("def _yaw_legs_along", patch.ABOVE_HELPER)
         self.assertIn("def _vending_roof_xy", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_sit_yaw", patch.ABOVE_HELPER)
@@ -153,6 +215,9 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("_marc_above_vend_weight7", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_weight8", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_weight9", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_headroom", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_vend_visual_seat", patch.ABOVE_HELPER)
+        self.assertIn("def _align_visual_on_roof", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_mesh_contact", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_crouch_authored", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_mesh_contact2", patch.ABOVE_HELPER)
@@ -182,7 +247,11 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("person_walking", patch.ABOVE_HELPER)
         self.assertIn("def _mesh_hip_xy", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_VEND_FEMALE_YAW", patch.ABOVE_HELPER)
-        self.assertIn('"180"', patch.ABOVE_HELPER)
+        self.assertIn('_yaw_key, "0") or "0"', patch.ABOVE_HELPER)
+        self.assertNotIn('_yaw_key, "180"', patch.ABOVE_HELPER)
+        self.assertIn(
+            'elif typ == "vending_machine" and "reaching" in pose:',
+            patch.ABOVE_HELPER)
         self.assertIn("def _mesh_seat_z", patch.ABOVE_HELPER)
         self.assertIn("half_front - margin", patch.ABOVE_HELPER)
         self.assertNotIn("half + 0.04", patch.ABOVE_HELPER)
@@ -210,16 +279,27 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("_marc_above_vend_not_too_far", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_closer", patch.ABOVE_HELPER)
         self.assertNotIn("TRAINER_PEOPLE_VEND_DRAPE_BACK", patch.ABOVE_HELPER)
-        self.assertIn("v = 0.50 if typ == \"vending_machine\" else 0.55", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_headroom", patch.ABOVE_HELPER)
+        self.assertIn("TRAINER_PEOPLE_VEND_FRAME_V", patch.ABOVE_HELPER)
+        self.assertIn('"0.55"', patch.ABOVE_HELPER)
+        self.assertNotIn('else "0.80")', patch.ABOVE_HELPER)
+        self.assertNotIn('else "0.66")', patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_vend_visual_seat", patch.ABOVE_HELPER)
+        self.assertNotIn(
+            'v = 0.50 if typ == "vending_machine" else 0.55',
+            patch.ABOVE_HELPER)
         self.assertIn("0.22 + random.random() * 0.16", patch.NEW_POSITIONS)
         self.assertIn("0.20 + random.random() * 0.12", patch.NEW_POSITIONS)
         self.assertIn("def _marc_nudge_above_nearer", patch.ABOVE_HELPER)
         self.assertIn("Never fake Z", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_near_xy", patch.NEW_POSITIONS)
         self.assertIn("_n_placed > 0", patch.NEW_SAVE)
+        self.assertIn("_stack_ok", patch.NEW_SAVE)
         self.assertNotIn("_n_placed > 0 and _n_stack > 0", patch.NEW_SAVE)
         self.assertIn("_marc_above_target_in_view", patch.NEW_SAVE)
         self.assertIn("not in CCTV detections", patch.NEW_SAVE)
+        self.assertIn("top-clipped", patch.NEW_SAVE)
+        self.assertIn("_headroom", patch.NEW_SAVE)
         self.assertIn("constructed stack invariant", patch.NEW_SAVE)
         self.assertNotIn("raise RuntimeError", patch.NEW_SAVE)
         self.assertIn("skip save", patch.NEW_SAVE)
@@ -598,6 +678,34 @@ class OnLandmarkPatchTests(unittest.TestCase):
             self.assertIn("_marc_above_vend_weight7", text)
             self.assertIn("_marc_above_vend_weight8", text)
             self.assertIn("_marc_above_vend_weight9", text)
+            self.assertIn("_marc_above_headroom", text)
+            self.assertIn("TRAINER_PEOPLE_VEND_FRAME_V", text)
+            self.assertIn("_marc_above_vend_visual_seat", text)
+            self.assertIn("_marc_above_trash_sit_yaw", text)
+            self.assertIn("_marc_above_vend_yaw_no_double", text)
+            self.assertIn("_marc_yaw_keep_root", text)
+            self.assertIn("_marc_above_vend_sit_v80", text)
+            self.assertIn("_marc_above_trash_weight_lid", text)
+            self.assertIn("_marc_trash_sit_rim_xy", text)
+            self.assertIn("_marc_trash_butt_z", text)
+            self.assertIn("_marc_vend_cam_lip", text)
+            self.assertIn("_marc_vend_visual_roof", text)
+            self.assertIn("_marc_sit_frame_head", text)
+            self.assertIn("TRAINER_PEOPLE_TRASH_SIT_YAW", text)
+            self.assertIn("TRAINER_PEOPLE_TRASH_RIM", text)
+            self.assertIn("TRAINER_PEOPLE_TRASH_DROP", text)
+            self.assertIn("TRAINER_PEOPLE_SIT_SINK_TRASH_WEIGHT", text)
+            self.assertIn("TRAINER_PEOPLE_VEND_SIT_TORSO", text)
+            self.assertIn("def visible_above_stack", text)
+            self.assertIn('"0.55"', text)
+            self.assertIn("q_delta", text)
+            self.assertIn("TransformDir", text)
+            self.assertIn("float(top_z) - 0.12", text)
+            self.assertNotIn("body_z >= float(top_z) - 0.20", text)
+            self.assertNotIn(
+                "seated = True\n        if not seated:",
+                text)
+            self.assertIn("def _align_visual_on_roof", text)
             self.assertIn("_marc_above_vend_mesh_contact", text)
             self.assertIn("_marc_above_crouch_authored", text)
             self.assertIn("_marc_above_vend_mesh_contact2", text)
@@ -636,6 +744,9 @@ class OnLandmarkPatchTests(unittest.TestCase):
             self.assertIn("TRAINER_PEOPLE_SIT_SINK_SHORT", text)
             self.assertIn("TRAINER_PEOPLE_SIT_SINK_TRASH", text)
             self.assertIn("_drape_xy", text)
+            self.assertIn("rim * half * dx / n", text)
+            self.assertIn("hip = _mesh_hip_xy(", text)
+            self.assertIn("plane_z) + _torso", text)
             self.assertIn("CreateKinematicEnabledAttr", text)
             self.assertIn("RemoveAPI", text)
             self.assertIn("GetPointsAttr", text)
@@ -643,6 +754,52 @@ class OnLandmarkPatchTests(unittest.TestCase):
             self.assertIn("raycast_closest", text)
             self.assertEqual(text.count("def _marc_place_above_people"), 1)
             self.assertFalse(patch._ensure_above_helper(path))
+        finally:
+            os.unlink(path)
+
+    def test_replaces_stale_beside_helper_without_dropping_seat(self):
+        patch = _load_patch()
+        with tempfile.NamedTemporaryFile("w+", suffix=".py", delete=False) as fh:
+            fh.write(
+                "def other():\n    return 1\n\n"
+                "def _marc_place_beside_people(mission_id, objects, configurations=None):\n"
+                "    return None\n\n"
+                "def _marc_place_seat_people(mission_id, objects, configurations=None):\n"
+                "    # _marc_recipe_seat_yaw\n"
+                "    return None\n"
+            )
+            path = fh.name
+        try:
+            self.assertTrue(patch._ensure_beside_helper(path))
+            text = Path(path).read_text(encoding="utf-8")
+            self.assertIn("_marc_beside_face_yaw", text)
+            self.assertIn("_marc_yaw_keep_root", text)
+            self.assertIn("q_delta", text)
+            self.assertEqual(text.count("def _marc_place_beside_people"), 1)
+            self.assertEqual(text.count("def _marc_place_seat_people"), 1)
+            self.assertIn("_marc_recipe_seat_yaw", text)
+            self.assertFalse(patch._ensure_beside_helper(path))
+        finally:
+            os.unlink(path)
+
+    def test_replaces_stale_seat_helper(self):
+        patch = _load_patch()
+        with tempfile.NamedTemporaryFile("w+", suffix=".py", delete=False) as fh:
+            fh.write(
+                "def other():\n    return 1\n\n"
+                "def _marc_place_seat_people(mission_id, objects, configurations=None):\n"
+                "    return None\n"
+            )
+            path = fh.name
+        try:
+            self.assertTrue(patch._ensure_seat_helper(path))
+            text = Path(path).read_text(encoding="utf-8")
+            self.assertIn("_marc_recipe_seat_yaw", text)
+            self.assertIn("_marc_yaw_keep_root", text)
+            self.assertIn("def _long_axis_yaw", text)
+            self.assertIn("q_delta", text)
+            self.assertEqual(text.count("def _marc_place_seat_people"), 1)
+            self.assertFalse(patch._ensure_seat_helper(path))
         finally:
             os.unlink(path)
 
@@ -735,6 +892,125 @@ class OnLandmarkPatchTests(unittest.TestCase):
         finally:
             os.environ.clear()
             os.environ.update(old)
+
+    def test_recipe_scene_requires_env_and_recipe_id(self):
+        patch = _load_patch()
+        ns = {}
+        exec(compile(patch.ABOVE_SCENE_FN, "<recipe-scene>", "exec"), ns)
+        import json
+        old = dict(os.environ)
+        dump = "/tmp/marc_sar_recipe.json"
+        try:
+            os.environ.pop("TRAINER_SAR_RECIPES", None)
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            with open(dump, "w", encoding="utf-8") as f:
+                json.dump({"recipe_id": "sar03_bench_lie", "above": False}, f)
+            self.assertFalse(ns["_marc_recipe_scene"]())
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            self.assertTrue(ns["_marc_recipe_scene"]())
+            self.assertFalse(ns["_marc_above_scene"]())
+            with open(dump, "w", encoding="utf-8") as f:
+                json.dump({"above": True}, f)
+            self.assertFalse(ns["_marc_recipe_scene"]())
+            self.assertTrue(ns["_marc_above_scene"]())
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_colocates_recipe_beside_with_anchor(self):
+        patch = _load_patch()
+        source = (
+            patch.ABOVE_SCENE_FN
+            + "def generate_cell_positions(area, n):\n"
+            "    return [[float(i), 0.0, 0.0] for i in range(n)]\n"
+            "def outer():\n"
+            "    def _deploy_into():\n"
+            "        landmarks = ["
+            "{'name': 'taxi_0'}, {'name': 'bench_0'}]\n"
+            "        objects = [\n"
+            "            {'type': 'mug', 'count': 1},\n"
+            "            {'type': 'person_lying_down', 'count': 1,\n"
+            "             'placement': {'recipe_id': 'sar06_parking_collapsed',\n"
+            "                           'beside_landmark_type': 'taxi'}},\n"
+            "            {'type': 'person_walking', 'count': 1},\n"
+            "        ]\n"
+            "        n_lm = len(landmarks)\n"
+            "        n_obj = sum(int(o.get('count', 1) or 1) for o in objects)\n"
+            "        area = None\n"
+            + patch.NEW_POSITIONS
+            + "        return lm_pos, obj_pos\n"
+            "    return _deploy_into()\n"
+        )
+        namespace = {"os": os}
+        exec(compile(source, "<recipe-positions>", "exec"), namespace)
+        import json
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            with open("/tmp/marc_sar_recipe.json", "w", encoding="utf-8") as f:
+                json.dump({
+                    "recipe_id": "sar06_parking_collapsed",
+                    "above": False,
+                    "surface_anchor": "taxi",
+                }, f)
+            lm_pos, obj_pos = namespace["outer"]()
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        self.assertEqual(obj_pos[1], lm_pos[0])
+        self.assertNotEqual(obj_pos[0], lm_pos[0])
+
+    def test_recipe_pack_keeps_taxi_near_bench(self):
+        patch = _load_patch()
+        source = (
+            patch.ABOVE_SCENE_FN
+            + "def generate_cell_positions(area, n):\n"
+            "    return [[100.0, 100.0, 16.0] for _ in range(n)]\n"
+            "def outer():\n"
+            "    def _deploy_into():\n"
+            "        landmarks = ["
+            "{'name': 'bench_0'}, {'name': 'taxi_0'}]\n"
+            "        objects = [\n"
+            "            {'type': 'person_lying_down', 'count': 1,\n"
+            "             'placement': {'recipe_id': 'sar03_bench_lie',\n"
+            "                           'on_landmark_type': 'bench'}},\n"
+            "        ]\n"
+            "        n_lm = 2\n"
+            "        n_obj = 1\n"
+            "        area = {\n"
+            "            'top_left': [0.0, 20.0, 16.0],\n"
+            "            'top_right': [10.0, 20.0, 16.0],\n"
+            "            'bottom_right': [10.0, 0.0, 16.0],\n"
+            "            'bottom_left': [0.0, 0.0, 16.0],\n"
+            "        }\n"
+            + patch.NEW_POSITIONS
+            + "        return lm_pos, obj_pos\n"
+            "    return _deploy_into()\n"
+        )
+        namespace = {"os": os, "random": __import__("random")}
+        exec(compile(source, "<recipe-near-pack>", "exec"), namespace)
+        import json
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            with open("/tmp/marc_sar_recipe.json", "w", encoding="utf-8") as f:
+                json.dump({
+                    "recipe_id": "sar03_bench_lie",
+                    "above": False,
+                    "extra_landmarks": ["taxi"],
+                }, f)
+            namespace["random"].seed(2)
+            lm_pos, obj_pos = namespace["outer"]()
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        bench, taxi = lm_pos[0], lm_pos[1]
+        self.assertEqual(bench, obj_pos[0])
+        dist2 = (taxi[0] - bench[0]) ** 2 + (taxi[1] - bench[1]) ** 2
+        self.assertLess(dist2, 16.0)
+        self.assertGreater(dist2, 0.04)
 
 
 if __name__ == "__main__":
