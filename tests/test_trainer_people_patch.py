@@ -91,11 +91,12 @@ class AboveModePatchTests(unittest.TestCase):
                     if placement["on_landmark_type"] == "vending_machine":
                         self.assertAlmostEqual(
                             placement["z_offset_from_top"], 0.03 - 0.12)
+                    elif placement["on_landmark_type"] == "trash_can":
+                        self.assertAlmostEqual(
+                            placement["z_offset_from_top"], 0.03 - 0.42)
                     else:
                         extra = 0.0
-                        if placement["on_landmark_type"] == "trash_can":
-                            extra = 0.15
-                        elif placement["on_landmark_type"] in (
+                        if placement["on_landmark_type"] in (
                                 "postbox", "hydrant"):
                             extra = 0.35
                         self.assertAlmostEqual(
@@ -714,6 +715,7 @@ class AboveModePatchTests(unittest.TestCase):
                 dumped = json.load(f)
             self.assertEqual(dumped.get("recipe_id"), "sar03_bench_lie")
             self.assertFalse(bool(dumped.get("above")))
+            self.assertEqual(dumped.get("extra_landmarks"), ["taxi"])
         finally:
             os.environ.clear()
             os.environ.update(old)

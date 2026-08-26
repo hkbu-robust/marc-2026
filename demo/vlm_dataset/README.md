@@ -19,9 +19,11 @@ TRAINER_SAR_RECIPES=1 TRAINER_PEOPLE_ALL_CHARS=1 \
 `docker compose run -e`. It cycles the 14 practice archetypes in
 `simulation-platform/patches/sar_recipes.yaml` (one target + ordinary
 distractors per scene). A restarted run continues the cycle from
-`max(scene_*)+1` (or `TRAINER_SAR_RECIPE_CURSOR` if set). Climb recipes
-(`above: true`: trash/vending sit) use the same camera lock and skip-save
-path as `TRAINER_PEOPLE_ABOVE=1` for that scene only — do not set the env
+`max(scene_*)+1` (or `TRAINER_SAR_RECIPE_CURSOR` if set). Every recipe
+packs the target person with its support (and parking extras such as a
+taxi) into camera midfield, then skip-saves unless that pair is in frame
+and within 2.8 m XY. Climb recipes (`above: true`: trash/vending sit)
+also freeze the stack on the roof; do **not** set `TRAINER_PEOPLE_ABOVE`
 for a mixed recipe run. Seat-lie recipes keep `on_landmark_type` even when
 above-mode is on. Beside recipes put the person on the ground 1.2–2.0 m from
 the named support. Parking vs grass is a **placement proxy**: parking recipes
