@@ -8,7 +8,7 @@ recipes:
     pose: person_sitting
     support_landmark: trash_can
     support_class: trash_can
-    relation: on
+    relation: "on"
     above: true
     distractor_poses: [person_walking, person_walking_away]
     command: Find the person sitting on top of the trash can in the parking lot.
@@ -19,7 +19,7 @@ recipes:
     pose: person_sitting
     support_landmark: vending_machine
     support_class: vending_machine
-    relation: on
+    relation: "on"
     above: true
     distractor_poses: [person_walking, person_reaching]
     command: Find the person sitting on top of the vending machine.
@@ -29,7 +29,7 @@ recipes:
     pose: person_lying_down
     support_landmark: bench
     support_class: bench
-    relation: on
+    relation: "on"
     above: false
     extra_landmarks: [taxi]
     distractor_poses: [person_walking, person_sitting]
@@ -40,7 +40,7 @@ recipes:
     pose: person_lying_down
     support_landmark: picnic_table
     support_class: picnic_table
-    relation: on
+    relation: "on"
     above: false
     distractor_poses: [person_walking, person_sitting]
     command: Find the person lying on top of the picnic table.
@@ -140,7 +140,7 @@ recipes:
     support_landmark: trash_can
     support_class: trash_can
     surface_class: parking
-    relation: on
+    relation: "on"
     above: true
     distractor_poses: [person_walking]
     command: In the parking lot, find the person who climbed up and is sitting on top of the trash can.
@@ -151,7 +151,7 @@ recipes:
     pose: person_lying_down
     support_landmark: bench
     support_class: bench
-    relation: on
+    relation: "on"
     above: false
     extra_landmarks: [taxi]
     distractor_poses: [person_walking, person_sitting]

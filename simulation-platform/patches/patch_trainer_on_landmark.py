@@ -777,6 +777,10 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                 or rec.get("support_landmark")
                 or rec.get("surface_anchor")
                 or "")
+            _rel = rec.get("relation")
+            if _rel is True:
+                _rel = "on"
+            _rel = str(_rel or "").strip().lower()
             _tgt = None
             for _d in _dets:
                 if str(_d.get("class") or "").startswith("person_"):
@@ -812,7 +816,7 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                             "TRAINER_SAR_PAIR_XY_MAX", "2.8") or "2.8")
                     except (TypeError, ValueError):
                         _max = 2.8
-                    if str(rec.get("relation") or "") in ("on", "above"):
+                    if _rel in ("on", "above"):
                         try:
                             _max = min(_max, float(__import__("os").environ.get(
                                 "TRAINER_SAR_ON_XY_MAX", "1.4") or "1.4"))
@@ -820,7 +824,7 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                             _max = min(_max, 1.4)
                     if _dxy > _max:
                         _pair_ok = False
-            if (str(rec.get("relation") or "") in ("on", "above")
+            if (_rel in ("on", "above")
                     and _tgt is not None and _sup_d is not None):
                 # _marc_recipe_climb_visible: no same-pose distractor
                 # fallback; person must be stacked on the support in-frame.
@@ -4260,6 +4264,33 @@ def main():
                 tnew = tnew[:_a] + NEW_SAVE[_na:_nb] + tnew[_b:]
                 print("[on-landmark-patch] trainer.py: recipe climb-visible "
                       "skip-save upgraded")
+        if ('str(rec.get("relation") or "") in ("on", "above")' in tnew
+                and "if _rel is True" not in tnew):
+            tnew = tnew.replace(
+                "            _sup = str(\n"
+                "                rec.get(\"support_class\")\n"
+                "                or rec.get(\"support_landmark\")\n"
+                "                or rec.get(\"surface_anchor\")\n"
+                "                or \"\")\n"
+                "            _tgt = None\n",
+                "            _sup = str(\n"
+                "                rec.get(\"support_class\")\n"
+                "                or rec.get(\"support_landmark\")\n"
+                "                or rec.get(\"surface_anchor\")\n"
+                "                or \"\")\n"
+                "            _rel = rec.get(\"relation\")\n"
+                "            if _rel is True:\n"
+                "                _rel = \"on\"\n"
+                "            _rel = str(_rel or \"\").strip().lower()\n"
+                "            _tgt = None\n",
+                1,
+            )
+            tnew = tnew.replace(
+                'str(rec.get("relation") or "") in ("on", "above")',
+                '_rel in ("on", "above")',
+            )
+            print("[on-landmark-patch] trainer.py: YAML on-boolean "
+                  "skip-save upgraded")
         _old_above_skip = (
             "            if not _active_valid:\n"
             "                log.warning(\n"
