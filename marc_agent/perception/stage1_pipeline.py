@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import asdict, dataclass
@@ -23,6 +24,7 @@ from marc_agent.types import CctvDetectionRound, CctvRoundMetrics
 
 
 Detector = Callable[..., CctvDetectionRound]
+log = logging.getLogger("marc_agent.stage1_pipeline")
 
 
 @dataclass(frozen=True)
@@ -76,11 +78,25 @@ class Stage1CandidateResult:
 def _default_verifier() -> Optional[Verifier]:
     mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
     if mode not in {"qwen", "qwen-remote"}:
+        log.info("[qwen] verifier disabled mode=%s", mode)
         return None
     backend = QwenBackend.REMOTE if mode == "qwen-remote" else configured_backend()
     if backend is QwenBackend.REMOTE:
-        return RemoteQwenSarVerifier()
-    return QwenSarVerifier()
+        verifier = RemoteQwenSarVerifier()
+        log.info(
+            "[qwen] verifier configured backend=remote endpoint=%s model=%s "
+            "timeout=%.1fs",
+            verifier.config.chat_completions_url,
+            verifier.config.model_name,
+            verifier.config.timeout_s,
+        )
+        return verifier
+    verifier = QwenSarVerifier()
+    log.info(
+        "[qwen] verifier configured backend=local model_dir=%s",
+        verifier.config.model_dir,
+    )
+    return verifier
 
 
 def _failed_verifier(exc: Exception) -> Verifier:
@@ -128,6 +144,12 @@ def run_stage1_candidate_pipeline(
     selection = None
     failure_reason = None
     if parsed.target_type == "person":
+        log.info(
+            "[qwen] SAR request situation=%s people=%d cameras=%d",
+            parsed.situation.value if parsed.situation else None,
+            len(detections.people),
+            len(detections.camera_ids),
+        )
         if verifier is not None:
             selected_verifier = verifier
         else:
@@ -143,6 +165,32 @@ def run_stage1_candidate_pipeline(
         )
         if selection.selected is None:
             failure_reason = f"sar_selection:{selection.reason}"
+        metrics = selection.verifier_metrics
+        log.info(
+            "[qwen] selection method=%s status=%s selected=%s reason=%s "
+            "images=%s latency_ms=%s request_bytes=%s",
+            selection.method,
+            selection.status.value,
+            selection.selected.candidate_id if selection.selected else None,
+            selection.reason,
+            metrics.image_count if metrics else None,
+            (
+                round(metrics.latency_ms)
+                if metrics and metrics.latency_ms is not None
+                else None
+            ),
+            metrics.request_bytes if metrics else None,
+        )
+    else:
+        qwen_mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
+        qwen_backend = (os.environ.get("MARC_QWEN_BACKEND") or "local").strip().lower()
+        log.info(
+            "[qwen] skipped mode=%s backend=%s target_type=%s reason=non_sar_request "
+            "(object selection is handled downstream)",
+            qwen_mode,
+            qwen_backend,
+            parsed.target_type,
+        )
 
     return Stage1CandidateResult(
         command_text,

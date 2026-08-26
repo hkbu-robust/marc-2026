@@ -132,6 +132,16 @@ class RemoteQwenSarVerifier:
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
+        log.info(
+            "[qwen-remote] dispatch endpoint=%s model=%s images=%d "
+            "candidates=%d request=%dB timeout=%.1fs",
+            self.config.chat_completions_url,
+            self.config.model_name,
+            len(board.images),
+            len(board.candidate_ids),
+            len(body),
+            self.config.timeout_s,
+        )
         started = time.perf_counter()
         try:
             raw = self._post(
@@ -140,6 +150,18 @@ class RemoteQwenSarVerifier:
                 headers,
                 self.config.timeout_s,
             )
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            log.warning(
+                "[qwen-remote] failed endpoint=%s model=%s latency=%.0fms "
+                "error=%s detail=%s",
+                self.config.chat_completions_url,
+                self.config.model_name,
+                latency_ms,
+                type(exc).__name__,
+                exc,
+            )
+            raise
         finally:
             latency_ms = (time.perf_counter() - started) * 1000.0
             self.last_metrics = QwenRemoteMetrics(
@@ -157,9 +179,12 @@ class RemoteQwenSarVerifier:
         if not isinstance(text, str):
             raise QwenRemoteResponseError("vLLM message content must be text")
         log.info(
-            "[qwen-remote] images=%d request=%dB latency=%.0fms",
+            "[qwen-remote] response status=ok model=%s images=%d request=%dB "
+            "response=%dB latency=%.0fms",
+            self.config.model_name,
             len(board.images),
             len(body),
+            len(raw),
             latency_ms,
         )
         return text

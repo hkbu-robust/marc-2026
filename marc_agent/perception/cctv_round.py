@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import TYPE_CHECKING
@@ -11,6 +12,9 @@ from marc_agent.types import CctvFrame
 
 if TYPE_CHECKING:
     from marc_sdk import MARCClient
+
+
+log = logging.getLogger("marc_agent.cctv_round")
 
 
 def fetch_cctv_round(
@@ -29,9 +33,14 @@ def fetch_cctv_round(
     camera_ids = sorted(client.list_cctv())
     if not camera_ids:
         timeout_s = (
-            float(os.environ.get("MARC_CCTV_DISCOVERY_TIMEOUT_S") or 2.0)
+            float(os.environ.get("MARC_CCTV_DISCOVERY_TIMEOUT_S") or 10.0)
             if discovery_timeout_s is None
             else discovery_timeout_s
+        )
+        wait_started = time.monotonic()
+        log.info(
+            "[cctv] no cameras discovered; waiting up to %.1fs for subscriptions",
+            timeout_s,
         )
         deadline = time.monotonic() + max(0.0, timeout_s)
         stable_since: float | None = None
@@ -45,6 +54,19 @@ def fetch_cctv_round(
                 if now - stable_since >= max(0.0, discovery_settle_s):
                     break
             time.sleep(max(0.001, poll_interval_s))
+        elapsed_ms = (time.monotonic() - wait_started) * 1000.0
+        if camera_ids:
+            log.info(
+                "[cctv] discovered %d cameras after %.0fms: %s",
+                len(camera_ids),
+                elapsed_ms,
+                ",".join(camera_ids),
+            )
+        else:
+            log.warning(
+                "[cctv] discovery timed out after %.0fms with no cameras",
+                elapsed_ms,
+            )
     frames: dict[str, CctvFrame] = {}
     for camera_id in camera_ids:
         msg = client.get_cctv_image(camera_id)

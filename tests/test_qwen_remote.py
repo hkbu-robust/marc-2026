@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from PIL import Image
 
 from marc_agent.perception.qwen_remote import (
+    QwenRemoteConnectionError,
     QwenRemoteResponseError,
     RemoteQwenSarVerifier,
     build_remote_payload,
@@ -74,6 +75,19 @@ class QwenRemoteTests(unittest.TestCase):
         verifier = RemoteQwenSarVerifier(_config(), post=lambda *_args: b"{}")
         with self.assertRaises(QwenRemoteResponseError):
             verifier(_board())
+
+    def test_connection_failure_is_logged_without_api_key(self):
+        def fail(*_args):
+            raise QwenRemoteConnectionError("connection refused")
+
+        verifier = RemoteQwenSarVerifier(_config(), post=fail)
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
+            with self.assertRaises(QwenRemoteConnectionError):
+                verifier(_board())
+        output = "\n".join(captured.output)
+        self.assertIn("dispatch endpoint=", output)
+        self.assertIn("error=QwenRemoteConnectionError", output)
+        self.assertNotIn("test-secret", output)
 
     def test_real_http_transport_against_fake_vllm_server(self):
         captured = {}

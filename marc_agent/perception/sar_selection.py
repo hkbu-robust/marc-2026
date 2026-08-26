@@ -422,6 +422,11 @@ def select_sar_candidate(
     """Select one person with Qwen or the deterministic bounded fallback."""
     requested = command.situation.value if command.situation else None
     if command.target_type != "person" or requested is None:
+        log.info(
+            "[qwen] skipped reason=incomplete_sar_request target_type=%s situation=%s",
+            command.target_type,
+            requested,
+        )
         return SarSelectionResult(
             SelectionStatus.UNCERTAIN,
             None,
@@ -431,6 +436,7 @@ def select_sar_candidate(
             "not_a_complete_sar_request",
         )
     if not round_.people:
+        log.info("[qwen] skipped reason=no_person_candidates")
         return SarSelectionResult(
             SelectionStatus.NO_MATCH,
             None,
@@ -454,6 +460,12 @@ def select_sar_candidate(
                 for item in board.evidence
                 if item.person.candidate_id == candidate_id
             )
+            log.info(
+                "[qwen] validated output candidate=%s situation=%s backend=%s",
+                candidate_id,
+                evidence_situation,
+                str(getattr(verifier, "method", "qwen")),
+            )
             return SarSelectionResult(
                 SelectionStatus.SELECTED,
                 selected,
@@ -468,9 +480,17 @@ def select_sar_candidate(
             metrics = _verifier_metrics(verifier, board)
             fallback_reason = f"verifier_failed:{type(exc).__name__}"
             raw_output = locals().get("raw_output")
+            log.warning(
+                "[qwen] verifier failed backend=%s error=%s detail=%s; "
+                "using deterministic fallback",
+                str(getattr(verifier, "method", "qwen")),
+                type(exc).__name__,
+                exc,
+            )
     else:
         fallback_reason = "verifier_not_configured"
         raw_output = None
+        log.info("[qwen] verifier not configured; using deterministic fallback")
 
     best = board.evidence[0]
     return SarSelectionResult(

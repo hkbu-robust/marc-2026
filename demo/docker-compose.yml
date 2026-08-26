@@ -40,6 +40,7 @@ services:
       MARC_QWEN_BACKEND: "${MARC_QWEN_BACKEND:-local}"
       MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
+      MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     # GPU for VLA inference (uses the participant machine's GPU). If no GPU is needed, the deploy block can be removed.

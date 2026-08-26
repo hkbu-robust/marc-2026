@@ -236,14 +236,18 @@ class SarSelectionTests(unittest.TestCase):
         def detector(client, *, stub_path=None):
             return _round()
 
-        result = run_stage1_candidate_pipeline(
-            object(),
-            "Find the mug beside the bench.",
-            detector=detector,
-        )
+        with self.assertLogs("marc_agent.stage1_pipeline", level="INFO") as captured:
+            result = run_stage1_candidate_pipeline(
+                object(),
+                "Find the mug beside the bench.",
+                detector=detector,
+            )
         self.assertEqual("mug", result.parsed.target_type)
         self.assertIsNone(result.sar_selection)
         self.assertIsNone(result.failure_reason)
+        output = "\n".join(captured.output)
+        self.assertIn("backend=local", output)
+        self.assertIn("reason=non_sar_request", output)
 
     def test_parse_failure_does_not_fetch_cctv(self):
         called = False
