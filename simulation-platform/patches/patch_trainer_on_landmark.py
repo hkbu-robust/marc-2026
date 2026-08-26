@@ -31,6 +31,48 @@ TRAINER = "/metacom2026/simulation_app/marc2026/trainer.py"
 DEPLOYER = "/metacom2026/simulation_app/marc2026/world/object_deployer.py"
 MARKER = "_marc_obj_placement"
 
+ABOVE_SCENE_FN = '''
+def _marc_above_scene():
+    """True when this scene should frame a climb stack (env or recipe.above)."""
+    if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0")).strip().lower() not in (
+            "0", "false", "no", "off", ""):
+        return True
+    try:
+        import json as _json_ab
+        with open("/tmp/marc_sar_recipe.json", encoding="utf-8") as _rf:
+            return bool(_json_ab.load(_rf).get("above"))
+    except Exception:
+        return False
+'''
+
+_ABOVE_ON_RE = re.compile(
+    r"str\((?:os|__import__\(\"os\"\))\.environ\.get\(\"TRAINER_PEOPLE_ABOVE\", \"0\"\)\)"
+    r"\.lower\(\) not in \(\s*\"0\", \"false\", \"no\", \"off\", \"\"\)",
+    re.S,
+)
+_ABOVE_OFF_RE = re.compile(
+    r"str\(\s*(?:os|__import__\(\"os\"\))\.environ\.get\(\"TRAINER_PEOPLE_ABOVE\", \"0\"\)\s*\)"
+    r"\s*\.lower\(\) in \(\s*\"0\", \"false\", \"no\", \"off\", \"\"\)",
+    re.S,
+)
+
+
+def _rewrite_above_gates(src: str) -> str:
+    """Env-only climb framing also runs when the current recipe has above=true."""
+    src = _ABOVE_ON_RE.sub("_marc_above_scene()", src)
+    src = _ABOVE_OFF_RE.sub("(not _marc_above_scene())", src)
+    return src
+
+
+def _ensure_module_above_scene(src: str) -> str:
+    if "def _marc_above_scene(" in src:
+        return src
+    idx = src.find("\ndef ")
+    if idx < 0:
+        return ABOVE_SCENE_FN + "\n" + src
+    return src[:idx] + "\n" + ABOVE_SCENE_FN + src[idx:]
+
+
 OLD_PLACE_POSE = '''    placement = (pose or {}).get("placement") or {}
     # 트레이너 데이터셋 모드는 사람을 지면(cell)에 세운다 → 랜드마크 위 배치 비활성.
     on_landmark_type = placement.get("on_landmark_type") if place_on_landmark else None
@@ -43,8 +85,7 @@ NEW_PLACE_POSE = '''    placement = dict((pose or {}).get("placement") or {})
         placement.update(_obj_pl)
     # [marc-patch] _marc_obj_placement: object-spec overlay beats pose YAML.
     on_landmark_type = placement.get("on_landmark_type") if place_on_landmark else None
-    if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-            "0", "false", "no", "off", ""):
+    if _marc_above_scene():
         # Only the climber (placement.above) may sit on a landmark. Pose YAML
         # would otherwise drop extras (lying/prone) through the same vending.
         if not placement.get("above") and not placement.get("recipe_id"):
@@ -66,8 +107,7 @@ NEW_REPOSITION_PL = '''        placement = dict((pose or {}).get("placement") or
         on_lm = placement.get("on_landmark_type")
         if not on_lm:
             continue
-        if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             if not placement.get("above") and not placement.get("recipe_id"):
                 continue
         z_off = float(placement.get("z_offset_from_top",
@@ -104,8 +144,7 @@ NEW_SNAP_V3 = '''        _snap_landmarks_to_ground([mission])
                 mission["id"], mission.get("objects") or [], configurations)
         except Exception as _e:
             log.warning(f"place-above people failed (non-fatal): {_e}")
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             try:
                 _warm = max(1, int(os.environ.get(
                     "TRAINER_RENDER_WARMUP_FRAMES", "12") or "12"))
@@ -130,8 +169,7 @@ NEW_SNAP_V4 = '''        _snap_landmarks_to_ground([mission])
             _marc_run_above_place()
         except Exception as _e:
             log.warning(f"place-above people failed (non-fatal): {_e}")
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             try:
                 _warm = max(1, int(os.environ.get(
                     "TRAINER_RENDER_WARMUP_FRAMES", "12") or "12"))
@@ -176,8 +214,7 @@ OLD_SETTLE = '''        simulation_context.play()
         _snap_landmarks_to_ground([mission])
 '''
 
-NEW_SETTLE = '''        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+NEW_SETTLE = '''        if _marc_above_scene():
             # Construct the stack first, freeze the climber, then let lost
             # objects fall. Re-seat every settle tick so PhysX cannot restore
             # the ground spawn pose. Clear the contact lock once per scene.
@@ -253,8 +290,7 @@ OLD_SAVE = '''        if save_offline_enabled:
 
 NEW_SAVE_V1 = '''        active_payload = gt_by_mission.get(active_mission_id)
         _active_valid = True
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             _dets = list((active_payload or {}).get("detections") or [])
             _want = {
                 x.strip() for x in
@@ -294,8 +330,7 @@ NEW_SAVE_V1 = '''        active_payload = gt_by_mission.get(active_mission_id)
 
 NEW_SAVE_V2 = '''        active_payload = gt_by_mission.get(active_mission_id)
         _active_valid = True
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             _dets = list((active_payload or {}).get("detections") or [])
             _img = (active_payload or {}).get("image") or {}
             try:
@@ -385,8 +420,7 @@ NEW_SAVE_V2 = '''        active_payload = gt_by_mission.get(active_mission_id)
 
 NEW_SAVE_V3 = '''        active_payload = gt_by_mission.get(active_mission_id)
         _active_valid = True
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             _img = (active_payload or {}).get("image") or {}
             try:
                 _ih = float(_img.get("height") or 0.0)
@@ -523,8 +557,7 @@ NEW_SAVE_V3 = '''        active_payload = gt_by_mission.get(active_mission_id)
 
 NEW_SAVE_V4 = '''        active_payload = gt_by_mission.get(active_mission_id)
         _active_valid = True
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             try:
                 from world import object_deployer as _od_above
                 _n_placed = int(getattr(
@@ -555,8 +588,7 @@ NEW_SAVE_V4 = '''        active_payload = gt_by_mission.get(active_mission_id)
 
 NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
         _active_valid = True
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             try:
                 from world import object_deployer as _od_above
                 _n_placed = int(getattr(
@@ -614,8 +646,7 @@ OLD_RENDER_STEP = (
     "            scene_id, simulation_app, stamp=stamp,\n"
     "            render_step=lambda: simulation_context.step(render=True))\n"
 )
-NEW_RENDER_STEP = '''        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+NEW_RENDER_STEP = '''        if _marc_above_scene():
             try:
                 simulation_context.pause()
             except Exception:
@@ -635,8 +666,7 @@ NEW_RENDER_STEP = '''        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0"))
             # Playback ticks restore spawn poses. Freeze/re-seat the climber
             # on the landmark top before AND after each annotator frame.
             def _marc_reseat():
-                if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                        "0", "false", "no", "off", ""):
+                if _marc_above_scene():
                     try:
                         from world.object_deployer import _marc_place_above_people
                         _miss = next(
@@ -660,8 +690,7 @@ NEW_RENDER_STEP_V1 = '''        simulation_context.play()
         def _marc_gt_step():
             # Playback ticks restore spawn poses. Re-seat the climber on
             # the landmark top before each annotator/render frame.
-            if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                    "0", "false", "no", "off", ""):
+            if _marc_above_scene():
                 try:
                     from world.object_deployer import _marc_place_above_people
                     _miss = next(
@@ -680,8 +709,7 @@ NEW_RENDER_STEP_V1 = '''        simulation_context.play()
 '''
 
 OLD_CAPTURE_RETURN = "        return gt.last_render_ok\n"
-NEW_CAPTURE_RETURN = '''        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+NEW_CAPTURE_RETURN = '''        if _marc_above_scene():
             # Scene 0 often has a valid RGB but the climb landmark is off
             # camera. Return False so the stock black-frame redeploy retries
             # instead of keeping a cabinet-less first frame.
@@ -713,9 +741,7 @@ OLD_INITIAL_WARN = '''    if not render_ok and gt is not None:
         gt.warn_black_frame(trainer_state.scene_id)
 '''
 
-NEW_INITIAL_WARN = '''    if not render_ok and gt is not None and str(
-            os.environ.get("TRAINER_PEOPLE_ABOVE", "0")
-    ).lower() in ("0", "false", "no", "off", ""):
+NEW_INITIAL_WARN = '''    if not render_ok and gt is not None and (not _marc_above_scene()):
         gt.warn_black_frame(trainer_state.scene_id)
 '''
 
@@ -747,9 +773,7 @@ NEW_AUTO_FAILURE = '''                if ok:
                     _auto_failed_scenes = 0
                 else:
                     _auto_failed_scenes += 1
-                    if gt is not None and str(
-                            os.environ.get("TRAINER_PEOPLE_ABOVE", "0")
-                    ).lower() in ("0", "false", "no", "off", ""):
+                    if gt is not None and (not _marc_above_scene()):
                         gt.warn_black_frame(trainer_state.scene_id)
                     _tgt = "-"
                     try:
@@ -778,8 +802,7 @@ OLD_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_ob
 NEW_POSITIONS_V1 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
         lm_pos = positions[:n_lm]
         obj_pos = positions[n_lm:]
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             import re as _re_pos
             _pl = ""
             _climber_i = None
@@ -814,8 +837,7 @@ NEW_POSITIONS_V1 = '''        positions = generate_cell_positions(area, n_lm + n
 NEW_POSITIONS_V2 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
         lm_pos = positions[:n_lm]
         obj_pos = positions[n_lm:]
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             import re as _re_pos
             _pl = ""
             _climber_i = None
@@ -871,8 +893,7 @@ NEW_POSITIONS_V2 = '''        positions = generate_cell_positions(area, n_lm + n
 NEW_POSITIONS_V3 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
         lm_pos = positions[:n_lm]
         obj_pos = positions[n_lm:]
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             import re as _re_pos
             _pl = ""
             _climber_i = None
@@ -965,8 +986,7 @@ NEW_POSITIONS_V3 = '''        positions = generate_cell_positions(area, n_lm + n
 NEW_POSITIONS_V5 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
         lm_pos = positions[:n_lm]
         obj_pos = positions[n_lm:]
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             import re as _re_pos
             _pl = ""
             _climber_i = None
@@ -1068,8 +1088,7 @@ NEW_POSITIONS_V5 = '''        positions = generate_cell_positions(area, n_lm + n
 NEW_POSITIONS_V4 = '''        positions = generate_cell_positions(area, n_lm + n_obj)
         lm_pos = positions[:n_lm]
         obj_pos = positions[n_lm:]
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             import re as _re_pos
             _pl = ""
             _climber_i = None
@@ -1171,8 +1190,7 @@ NEW_POSITIONS_V4 = '''        positions = generate_cell_positions(area, n_lm + n
 NEW_POSITIONS = '''        positions = generate_cell_positions(area, n_lm + n_obj)
         lm_pos = positions[:n_lm]
         obj_pos = positions[n_lm:]
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             import re as _re_pos
             _pl = ""
             _climber_i = None
@@ -1278,8 +1296,7 @@ OLD_DEPLOY_LANDMARKS = '''        deploy_landmarks(mission_id, landmarks, area, 
 '''
 
 NEW_DEPLOY_LANDMARKS = '''        _free_fall = _TIP_OVER_LANDMARKS
-        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0")).lower() not in (
-                "0", "false", "no", "off", ""):
+        if _marc_above_scene():
             # Climb targets stay upright so bounds-contact still meets the top.
             _keep_upright = {
                 x.strip() for x in
@@ -1417,9 +1434,9 @@ def above_contact_ok(foot_xyz, lm_lo, lm_hi, top_z, max_gap=0.06):
 
 
 ABOVE_HELPER = r'''
-
+''' + ABOVE_SCENE_FN + r'''
 def _marc_place_above_people(mission_id, objects, configurations=None):
-    """[marc-patch] _marc_above_aabb_stack: person on roof (_marc_above_freeze, _marc_above_always_on_top, _marc_above_joint_seat, _marc_above_ray_roof, _marc_above_sit_sink, _marc_above_sit_sink_70, _marc_above_sit_sink_short, _marc_above_vend_drape, _marc_above_vend_drape_lip, _marc_above_trash_raise, _marc_above_hydrant_crouch, _marc_above_trash_crouch, _marc_above_vend_farther, _marc_above_vend_farther2, _marc_above_vend_farther3, _marc_above_vend_farther4, _marc_above_vend_not_too_far, _marc_above_vend_closer, _marc_above_vend_sit_yaw, _marc_above_vend_glass_drape, _marc_above_vend_sit_fix, _marc_above_vend_sit_nudge, _marc_above_vend_sit_unraise, _marc_above_vend_lip_fwd, _marc_above_vend_lip_fwd2, _marc_above_vend_lip_fwd3, _marc_above_vend_lip_back, _marc_above_vend_prof, _marc_above_vend_prof2, _marc_above_vend_prof3, _marc_above_vend_prof4, _marc_above_vend_prof5, _marc_above_vend_prof6, _marc_above_vend_female, _marc_above_vend_female2, _marc_above_vend_female3, _marc_above_vend_female4, _marc_above_vend_female5, _marc_above_vend_female6, _marc_above_vend_female7, _marc_above_vend_male, _marc_above_vend_male2, _marc_above_vend_male3, _marc_above_vend_male4, _marc_above_vend_male5, _marc_above_vend_weight, _marc_above_vend_weight2, _marc_above_vend_weight3, _marc_above_vend_weight4, _marc_above_vend_weight5, _marc_above_no_closeup, _marc_above_mid_field, _marc_above_roof_in_view, _marc_above_vend_abs_frame, _marc_above_vend_leg_yaw, _marc_above_camera_frame, _marc_above_vend_mesh_seat, _marc_above_vend_mid_dist, _marc_above_vend_on_roof, _marc_above_vend_male6, _marc_above_vend_prof7, _marc_above_vend_female8, _marc_above_vend_weight6, _marc_above_vend_roof_visible, _marc_above_vend_joint_z, _marc_above_vend_prof8, _marc_above_vend_mesh_xy, _marc_above_vend_female_yaw, _marc_above_vend_prof9, _marc_above_vend_weight_yaw, _marc_above_vend_female_fwd, _marc_above_vend_stand, _marc_above_vend_prof10, _marc_above_vend_prof_yaw, _marc_above_vend_sit_hip, _marc_above_vend_weight7, _marc_above_vend_weight8, _marc_above_vend_mesh_contact, _marc_above_crouch_authored, _marc_above_vend_mesh_contact2, _marc_above_vend_mesh_nudge, _marc_above_vend_mesh_snap, _marc_above_lock_contact, _marc_above_joint_only, _marc_above_vend_prof11, _marc_above_vend_slot, _marc_above_vend_female9, _marc_above_vend_prof12)."""
+    """[marc-patch] _marc_above_aabb_stack: person on roof (_marc_above_freeze, _marc_above_always_on_top, _marc_above_joint_seat, _marc_above_ray_roof, _marc_above_sit_sink, _marc_above_sit_sink_70, _marc_above_sit_sink_short, _marc_above_vend_drape, _marc_above_vend_drape_lip, _marc_above_trash_raise, _marc_above_hydrant_crouch, _marc_above_trash_crouch, _marc_above_vend_farther, _marc_above_vend_farther2, _marc_above_vend_farther3, _marc_above_vend_farther4, _marc_above_vend_not_too_far, _marc_above_vend_closer, _marc_above_vend_sit_yaw, _marc_above_vend_glass_drape, _marc_above_vend_sit_fix, _marc_above_vend_sit_nudge, _marc_above_vend_sit_unraise, _marc_above_vend_lip_fwd, _marc_above_vend_lip_fwd2, _marc_above_vend_lip_fwd3, _marc_above_vend_lip_back, _marc_above_vend_prof, _marc_above_vend_prof2, _marc_above_vend_prof3, _marc_above_vend_prof4, _marc_above_vend_prof5, _marc_above_vend_prof6, _marc_above_vend_female, _marc_above_vend_female2, _marc_above_vend_female3, _marc_above_vend_female4, _marc_above_vend_female5, _marc_above_vend_female6, _marc_above_vend_female7, _marc_above_vend_male, _marc_above_vend_male2, _marc_above_vend_male3, _marc_above_vend_male4, _marc_above_vend_male5, _marc_above_vend_weight, _marc_above_vend_weight2, _marc_above_vend_weight3, _marc_above_vend_weight4, _marc_above_vend_weight5, _marc_above_no_closeup, _marc_above_mid_field, _marc_above_roof_in_view, _marc_above_vend_abs_frame, _marc_above_vend_leg_yaw, _marc_above_camera_frame, _marc_above_vend_mesh_seat, _marc_above_vend_mid_dist, _marc_above_vend_on_roof, _marc_above_vend_male6, _marc_above_vend_prof7, _marc_above_vend_female8, _marc_above_vend_weight6, _marc_above_vend_roof_visible, _marc_above_vend_joint_z, _marc_above_vend_prof8, _marc_above_vend_mesh_xy, _marc_above_vend_female_yaw, _marc_above_vend_prof9, _marc_above_vend_weight_yaw, _marc_above_vend_female_fwd, _marc_above_vend_stand, _marc_above_vend_prof10, _marc_above_vend_prof_yaw, _marc_above_vend_sit_hip, _marc_above_vend_weight7, _marc_above_vend_weight8, _marc_above_vend_mesh_contact, _marc_above_crouch_authored, _marc_above_vend_mesh_contact2, _marc_above_vend_mesh_nudge, _marc_above_vend_mesh_snap, _marc_above_lock_contact, _marc_above_joint_only, _marc_above_vend_prof11, _marc_above_vend_slot, _marc_above_vend_female9, _marc_above_vend_prof12, _marc_above_vend_male7, _marc_above_vend_weight9)."""
     jobs = []
     for spec in objects or []:
         pl = spec.get("placement") or {}
@@ -2248,7 +2265,10 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 half_front = 0.5 * min(float(ldx), float(ldy))
                 half_side = 0.5 * max(float(ldx), float(ldy))
         _ch = str(ch or "").lower()
-        margin = 0.12 if ("female" in _ch or "professor" in _ch) else 0.08
+        margin = 0.12 if (
+            "female" in _ch or "professor" in _ch or "male_student" in _ch
+            or "weight" in _ch
+        ) else 0.08
         sl = str(slot or "lip").lower()
         if sl in ("center", "left", "right"):
             # _marc_above_vend_female9 / _marc_above_vend_prof12: glass
@@ -2258,20 +2278,26 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             return _vending_roof_clamp(
                 lm, body_lo, body_hi, wx, wy, margin)
         lip = min(float(lip), max(0.06, half_front - margin))
-        if "female" in _ch or "professor" in _ch or "weight" in _ch:
+        if ("female" in _ch or "professor" in _ch or "weight" in _ch
+                or "male_student" in _ch):
             # Female sit is the good close-up: hips on the glass lip.
             # student_weight without this extra sits on roof centre and
             # drops out of tight CCTV crops. _marc_above_vend_weight7
+            # _marc_above_vend_male7: male sitting clip hung ~1.2 m off
+            # the cabinet without the same glass-forward drape.
             if "female" in _ch:
                 _fwd_key = "TRAINER_PEOPLE_VEND_FEMALE_FWD"
                 _fwd_def = "0.16"
             elif "professor" in _ch:
                 _fwd_key = "TRAINER_PEOPLE_VEND_PROF_FWD"
                 _fwd_def = "0.16"
-            else:
+            elif "weight" in _ch:
                 # _marc_above_vend_weight8: +7 cm glass-forward vs female.
                 _fwd_key = "TRAINER_PEOPLE_VEND_WEIGHT_FWD"
                 _fwd_def = "0.23"
+            else:
+                _fwd_key = "TRAINER_PEOPLE_VEND_MALE_FWD"
+                _fwd_def = "0.16"
             try:
                 fwd = float(__import__("os").environ.get(
                     _fwd_key, _fwd_def) or _fwd_def)
@@ -2474,15 +2500,19 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             fx, fy = _vending_front_xy(lm, body_lo, body_hi)
             extra = 0.0
             _ch = str(spec.get("character") or "").lower()
-            if "female" in _ch or "weight" in _ch or "professor" in _ch:
+            if ("female" in _ch or "weight" in _ch or "professor" in _ch
+                    or "male_student" in _ch):
                 # Female sit is good with 180. Professor/weight clips
-                # share that bind flip.
+                # share that bind flip. _marc_above_vend_male7: male
+                # sitting clip faces the other way and hangs off-cabinet.
                 if "female" in _ch:
                     _yaw_key = "TRAINER_PEOPLE_VEND_FEMALE_YAW"
                 elif "professor" in _ch:
                     _yaw_key = "TRAINER_PEOPLE_VEND_PROF_YAW"
-                else:
+                elif "weight" in _ch:
                     _yaw_key = "TRAINER_PEOPLE_VEND_WEIGHT_YAW"
+                else:
+                    _yaw_key = "TRAINER_PEOPLE_VEND_MALE_YAW"
                 try:
                     extra = float(__import__("os").environ.get(
                         _yaw_key, "180") or "180")
@@ -2494,7 +2524,10 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
         _slots = ["lip"]
         _sit_margin = 0.08
         if typ == "vending_machine" and "sitting" in pose:
-            if "female" in _ch or "professor" in _ch:
+            if ("female" in _ch or "professor" in _ch
+                    or "male_student" in _ch or "weight" in _ch):
+                # _marc_above_vend_weight9: same glass-lip slots as the
+                # other sitting clips, not roof-centre lip-only.
                 _sit_margin = 0.12
                 try:
                     _forced = str(__import__("os").environ.get(
@@ -2986,6 +3019,7 @@ def _ensure_above_helper(path):
         and "_marc_above_vend_mesh_seat" in src
         and "_marc_above_vend_on_roof" in src
         and "_marc_above_vend_male6" in src
+        and "_marc_above_vend_male7" in src
         and "_marc_above_vend_prof7" in src
         and "_marc_above_vend_female8" in src
         and "_marc_above_vend_weight6" in src
@@ -3003,6 +3037,7 @@ def _ensure_above_helper(path):
         and "_marc_above_vend_sit_hip" in src
         and "_marc_above_vend_weight7" in src
         and "_marc_above_vend_weight8" in src
+        and "_marc_above_vend_weight9" in src
         and "_marc_above_vend_mesh_contact" in src
         and "_marc_above_crouch_authored" in src
         and "_marc_above_vend_mesh_contact2" in src
@@ -3019,6 +3054,20 @@ def _ensure_above_helper(path):
         and "GetPointsAttr" in src
         and "def _marc_nudge_above_nearer" in src)
     if have_fn and have_contact:
+        if "def _marc_above_scene(" not in src:
+            src = src.replace(
+                "\ndef _marc_place_above_people(",
+                "\n" + ABOVE_SCENE_FN + "def _marc_place_above_people(",
+                1,
+            )
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(src)
+            except OSError as e:
+                print(f"[on-landmark-patch] above-scene helper write failed: {e}")
+                return False
+            print("[on-landmark-patch] deployer: recipe-above framing helper inserted")
+            return True
         return False
     if have_fn:
         starts = []
@@ -3263,6 +3312,8 @@ def main():
         if OLD_AUTO_FAILURE in tnew:
             tnew = tnew.replace(
                 OLD_AUTO_FAILURE, NEW_AUTO_FAILURE, 1)
+        tnew = _ensure_module_above_scene(tnew)
+        tnew = _rewrite_above_gates(tnew)
         if tnew != tsrc:
             try:
                 with open(TRAINER, "w", encoding="utf-8") as f:
@@ -3318,9 +3369,7 @@ def main():
         with open(DEPLOYER, "r", encoding="utf-8") as f:
             dsrc = f.read()
         _no_extra_lm = (
-            '    if str(__import__("os").environ.get("TRAINER_PEOPLE_ABOVE", "0"))'
-            '.lower() not in (\n'
-            '            "0", "false", "no", "off", ""):\n'
+            '    if _marc_above_scene():\n'
             '        if not placement.get("above") and not placement.get("recipe_id"):\n'
             '            on_landmark_type = None\n'
         )
@@ -3444,6 +3493,20 @@ def main():
                     n += 1
                 except OSError as e:
                     print(f"[on-landmark-patch] trainer beside-call failed: {e}")
+
+    if os.path.exists(DEPLOYER):
+        with open(DEPLOYER, "r", encoding="utf-8") as f:
+            dsrc = f.read()
+        dnew = _ensure_module_above_scene(dsrc)
+        dnew = _rewrite_above_gates(dnew)
+        if dnew != dsrc:
+            try:
+                with open(DEPLOYER, "w", encoding="utf-8") as f:
+                    f.write(dnew)
+                print("[on-landmark-patch] deployer: climb framing follows recipe.above")
+                n += 1
+            except OSError as e:
+                print(f"[on-landmark-patch] deployer above-scene rewrite failed: {e}")
 
     if n:
         print("[on-landmark-patch] people with spec.placement land on that landmark")

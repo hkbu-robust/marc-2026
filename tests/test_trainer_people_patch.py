@@ -147,6 +147,8 @@ class AboveModePatchTests(unittest.TestCase):
         namespace = {"os": os, "random": random}
         exec(compile(source, "<above-char-cycle>", "exec"), namespace)
         self.assertIn("random.shuffle(combos)", patch.NEW_COMBOS)
+        self.assertIn(
+            "(_above_mode or _recipe is not None)", patch.NEW_COMBOS)
         chars = [
             "male_student_01", "female_student_01",
             "professor_01", "student_weight_01",
@@ -451,6 +453,8 @@ class AboveModePatchTests(unittest.TestCase):
         patch = _load_patch()
         self.assertIn("person_prone", patch.NEW_COMBOS)
         self.assertIn("TRAINER_SAR_RECIPES", patch.NEW_COMBOS)
+        self.assertIn("_marc_sar_recipe_cursor_start", patch.NEW_COMBOS)
+        self.assertIn("TRAINER_SAR_RECIPE_CURSOR", patch.NEW_COMBOS)
         self.assertIn("_ON_SEAT_POSES", patch.NEW_COMBOS)
 
     def test_sar_recipes_pin_one_target_per_scene(self):
@@ -476,6 +480,7 @@ class AboveModePatchTests(unittest.TestCase):
         old = dict(os.environ)
         try:
             os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "0"
             os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
             os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
             os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
@@ -532,6 +537,7 @@ class AboveModePatchTests(unittest.TestCase):
         old = dict(os.environ)
         try:
             os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "0"
             os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
             os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
             os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
@@ -577,6 +583,7 @@ class AboveModePatchTests(unittest.TestCase):
         dump_path = "/tmp/marc_sar_recipe.json"
         try:
             os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "0"
             os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
             os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
             os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
@@ -606,6 +613,64 @@ class AboveModePatchTests(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old)
 
+    def test_climb_recipe_dump_sets_above(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-above-dump>", "exec"), namespace)
+        poses = [
+            "person_sitting", "person_walking", "person_lying_down",
+            "person_prone", "person_reaching",
+        ]
+        chars = ["female_student_01", "male_student_01", "professor_01"]
+        old = dict(os.environ)
+        dump_path = "/tmp/marc_sar_recipe.json"
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "0"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            namespace["build"](
+                [{"name": "bench_0"}], list(chars), list(poses),
+            )
+            with open(dump_path, encoding="utf-8") as f:
+                dumped = json.load(f)
+            self.assertEqual(dumped.get("recipe_id"), "sar01_trash_sit")
+            self.assertTrue(dumped.get("above"))
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-above-dump-lie>", "exec"), namespace)
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "2"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            namespace["build"](
+                [{"name": "bench_0"}], list(chars), list(poses),
+            )
+            with open(dump_path, encoding="utf-8") as f:
+                dumped = json.load(f)
+            self.assertEqual(dumped.get("recipe_id"), "sar03_bench_lie")
+            self.assertFalse(bool(dumped.get("above")))
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
     def test_yaml_miss_does_not_use_three_recipe_fallback(self):
         patch = _load_patch()
         self.assertIn("recipes disabled", patch.NEW_COMBOS)
@@ -631,6 +696,7 @@ class AboveModePatchTests(unittest.TestCase):
         cwd = os.getcwd()
         try:
             os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "0"
             os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
             os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
             os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
@@ -649,6 +715,145 @@ class AboveModePatchTests(unittest.TestCase):
             os.chdir(cwd)
             os.environ.clear()
             os.environ.update(old)
+
+    def test_recipe_cursor_env_continues_cycle(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-cursor>", "exec"), namespace)
+        poses = [
+            "person_sitting", "person_walking", "person_lying_down",
+            "person_prone", "person_reaching", "person_bending",
+        ]
+        chars = ["female_student_01", "male_student_01", "professor_01"]
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "3513"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            _, specs = namespace["build"](
+                [{"name": "bench_0"}], list(chars), list(poses),
+            )
+            people = [o for o in specs if o.get("character")]
+            targets = [
+                o for o in people
+                if (o.get("placement") or {}).get("recipe_id")
+            ]
+            self.assertEqual(len(targets), 1, people)
+            self.assertEqual(
+                (targets[0].get("placement") or {}).get("recipe_id"),
+                "sarH6_most_critical",
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_recipe_cursor_follows_existing_scene_dirs(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-cursor-scan>", "exec"), namespace)
+        poses = [
+            "person_sitting", "person_walking", "person_lying_down",
+            "person_prone", "person_reaching", "person_bending",
+        ]
+        chars = ["female_student_01", "male_student_01", "professor_01"]
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ.pop("TRAINER_SAR_RECIPE_CURSOR", None)
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            os.environ["ENV_MARC_SCENARIO"] = "marc2026_chungmu"
+            with tempfile.TemporaryDirectory() as tmp:
+                scene = os.path.join(tmp, "marc2026_chungmu", "scene_03512")
+                os.makedirs(scene)
+                os.environ["MARC_TRAINER_DIR"] = tmp
+                _, specs = namespace["build"](
+                    [{"name": "bench_0"}], list(chars), list(poses),
+                )
+            people = [o for o in specs if o.get("character")]
+            targets = [
+                o for o in people
+                if (o.get("placement") or {}).get("recipe_id")
+            ]
+            self.assertEqual(len(targets), 1, people)
+            self.assertEqual(
+                (targets[0].get("placement") or {}).get("recipe_id"),
+                "sarH6_most_critical",
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_recipe_climber_identity_shuffles(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-char-shuffle>", "exec"), namespace)
+        chars = [
+            "male_student_01", "female_student_01",
+            "professor_01", "student_weight_01",
+        ]
+        poses = ["person_sitting", "person_walking", "person_lying_down"]
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "0"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            seen = []
+            namespace["random"].seed(1)
+            for _ in range(8):
+                _, specs = namespace["build"](
+                    [{"name": "bench_0"}], list(chars), list(poses),
+                )
+                targets = [
+                    p for p in specs
+                    if (p.get("placement") or {}).get("recipe_id")
+                ]
+                self.assertEqual(len(targets), 1, specs)
+                seen.append(targets[0]["character"])
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        self.assertTrue(all(c in chars for c in seen))
+        self.assertNotEqual(seen, [chars[0]] * len(seen))
+        self.assertGreater(len(set(seen)), 1)
 
 
 if __name__ == "__main__":

@@ -136,6 +136,8 @@ services:
       # random pose. 0 = stock radio (one character x all poses).
       TRAINER_PEOPLE_ALL_CHARS: "${TRAINER_PEOPLE_ALL_CHARS:-1}"
       TRAINER_SAR_RECIPES: "${TRAINER_SAR_RECIPES:-0}"
+      # Empty = continue from max scene_* + 1. Set to an int to pin the cycle.
+      TRAINER_SAR_RECIPE_CURSOR: "${TRAINER_SAR_RECIPE_CURSOR:-}"
       # Seat a fraction of people on landmark tops (vending machine, trash can,
       # bench, picnic table). Needed for SAR "climbed on the drink machine".
       TRAINER_PEOPLE_ON_LANDMARK_PROB: "${TRAINER_PEOPLE_ON_LANDMARK_PROB:-0.45}"

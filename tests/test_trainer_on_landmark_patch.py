@@ -56,6 +56,11 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("not placement.get(\"recipe_id\")", patch.NEW_REPOSITION_PL)
         self.assertIn("_marc_place_beside_people", patch.NEW_SNAP)
         self.assertIn("def _marc_place_beside_people", patch.BESIDE_HELPER)
+        self.assertIn("def _marc_above_scene", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_scene()", patch.NEW_SAVE)
+        self.assertIn("_marc_above_scene()", patch.NEW_SETTLE)
+        self.assertIn("_marc_above_scene()", patch.NEW_POSITIONS)
+        self.assertIn("_marc_above_scene()", patch.NEW_CAPTURE_RETURN)
         self.assertIn("_obj_pl", patch.NEW_PLACE_POSE)
         self.assertIn("TRAINER_PEOPLE_SIT_SINK", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_SIT_SINK_SHORT", patch.ABOVE_HELPER)
@@ -110,6 +115,7 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("_marc_above_vend_male4", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_male5", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_male6", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_vend_male7", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_weight", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_weight2", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_weight3", patch.ABOVE_HELPER)
@@ -130,6 +136,8 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("TRAINER_PEOPLE_VEND_FEMALE_SINK", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_VEND_MALE_LIP", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_VEND_MALE_SINK", patch.ABOVE_HELPER)
+        self.assertIn("TRAINER_PEOPLE_VEND_MALE_YAW", patch.ABOVE_HELPER)
+        self.assertIn("TRAINER_PEOPLE_VEND_MALE_FWD", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_VEND_WEIGHT_LIP", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_VEND_WEIGHT_SINK", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_roof_visible", patch.ABOVE_HELPER)
@@ -144,6 +152,7 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("_marc_above_vend_sit_hip", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_weight7", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_weight8", patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_vend_weight9", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_mesh_contact", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_crouch_authored", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_mesh_contact2", patch.ABOVE_HELPER)
@@ -183,6 +192,11 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("_marc_above_vend_female9", patch.ABOVE_HELPER)
         self.assertIn("_marc_above_vend_prof12", patch.ABOVE_HELPER)
         self.assertIn("TRAINER_PEOPLE_VEND_SLOT", patch.ABOVE_HELPER)
+        self.assertIn(
+            'or "male_student" in _ch or "weight" in _ch',
+            patch.ABOVE_HELPER)
+        self.assertIn("_marc_above_vend_weight9", patch.ABOVE_HELPER)
+        self.assertIn("TRAINER_PEOPLE_VEND_MALE_YAW", patch.ABOVE_HELPER)
         self.assertIn('"0.0727"', patch.ABOVE_HELPER)
         self.assertIn('"-0.01"', patch.ABOVE_HELPER)
         self.assertIn('"0.16"', patch.ABOVE_HELPER)
@@ -319,7 +333,8 @@ class OnLandmarkPatchTests(unittest.TestCase):
     def test_colocates_climber_with_target_cell(self):
         patch = _load_patch()
         source = (
-            "def generate_cell_positions(area, n):\n"
+            patch.ABOVE_SCENE_FN
+            + "def generate_cell_positions(area, n):\n"
             "    return [[float(i), 0.0, 0.0] for i in range(n)]\n"
             "def outer():\n"
             "    def _deploy_into():\n"
@@ -355,7 +370,8 @@ class OnLandmarkPatchTests(unittest.TestCase):
     def test_headroom_puts_vending_mid_near_not_on_far_edge(self):
         patch = _load_patch()
         source = (
-            "def generate_cell_positions(area, n):\n"
+            patch.ABOVE_SCENE_FN
+            + "def generate_cell_positions(area, n):\n"
             "    return [[100.0, 100.0, 16.0] for _ in range(n)]\n"
             "def outer():\n"
             "    def _deploy_into():\n"
@@ -398,7 +414,8 @@ class OnLandmarkPatchTests(unittest.TestCase):
     def test_fov_pack_keeps_climb_stack_in_frame_and_scatters_rest(self):
         patch = _load_patch()
         source = (
-            "def generate_cell_positions(area, n):\n"
+            patch.ABOVE_SCENE_FN
+            + "def generate_cell_positions(area, n):\n"
             "    return [[100.0, 100.0, 16.0] for _ in range(n)]\n"
             "def outer():\n"
             "    def _deploy_into():\n"
@@ -453,7 +470,8 @@ class OnLandmarkPatchTests(unittest.TestCase):
     def test_climb_slot_jitters_left_and_right(self):
         patch = _load_patch()
         source = (
-            "def generate_cell_positions(area, n):\n"
+            patch.ABOVE_SCENE_FN
+            + "def generate_cell_positions(area, n):\n"
             "    return [[5.0, 5.0, 16.0] for _ in range(n)]\n"
             "def outer():\n"
             "    def _deploy_into():\n"
@@ -554,6 +572,7 @@ class OnLandmarkPatchTests(unittest.TestCase):
             self.assertIn("_marc_above_vend_male4", text)
             self.assertIn("_marc_above_vend_male5", text)
             self.assertIn("_marc_above_vend_male6", text)
+            self.assertIn("_marc_above_vend_male7", text)
             self.assertIn("_marc_above_vend_weight", text)
             self.assertIn("_marc_above_vend_weight2", text)
             self.assertIn("_marc_above_vend_weight3", text)
@@ -578,6 +597,7 @@ class OnLandmarkPatchTests(unittest.TestCase):
             self.assertIn("_marc_above_vend_sit_hip", text)
             self.assertIn("_marc_above_vend_weight7", text)
             self.assertIn("_marc_above_vend_weight8", text)
+            self.assertIn("_marc_above_vend_weight9", text)
             self.assertIn("_marc_above_vend_mesh_contact", text)
             self.assertIn("_marc_above_crouch_authored", text)
             self.assertIn("_marc_above_vend_mesh_contact2", text)
@@ -598,6 +618,8 @@ class OnLandmarkPatchTests(unittest.TestCase):
             self.assertIn("TRAINER_PEOPLE_VEND_FEMALE_SINK", text)
             self.assertIn("TRAINER_PEOPLE_VEND_MALE_LIP", text)
             self.assertIn("TRAINER_PEOPLE_VEND_MALE_SINK", text)
+            self.assertIn("TRAINER_PEOPLE_VEND_MALE_YAW", text)
+            self.assertIn("TRAINER_PEOPLE_VEND_MALE_FWD", text)
             self.assertIn("TRAINER_PEOPLE_VEND_WEIGHT_LIP", text)
             self.assertIn("TRAINER_PEOPLE_VEND_WEIGHT_SINK", text)
             self.assertIn("TRAINER_PEOPLE_VEND_LIP", text)
@@ -679,6 +701,40 @@ class OnLandmarkPatchTests(unittest.TestCase):
             self.assertLessEqual(abs(pt[1]), side + 1e-9)
         self.assertNotAlmostEqual(left[1], right[1])
         self.assertNotAlmostEqual(left[1], center[1])
+
+    def test_recipe_above_rewrites_env_climb_gates(self):
+        patch = _load_patch()
+        env_on = (
+            '        if str(os.environ.get("TRAINER_PEOPLE_ABOVE", "0"))'
+            '.lower() not in (\n'
+            '                "0", "false", "no", "off", ""):\n'
+            '            skip = True\n'
+        )
+        env_off = (
+            '    if not render_ok and str(\n'
+            '            os.environ.get("TRAINER_PEOPLE_ABOVE", "0")\n'
+            '    ).lower() in ("0", "false", "no", "off", ""):\n'
+            '        warn()\n'
+        )
+        self.assertIn("_marc_above_scene()", patch._rewrite_above_gates(env_on))
+        self.assertIn("not _marc_above_scene()", patch._rewrite_above_gates(env_off))
+        ns = {}
+        exec(compile(patch.ABOVE_SCENE_FN, "<above-scene>", "exec"), ns)
+        import json
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            with open("/tmp/marc_sar_recipe.json", "w", encoding="utf-8") as f:
+                json.dump({"above": True}, f)
+            self.assertTrue(ns["_marc_above_scene"]())
+            with open("/tmp/marc_sar_recipe.json", "w", encoding="utf-8") as f:
+                json.dump({"above": False}, f)
+            self.assertFalse(ns["_marc_above_scene"]())
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "1"
+            self.assertTrue(ns["_marc_above_scene"]())
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
 
 
 if __name__ == "__main__":

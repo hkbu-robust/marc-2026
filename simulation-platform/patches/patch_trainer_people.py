@@ -398,6 +398,34 @@ NEW_COMBOS = '''    combos = []
     _seats = [t for t in _lm_types if _marc_is_seat(t)]
     _wrongs = [t for t in _lm_types if t in _WRONG or _marc_people_is_vehicle(t)]
     _pose_set = set(all_poses)
+    def _marc_sar_recipe_cursor_start():
+        raw = os.environ.get("TRAINER_SAR_RECIPE_CURSOR", "")
+        if str(raw).strip() != "":
+            try:
+                return max(0, int(raw))
+            except (TypeError, ValueError):
+                pass
+        scenario = str(os.environ.get("ENV_MARC_SCENARIO") or "").strip() or (
+            "marc2026_chungmu")
+        root = os.path.join(
+            os.environ.get("MARC_TRAINER_DIR") or "/metacom2026/trainer_output",
+            scenario,
+        )
+        best = -1
+        try:
+            names = os.listdir(root)
+        except OSError:
+            return 0
+        for name in names:
+            if not str(name).startswith("scene_"):
+                continue
+            try:
+                n = int(str(name).split("_", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if n > best:
+                best = n
+        return best + 1
     def _marc_sar_recipe_list():
         paths = [
             "/marc-patches/sar_recipes.yaml",
@@ -436,6 +464,7 @@ NEW_COMBOS = '''    combos = []
                     "surface_anchor": rec.get("surface_anchor"),
                     "tip_landmark": rec.get("tip_landmark"),
                     "relation": rec.get("relation"),
+                    "above": bool(rec.get("above")),
                     "command": rec.get("command"),
                     "situation": rec.get("situation"),
                     "scene_hint": rec.get("scene_hint"),
@@ -450,7 +479,9 @@ NEW_COMBOS = '''    combos = []
             try:
                 _rc = int(_marc_sar_recipe_cursor)
             except (NameError, TypeError, ValueError):
-                _rc = 0
+                _rc = _marc_sar_recipe_cursor_start()
+                print("[people-patch] SAR recipe cursor start=%d (%s)" % (
+                    _rc, _recs[_rc % len(_recs)].get("id")))
             _recipe = _recs[_rc % len(_recs)]
             _marc_sar_recipe_cursor = _rc + 1
             _need = _recipe.get("support_landmark")
@@ -467,9 +498,9 @@ NEW_COMBOS = '''    combos = []
                 if _extra and not any(_marc_lm_typ(s) == _extra for s in landmarks):
                     landmarks.append({"name": "%s_0" % _extra})
             _marc_dump_recipe(_recipe)
-    if _above_mode and combos:
-        # Climber identity is random per scene. Round-robin locked the
-        # same mesh to the same CCTV as cameras cycled.
+    if (_above_mode or _recipe is not None) and combos:
+        # Climber identity is random per scene. Recipe mode used catalog
+        # order, so every stacked sitter was male_student_01.
         random.shuffle(combos)
     _climber_placed = False
     _recipe_target_placed = False
@@ -1210,9 +1241,13 @@ def main():
         if "def _marc_sar_recipe_list():" in src and "target_character" not in src:
             _a = src.find("    def _marc_sar_recipe_list():")
             _b = src.find("    if _above_mode and combos:")
+            if _b < 0:
+                _b = src.find(
+                    "    if (_above_mode or _recipe is not None) and combos:")
+            _shuf_if = "    if (_above_mode or _recipe is not None) and combos:"
             _new_rec = NEW_COMBOS[
                 NEW_COMBOS.find("    def _marc_sar_recipe_list():"):
-                NEW_COMBOS.find("    if _above_mode and combos:")
+                NEW_COMBOS.find(_shuf_if)
             ]
             if _a >= 0 and _b > _a and _new_rec:
                 src = src[:_a] + _new_rec + src[_b:]
@@ -1244,11 +1279,11 @@ def main():
                 1,
             )
         if "TRAINER_SAR_RECIPES" not in src and "_pose_set = set(all_poses)" in src:
+            _shuf_if = "    if (_above_mode or _recipe is not None) and combos:\n"
             _old_pose_set = "    _pose_set = set(all_poses)\n    if _above_mode and combos:\n"
             _new_pose_set = NEW_COMBOS[
                 NEW_COMBOS.find("    _pose_set = set(all_poses)\n"):
-                NEW_COMBOS.find("    if _above_mode and combos:\n")
-                + len("    if _above_mode and combos:\n")
+                NEW_COMBOS.find(_shuf_if) + len(_shuf_if)
             ]
             if _old_pose_set in src and _new_pose_set:
                 src = src.replace(_old_pose_set, _new_pose_set, 1)
@@ -1270,6 +1305,70 @@ def main():
             if _old_loop in src and _new_loop:
                 src = src.replace(_old_loop, _new_loop, 1)
                 changed = True
+        if "def _marc_sar_recipe_cursor_start():" not in src and (
+                "def _marc_sar_recipe_list():" in src):
+            helper = NEW_COMBOS[
+                NEW_COMBOS.find("    def _marc_sar_recipe_cursor_start():"):
+                NEW_COMBOS.find("    def _marc_sar_recipe_list():")
+            ]
+            if helper:
+                src = src.replace(
+                    "    def _marc_sar_recipe_list():",
+                    helper + "    def _marc_sar_recipe_list():",
+                    1,
+                )
+                changed = True
+        _old_rc = (
+            "            except (NameError, TypeError, ValueError):\n"
+            "                _rc = 0\n"
+        )
+        _new_rc = (
+            "            except (NameError, TypeError, ValueError):\n"
+            "                _rc = _marc_sar_recipe_cursor_start()\n"
+            "                print(\"[people-patch] SAR recipe cursor start=%d (%s)\" % (\n"
+            "                    _rc, _recs[_rc % len(_recs)].get(\"id\")))\n"
+        )
+        if _old_rc in src:
+            src = src.replace(_old_rc, _new_rc, 1)
+            changed = True
+        _old_dump_rel = (
+            '                    "relation": rec.get("relation"),\n'
+            '                    "command": rec.get("command"),\n'
+        )
+        _new_dump_rel = (
+            '                    "relation": rec.get("relation"),\n'
+            '                    "above": bool(rec.get("above")),\n'
+            '                    "command": rec.get("command"),\n'
+        )
+        if _old_dump_rel in src and '"above": bool(rec.get("above"))' not in src:
+            src = src.replace(_old_dump_rel, _new_dump_rel, 1)
+            changed = True
+        _old_shuf = (
+            "    if _above_mode and combos:\n"
+            "        # Climber identity is random per scene. Round-robin locked the\n"
+            "        # same mesh to the same CCTV as cameras cycled.\n"
+            "        random.shuffle(combos)\n"
+        )
+        _new_shuf = (
+            "    if (_above_mode or _recipe is not None) and combos:\n"
+            "        # Climber identity is random per scene. Recipe mode used catalog\n"
+            "        # order, so every stacked sitter was male_student_01.\n"
+            "        random.shuffle(combos)\n"
+        )
+        if _old_shuf in src:
+            src = src.replace(_old_shuf, _new_shuf, 1)
+            changed = True
+        _old_shuf_plain = (
+            "    if _above_mode and combos:\n"
+            "        random.shuffle(combos)\n"
+        )
+        _new_shuf_plain = (
+            "    if (_above_mode or _recipe is not None) and combos:\n"
+            "        random.shuffle(combos)\n"
+        )
+        if _old_shuf_plain in src:
+            src = src.replace(_old_shuf_plain, _new_shuf_plain, 1)
+            changed = True
         if changed:
             if not _write(src):
                 return 0
@@ -1319,11 +1418,12 @@ def _log_people():
     on_off = "ON" if str(above).strip().lower() not in (
         "0", "false", "no", "off", "") else "OFF (ground scenes, no stacking)"
     recipes = os.environ.get("TRAINER_SAR_RECIPES", "0")
+    cursor = os.environ.get("TRAINER_SAR_RECIPE_CURSOR", "") or "auto"
     print(f"[people-patch] all identities per scene "
           f"(TRAINER_PEOPLE_ALL_CHARS={mode}); chars={chars} poses={poses}; "
           f"on-landmark p={on_p}; "
           f"above={above} [{on_off}] clearance={clearance} weights={weights}; "
-          f"sar_recipes={recipes}")
+          f"sar_recipes={recipes} recipe_cursor={cursor}")
 
 
 if __name__ == "__main__":
