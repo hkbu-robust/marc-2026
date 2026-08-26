@@ -52,6 +52,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    volumes:
+      - "${MARC_ARTIFACTS_DIR:-../artifacts}:/agent/demo/artifacts"
     # (Optional) To use a scenario file for obstacle injection, mount it and set MARC_SCENARIO_FILE:
     #   add  MARC_SCENARIO_FILE: "/agent/my_scenario.yaml"  to environment
     # volumes:

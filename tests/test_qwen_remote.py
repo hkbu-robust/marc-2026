@@ -15,6 +15,7 @@ from marc_agent.perception.qwen_remote import (
     QwenRemoteResponseError,
     RemoteQwenSarVerifier,
     build_remote_payload,
+    check_remote_health,
 )
 from marc_agent.perception.qwen_runtime import QwenRemoteConfig
 from marc_agent.perception.sar_selection import CandidateBoard
@@ -88,6 +89,25 @@ class QwenRemoteTests(unittest.TestCase):
         self.assertIn("dispatch endpoint=", output)
         self.assertIn("error=QwenRemoteConnectionError", output)
         self.assertNotIn("test-secret", output)
+
+    def test_health_check_requires_configured_served_model(self):
+        response = json.dumps({"data": [{"id": "qwen3-vl-8b"}]}).encode()
+        captured = {}
+
+        def get(url, headers, timeout):
+            captured.update(url=url, headers=headers, timeout=timeout)
+            return response
+
+        self.assertEqual(
+            ("qwen3-vl-8b",),
+            check_remote_health(_config(), get=get),
+        )
+        self.assertEqual("http://workstation:8000/v1/models", captured["url"])
+        self.assertNotIn("test-secret", captured["url"])
+
+        missing = json.dumps({"data": [{"id": "different-model"}]}).encode()
+        with self.assertRaisesRegex(QwenRemoteResponseError, "not served"):
+            check_remote_health(_config(), get=lambda *_args: missing)
 
     def test_real_http_transport_against_fake_vllm_server(self):
         captured = {}

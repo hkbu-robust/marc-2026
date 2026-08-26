@@ -46,6 +46,7 @@ class QwenRemoteResponseError(QwenRemoteError):
 
 
 HttpPost = Callable[[str, bytes, Mapping[str, str], float], bytes]
+HttpGet = Callable[[str, Mapping[str, str], float], bytes]
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,57 @@ def _post(url: str, body: bytes, headers: Mapping[str, str], timeout_s: float) -
         raise QwenRemoteConnectionError(f"Could not reach vLLM: {exc.reason}") from exc
     except OSError as exc:
         raise QwenRemoteConnectionError(f"Could not reach vLLM: {exc}") from exc
+
+
+def _get(url: str, headers: Mapping[str, str], timeout_s: float) -> bytes:
+    request = Request(url, headers=dict(headers), method="GET")
+    try:
+        with urlopen(request, timeout=timeout_s) as response:
+            return response.read()
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise QwenRemoteAuthenticationError(
+                f"vLLM rejected the configured API key (HTTP {exc.code})"
+            ) from exc
+        raise QwenRemoteServerError(f"vLLM returned HTTP {exc.code}") from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise QwenRemoteTimeout(
+            f"vLLM did not respond within {timeout_s:.1f}s"
+        ) from exc
+    except URLError as exc:
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise QwenRemoteTimeout(
+                f"vLLM did not respond within {timeout_s:.1f}s"
+            ) from exc
+        raise QwenRemoteConnectionError(f"Could not reach vLLM: {exc.reason}") from exc
+    except OSError as exc:
+        raise QwenRemoteConnectionError(f"Could not reach vLLM: {exc}") from exc
+
+
+def check_remote_health(
+    config: QwenRemoteConfig,
+    *,
+    get: HttpGet = _get,
+) -> tuple[str, ...]:
+    """Verify vLLM authentication and that the configured served model exists."""
+    raw = get(
+        config.models_url,
+        {"Authorization": f"Bearer {config.api_key}"},
+        config.timeout_s,
+    )
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+        model_ids = tuple(str(item["id"]) for item in payload["data"])
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise QwenRemoteResponseError(
+            "vLLM /models response did not contain data[].id"
+        ) from exc
+    if config.model_name not in model_ids:
+        raise QwenRemoteResponseError(
+            f"configured model {config.model_name!r} is not served; "
+            f"available={','.join(model_ids) or 'none'}"
+        )
+    return model_ids
 
 
 def image_data_url(image: object, *, quality: int) -> str:

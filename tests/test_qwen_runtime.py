@@ -75,6 +75,7 @@ class QwenRuntimeTests(unittest.TestCase):
             "http://10.0.0.2:8000/v1/chat/completions",
             config.chat_completions_url,
         )
+        self.assertEqual("http://10.0.0.2:8000/v1/models", config.models_url)
         self.assertEqual("qwen-test", config.model_name)
         self.assertEqual(4.5, config.timeout_s)
         self.assertEqual(80, config.jpeg_quality)

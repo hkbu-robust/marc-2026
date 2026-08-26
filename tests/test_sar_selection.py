@@ -18,6 +18,7 @@ from marc_agent.perception.sar_selection import (
 )
 from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
+    log_qwen_startup_status,
     run_stage1_candidate_pipeline,
 )
 from marc_agent.types import (
@@ -248,6 +249,45 @@ class SarSelectionTests(unittest.TestCase):
         output = "\n".join(captured.output)
         self.assertIn("backend=local", output)
         self.assertIn("reason=non_sar_request", output)
+
+    def test_remote_startup_health_is_visible_and_does_not_log_key(self):
+        env = {
+            "MARC_SAR_DETECTOR": "qwen",
+            "MARC_QWEN_BACKEND": "remote",
+            "MARC_QWEN_BASE_URL": "http://workstation:8000/v1",
+            "MARC_QWEN_API_KEY": "private-test-key",
+        }
+        with (
+            patch.dict("os.environ", env),
+            patch(
+                "marc_agent.perception.stage1_pipeline.check_remote_health",
+                return_value=("qwen3-vl-8b",),
+            ),
+            self.assertLogs("marc_agent.stage1_pipeline", level="INFO") as captured,
+        ):
+            log_qwen_startup_status()
+        output = "\n".join(captured.output)
+        self.assertIn("health=ok", output)
+        self.assertIn("qwen3-vl-8b", output)
+        self.assertNotIn("private-test-key", output)
+
+    def test_remote_startup_failure_is_nonfatal(self):
+        env = {
+            "MARC_SAR_DETECTOR": "qwen",
+            "MARC_QWEN_BACKEND": "remote",
+            "MARC_QWEN_BASE_URL": "http://workstation:8000/v1",
+            "MARC_QWEN_API_KEY": "private-test-key",
+        }
+        with (
+            patch.dict("os.environ", env),
+            patch(
+                "marc_agent.perception.stage1_pipeline.check_remote_health",
+                side_effect=ConnectionError("connection refused"),
+            ),
+            self.assertLogs("marc_agent.stage1_pipeline", level="INFO") as captured,
+        ):
+            log_qwen_startup_status()
+        self.assertIn("health=failed", "\n".join(captured.output))
 
     def test_parse_failure_does_not_fetch_cctv(self):
         called = False

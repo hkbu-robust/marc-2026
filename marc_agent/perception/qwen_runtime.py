@@ -74,6 +74,10 @@ class QwenRemoteConfig:
     def chat_completions_url(self) -> str:
         return f"{self.base_url}/chat/completions"
 
+    @property
+    def models_url(self) -> str:
+        return f"{self.base_url}/models"
+
     @classmethod
     def load(
         cls,

@@ -27,6 +27,7 @@ from marc_agent.navigation_runtime import Stage2Navigator
 from marc_agent.perception.cctv_dump import maybe_dump_cctv_round
 from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
+    log_qwen_startup_status,
     run_stage1_candidate_pipeline,
 )
 from marc_agent.pick_runtime import PickRuntime
@@ -379,6 +380,7 @@ def main():
         format="[%(asctime)s] %(name)s %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    log_qwen_startup_status()
     DemoParticipant().run()
 
 

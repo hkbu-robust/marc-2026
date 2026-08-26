@@ -17,14 +17,61 @@ from marc_agent.perception.sar_selection import (
     Verifier,
     select_sar_candidate,
 )
-from marc_agent.perception.qwen_remote import RemoteQwenSarVerifier
-from marc_agent.perception.qwen_runtime import QwenBackend, configured_backend
+from marc_agent.perception.qwen_remote import (
+    RemoteQwenSarVerifier,
+    check_remote_health,
+)
+from marc_agent.perception.qwen_runtime import (
+    QwenBackend,
+    QwenRemoteConfig,
+    configured_backend,
+)
 from marc_agent.perception.stage1_detect import detect_stage1_round
 from marc_agent.types import CctvDetectionRound, CctvRoundMetrics
 
 
 Detector = Callable[..., CctvDetectionRound]
 log = logging.getLogger("marc_agent.stage1_pipeline")
+
+
+def log_qwen_startup_status() -> None:
+    """Log configured Qwen mode and non-fatally probe a remote vLLM server."""
+    mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
+    if mode not in {"qwen", "qwen-remote"}:
+        log.info("[qwen-startup] disabled mode=%s", mode)
+        return
+    try:
+        backend = QwenBackend.REMOTE if mode == "qwen-remote" else configured_backend()
+        if backend is QwenBackend.LOCAL:
+            verifier = QwenSarVerifier()
+            log.info(
+                "[qwen-startup] configured backend=local model_dir=%s",
+                verifier.config.model_dir,
+            )
+            return
+        config = QwenRemoteConfig.load()
+        log.info(
+            "[qwen-startup] configured backend=remote models_url=%s model=%s "
+            "timeout=%.1fs",
+            config.models_url,
+            config.model_name,
+            config.timeout_s,
+        )
+        started = time.perf_counter()
+        model_ids = check_remote_health(config)
+        log.info(
+            "[qwen-startup] health=ok model=%s available=%s latency=%.0fms",
+            config.model_name,
+            ",".join(model_ids),
+            (time.perf_counter() - started) * 1000.0,
+        )
+    except Exception as exc:
+        log.warning(
+            "[qwen-startup] health=failed error=%s detail=%s; "
+            "SAR rounds will use deterministic fallback if the failure persists",
+            type(exc).__name__,
+            exc,
+        )
 
 
 @dataclass(frozen=True)
@@ -128,6 +175,14 @@ def run_stage1_candidate_pipeline(
             f"command_parse:{exc.code.value}",
             (time.perf_counter() - started) * 1000.0,
         )
+
+    log.info(
+        "[stage1-pipeline] parsed target_type=%s situation=%s landmark=%s relation=%s",
+        parsed.target_type,
+        parsed.situation.value if parsed.situation else None,
+        parsed.landmark,
+        parsed.relation.value if parsed.relation else None,
+    )
 
     try:
         detections = detector(client, stub_path=stub_path)
