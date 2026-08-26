@@ -606,26 +606,53 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                     str(d.get("class") or "") == _t
                     or str(d.get("class") or "").startswith(_t)
                     for d in _dets)
+            _img = (active_payload or {}).get("image") or {}
+            try:
+                _ih = float(_img.get("height") or 0.0)
+            except (TypeError, ValueError):
+                _ih = 0.0
+            _margin = max(8.0, 0.03 * _ih) if _ih else 8.0
+            _headroom = True
+            for _d in _dets:
+                _b = _d.get("bbox") or []
+                if len(_b) != 4:
+                    continue
+                try:
+                    _y0 = min(float(_b[1]), float(_b[3]))
+                except (TypeError, ValueError):
+                    continue
+                _cls = str(_d.get("class") or "")
+                if _d.get("recipe_id") and _y0 <= _margin:
+                    _headroom = False
+                    break
+                if _target and (
+                        _cls == _target or _cls.startswith(_target)
+                        ) and _y0 <= _margin:
+                    _headroom = False
+                    break
             try:
                 from world import object_deployer as _od_view
-                _od_view._marc_above_target_in_view = _target_in_view
+                _od_view._marc_above_target_in_view = (
+                    _target_in_view and _headroom)
             except Exception:
                 pass
-            # 3D raycast+joint contact only. 2D boxes and AABBs disagree
-            # with a pitched CCTV view and are not a placement oracle.
-            # Skip save (and retry) if the climb landmark is not in the
-            # camera at all — scene 0 often captures before the CCTV
-            # looks at the spawned cabinet.
-            _active_valid = _n_placed > 0 and _target_in_view
+            # Skip save if the climb landmark is off camera, or if the
+            # roof / climber is cropped at the top of the CCTV frame.
+            _active_valid = (
+                _n_placed > 0 and _target_in_view and _headroom)
             if _n_placed <= 0:
                 log.warning(
                     f"Above scene {scene_id}: constructed stack invariant "
                     f"failed (target={_target or '-'} placed={_n_placed}); "
                     f"skip save")
-            if not _target_in_view:
+            elif not _target_in_view:
                 log.warning(
                     f"Above scene {scene_id}: target={_target or '-'} "
                     f"not in CCTV detections; skip save")
+            elif not _headroom:
+                log.warning(
+                    f"Above scene {scene_id}: target={_target or '-'} "
+                    f"roof/climber top-clipped; skip save")
             else:
                 log.info(
                     f"Above scene {scene_id}: target={_target or '-'} "
@@ -1436,7 +1463,7 @@ def above_contact_ok(foot_xyz, lm_lo, lm_hi, top_z, max_gap=0.06):
 ABOVE_HELPER = r'''
 ''' + ABOVE_SCENE_FN + r'''
 def _marc_place_above_people(mission_id, objects, configurations=None):
-    """[marc-patch] _marc_above_aabb_stack: person on roof (_marc_above_freeze, _marc_above_always_on_top, _marc_above_joint_seat, _marc_above_ray_roof, _marc_above_sit_sink, _marc_above_sit_sink_70, _marc_above_sit_sink_short, _marc_above_vend_drape, _marc_above_vend_drape_lip, _marc_above_trash_raise, _marc_above_hydrant_crouch, _marc_above_trash_crouch, _marc_above_vend_farther, _marc_above_vend_farther2, _marc_above_vend_farther3, _marc_above_vend_farther4, _marc_above_vend_not_too_far, _marc_above_vend_closer, _marc_above_vend_sit_yaw, _marc_above_vend_glass_drape, _marc_above_vend_sit_fix, _marc_above_vend_sit_nudge, _marc_above_vend_sit_unraise, _marc_above_vend_lip_fwd, _marc_above_vend_lip_fwd2, _marc_above_vend_lip_fwd3, _marc_above_vend_lip_back, _marc_above_vend_prof, _marc_above_vend_prof2, _marc_above_vend_prof3, _marc_above_vend_prof4, _marc_above_vend_prof5, _marc_above_vend_prof6, _marc_above_vend_female, _marc_above_vend_female2, _marc_above_vend_female3, _marc_above_vend_female4, _marc_above_vend_female5, _marc_above_vend_female6, _marc_above_vend_female7, _marc_above_vend_male, _marc_above_vend_male2, _marc_above_vend_male3, _marc_above_vend_male4, _marc_above_vend_male5, _marc_above_vend_weight, _marc_above_vend_weight2, _marc_above_vend_weight3, _marc_above_vend_weight4, _marc_above_vend_weight5, _marc_above_no_closeup, _marc_above_mid_field, _marc_above_roof_in_view, _marc_above_vend_abs_frame, _marc_above_vend_leg_yaw, _marc_above_camera_frame, _marc_above_vend_mesh_seat, _marc_above_vend_mid_dist, _marc_above_vend_on_roof, _marc_above_vend_male6, _marc_above_vend_prof7, _marc_above_vend_female8, _marc_above_vend_weight6, _marc_above_vend_roof_visible, _marc_above_vend_joint_z, _marc_above_vend_prof8, _marc_above_vend_mesh_xy, _marc_above_vend_female_yaw, _marc_above_vend_prof9, _marc_above_vend_weight_yaw, _marc_above_vend_female_fwd, _marc_above_vend_stand, _marc_above_vend_prof10, _marc_above_vend_prof_yaw, _marc_above_vend_sit_hip, _marc_above_vend_weight7, _marc_above_vend_weight8, _marc_above_vend_mesh_contact, _marc_above_crouch_authored, _marc_above_vend_mesh_contact2, _marc_above_vend_mesh_nudge, _marc_above_vend_mesh_snap, _marc_above_lock_contact, _marc_above_joint_only, _marc_above_vend_prof11, _marc_above_vend_slot, _marc_above_vend_female9, _marc_above_vend_prof12, _marc_above_vend_male7, _marc_above_vend_weight9)."""
+    """[marc-patch] _marc_above_aabb_stack: person on roof (_marc_above_freeze, _marc_above_always_on_top, _marc_above_joint_seat, _marc_above_ray_roof, _marc_above_sit_sink, _marc_above_sit_sink_70, _marc_above_sit_sink_short, _marc_above_vend_drape, _marc_above_vend_drape_lip, _marc_above_trash_raise, _marc_above_hydrant_crouch, _marc_above_trash_crouch, _marc_above_vend_farther, _marc_above_vend_farther2, _marc_above_vend_farther3, _marc_above_vend_farther4, _marc_above_vend_not_too_far, _marc_above_vend_closer, _marc_above_vend_sit_yaw, _marc_above_vend_glass_drape, _marc_above_vend_sit_fix, _marc_above_vend_sit_nudge, _marc_above_vend_sit_unraise, _marc_above_vend_lip_fwd, _marc_above_vend_lip_fwd2, _marc_above_vend_lip_fwd3, _marc_above_vend_lip_back, _marc_above_vend_prof, _marc_above_vend_prof2, _marc_above_vend_prof3, _marc_above_vend_prof4, _marc_above_vend_prof5, _marc_above_vend_prof6, _marc_above_vend_female, _marc_above_vend_female2, _marc_above_vend_female3, _marc_above_vend_female4, _marc_above_vend_female5, _marc_above_vend_female6, _marc_above_vend_female7, _marc_above_vend_male, _marc_above_vend_male2, _marc_above_vend_male3, _marc_above_vend_male4, _marc_above_vend_male5, _marc_above_vend_weight, _marc_above_vend_weight2, _marc_above_vend_weight3, _marc_above_vend_weight4, _marc_above_vend_weight5, _marc_above_no_closeup, _marc_above_mid_field, _marc_above_roof_in_view, _marc_above_vend_abs_frame, _marc_above_vend_leg_yaw, _marc_above_camera_frame, _marc_above_vend_mesh_seat, _marc_above_vend_mid_dist, _marc_above_vend_on_roof, _marc_above_vend_male6, _marc_above_vend_prof7, _marc_above_vend_female8, _marc_above_vend_weight6, _marc_above_vend_roof_visible, _marc_above_vend_joint_z, _marc_above_vend_prof8, _marc_above_vend_mesh_xy, _marc_above_vend_female_yaw, _marc_above_vend_prof9, _marc_above_vend_weight_yaw, _marc_above_vend_female_fwd, _marc_above_vend_stand, _marc_above_vend_prof10, _marc_above_vend_prof_yaw, _marc_above_vend_sit_hip, _marc_above_vend_weight7, _marc_above_vend_weight8, _marc_above_vend_mesh_contact, _marc_above_crouch_authored, _marc_above_vend_mesh_contact2, _marc_above_vend_mesh_nudge, _marc_above_vend_mesh_snap, _marc_above_lock_contact, _marc_above_joint_only, _marc_above_vend_prof11, _marc_above_vend_slot, _marc_above_vend_female9, _marc_above_vend_prof12, _marc_above_vend_male7, _marc_above_vend_weight9, _marc_above_headroom)."""
     jobs = []
     for spec in objects or []:
         pl = spec.get("placement") or {}
@@ -1518,7 +1545,7 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 pass
         return None
 
-    def _frame_landmark(lm, roof_z=None, typ=""):
+    def _frame_landmark(lm, roof_z=None, typ="", pose=""):
         """Put the landmark ROOF on a camera ray so it stays in view."""
         rng = _world_range(lm)
         cam = _camera_prim()
@@ -1538,10 +1565,26 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
                 return rng
             parity = sum(ord(ch) for ch in str(mission_id)) % 2
             u = 0.40 if parity == 0 else 0.60
-            # _marc_above_vend_roof_visible: these CCTVs sit ~1m above a
-            # vending roof. A 6m XY push parks the roof at y0=0 and crops
-            # the sitter. Close-ups are required for a visible stack.
-            v = 0.50 if typ == "vending_machine" else 0.55
+            # _marc_above_headroom: roof at v=0.50 crops the sitter off
+            # the top of these low CCTVs. Park the roof in the lower
+            # midfield so the person on it stays in frame.
+            _pose = str(pose or "").lower()
+            if typ == "vending_machine":
+                _v_key = "TRAINER_PEOPLE_VEND_FRAME_V"
+                _v_def = ("0.74" if (
+                    "reaching" in _pose or "walking" in _pose
+                ) else "0.66")
+            elif typ == "postbox":
+                _v_key = "TRAINER_PEOPLE_POST_FRAME_V"
+                _v_def = "0.62"
+            else:
+                _v_key = "TRAINER_PEOPLE_CLIMB_FRAME_V"
+                _v_def = "0.58"
+            try:
+                v = float(__import__("os").environ.get(
+                    _v_key, _v_def) or _v_def)
+            except (TypeError, ValueError):
+                v = float(_v_def)
             ray_local = Gf.Vec3d(
                 (2.0 * u - 1.0) * 0.5 * h_ap,
                 (1.0 - 2.0 * v) * 0.5 * v_ap,
@@ -2427,13 +2470,13 @@ def _marc_place_above_people(mission_id, objects, configurations=None):
             continue
         ordered, roof_lo, roof_hi, body_lo, body_hi = tops
         cx, cy, top_z = ordered[0]
-        _frame_landmark(lm, top_z, typ)
+        pose = str(spec.get("type") or "")
+        _frame_landmark(lm, top_z, typ, pose)
         tops = _top_candidates(lm)
         if tops is None:
             continue
         ordered, roof_lo, roof_hi, body_lo, body_hi = tops
         cx, cy, top_z = ordered[0]
-        pose = str(spec.get("type") or "")
         sink = 0.0
         if "sitting" in pose:
             if typ == "vending_machine":
@@ -3050,6 +3093,7 @@ def _ensure_above_helper(path):
         and "_marc_above_vend_female9" in src
         and "_marc_above_vend_prof12" in src
         and "_marc_above_camera_frame" in src
+        and "_marc_above_headroom" in src
         and "RemoveAPI" in src
         and "GetPointsAttr" in src
         and "def _marc_nudge_above_nearer" in src)

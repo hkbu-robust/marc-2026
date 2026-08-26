@@ -497,6 +497,27 @@ NEW_COMBOS = '''    combos = []
             for _extra in _extras:
                 if _extra and not any(_marc_lm_typ(s) == _extra for s in landmarks):
                     landmarks.append({"name": "%s_0" % _extra})
+            if _recipe.get("above"):
+                # Extra climb cabinets sit on the FOV rim and show as a
+                # cropped "vending with nobody on it." Keep the recipe
+                # support plus seats / non-climb clutter.
+                _keep = set()
+                for _k in (
+                        _recipe.get("support_landmark"),
+                        _recipe.get("surface_anchor"),
+                        _recipe.get("tip_landmark"),
+                ):
+                    if _k:
+                        _keep.add(_k)
+                for _extra in list(_recipe.get("extra_landmarks") or []):
+                    if _extra:
+                        _keep.add(_extra)
+                landmarks[:] = [
+                    s for s in landmarks
+                    if (_marc_lm_typ(s) in _keep
+                        or _marc_is_seat(_marc_lm_typ(s))
+                        or not _marc_is_above_ok(_marc_lm_typ(s)))
+                ]
             _marc_dump_recipe(_recipe)
     if (_above_mode or _recipe is not None) and combos:
         # Climber identity is random per scene. Recipe mode used catalog
@@ -1368,6 +1389,22 @@ def main():
         )
         if _old_shuf_plain in src:
             src = src.replace(_old_shuf_plain, _new_shuf_plain, 1)
+            changed = True
+        _old_extra_dump = (
+            "            for _extra in _extras:\n"
+            "                if _extra and not any(_marc_lm_typ(s) == _extra for s in landmarks):\n"
+            "                    landmarks.append({\"name\": \"%s_0\" % _extra})\n"
+            "            _marc_dump_recipe(_recipe)\n"
+        )
+        _new_extra_dump = NEW_COMBOS[
+            NEW_COMBOS.find("            for _extra in _extras:\n"):
+            NEW_COMBOS.find("            _marc_dump_recipe(_recipe)\n")
+            + len("            _marc_dump_recipe(_recipe)\n")
+        ]
+        if (_old_extra_dump in src
+                and "Extra climb cabinets sit on the FOV rim" not in src
+                and _new_extra_dump):
+            src = src.replace(_old_extra_dump, _new_extra_dump, 1)
             changed = True
         if changed:
             if not _write(src):

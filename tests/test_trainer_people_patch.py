@@ -233,6 +233,53 @@ class AboveModePatchTests(unittest.TestCase):
         self.assertEqual(
             climbers[0]["placement"]["on_landmark_type"], "vending_machine")
 
+    def test_recipe_above_drops_extra_climb_types(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<recipe-collapse>", "exec"), namespace)
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "1"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
+            os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
+            landmarks, _specs = namespace["build"](
+                [
+                    {"name": "bench_0"},
+                    {"name": "hydrant_0"},
+                    {"name": "trash_can_0"},
+                    {"name": "vending_machine_1"},
+                ],
+                ["female_student_01"],
+                ["person_sitting", "person_walking"],
+            )
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        names = {s["name"] for s in landmarks}
+        self.assertIn("vending_machine_1", names)
+        self.assertIn("bench_0", names)
+        self.assertNotIn("hydrant_0", names)
+        self.assertNotIn("trash_can_0", names)
+        climbers = [
+            p for p in _specs if (p.get("placement") or {}).get("above")
+        ]
+        self.assertEqual(len(climbers), 1)
+        self.assertEqual(
+            climbers[0]["placement"]["on_landmark_type"], "vending_machine")
+
     def test_injects_climber_when_catalog_people_are_empty(self):
         patch = _load_patch()
         source = (
