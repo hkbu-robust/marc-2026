@@ -142,7 +142,7 @@ def qwen_ready(model_dir: Path) -> bool:
         dtype="bfloat16",
         device_map="auto",
         attention_implementation="sdpa",
-        max_new_tokens=8,
+        max_new_tokens=48,
     )
     return bundle_status(config).ready
 

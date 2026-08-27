@@ -28,7 +28,7 @@ class QwenRuntimeTests(unittest.TestCase):
             dtype="bfloat16",
             device_map="auto",
             attention_implementation="sdpa",
-            max_new_tokens=8,
+            max_new_tokens=48,
         )
 
     def test_contract_is_configurable_before_model_arrives(self):
@@ -36,7 +36,7 @@ class QwenRuntimeTests(unittest.TestCase):
         self.assertTrue(STAGE1_QWEN_CONTRACT.is_file())
         self.assertEqual("bfloat16", config.dtype)
         self.assertEqual("sdpa", config.attention_implementation)
-        self.assertEqual(8, config.max_new_tokens)
+        self.assertEqual(48, config.max_new_tokens)
         self.assertFalse(bundle_status(config).ready)
 
     def test_environment_can_point_at_later_snapshot(self):

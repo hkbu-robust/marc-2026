@@ -14,7 +14,7 @@
     "device_map": "auto",
     "attention_implementation": "sdpa",
     "do_sample": false,
-    "max_new_tokens": 8,
+    "max_new_tokens": 48,
     "output_grammar": "<candidate_id>|<normal|abnormal|emergency|accident>"
   },
   "framework": {

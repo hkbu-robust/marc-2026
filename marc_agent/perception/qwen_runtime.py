@@ -162,7 +162,7 @@ class QwenRuntimeConfig:
             ),
             max_new_tokens=int(
                 env.get("MARC_QWEN_MAX_NEW_TOKENS")
-                or inference.get("max_new_tokens", 8)
+                or inference.get("max_new_tokens", 48)
             ),
         )
 
