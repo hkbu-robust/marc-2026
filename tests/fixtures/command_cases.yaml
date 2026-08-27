@@ -192,7 +192,7 @@
         "intent": "find",
         "target_type": "mug",
         "landmark": "picnic_table",
-        "relation": null,
+        "relation": "on",
         "situation": null,
         "scene_hint": null
       }
@@ -2807,6 +2807,27 @@
       "text": "Find the mug on the right side of the bench near the taxi.",
       "expected_intent": "find",
       "expected_error": "conflicting_relation"
+    },
+    {
+      "id": "probe_left_mug_there_on",
+      "tier": "narrative",
+      "text": "I sat at the bench and left my mug there.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "mug", "landmark": "bench", "relation": "on", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "probe_set_tumbler_at_table_on",
+      "tier": "narrative",
+      "text": "I sat at the picnic table and left my tumbler there.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "tumbler", "landmark": "picnic_table", "relation": "on", "situation": null, "scene_hint": null}
+    },
+    {
+      "id": "probe_car_parking_no_named_landmark",
+      "tier": "narrative",
+      "text": "I dropped my tumbler as I got out of my car in the parking lot.",
+      "expected_intent": "find",
+      "expected": {"intent": "find", "target_type": "tumbler", "landmark": null, "relation": null, "situation": null, "scene_hint": "parking"}
     }
   ]
 }

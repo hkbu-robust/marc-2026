@@ -265,7 +265,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:mug:0", target_id)
         self.assertEqual("rig_a:picnic_table:0", anchor_id)
 
-    def test_tumbler_on_bench_keeps_mug_as_alias(self):
+    def test_tumbler_on_bench_ignores_mug(self):
         parsed = parse_command("Find the tumbler on the bench.")
         round_ = CctvDetectionRound(
             objects=[
@@ -300,9 +300,7 @@ class ObjectSelectionTests(unittest.TestCase):
         )
         ranked = rank_object_candidates(parsed, round_)
         ids = [item.target.candidate_id for item in ranked]
-        self.assertIn("rig_1:mug:0", ids)
-        self.assertIn("rig_3:tumbler:0", ids)
-        self.assertEqual("rig_1:mug:0", ranked[0].target.candidate_id)
+        self.assertEqual(["rig_3:tumbler:0"], ids)
 
     def test_mug_command_does_not_alias_tumbler(self):
         parsed = parse_command("Find the mug on the picnic table.")
@@ -383,6 +381,48 @@ class ObjectSelectionTests(unittest.TestCase):
         )
         ranked = rank_object_candidates(parsed, round_)
         self.assertEqual("rig_a:tumbler:1", ranked[0].target.candidate_id)
+
+
+    def test_parking_scene_pairs_target_with_vehicle(self):
+        parsed = parse_command(
+            "Find the tumbler dropped in the empty parking space.",
+        )
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "rig_a:tumbler:0",
+                    "tumbler",
+                    (40.0, 300.0, 80.0, 380.0),
+                    "rig_a",
+                    0.5,
+                ),
+                _object(
+                    "rig_a:police_car:0",
+                    "police_car",
+                    (90.0, 280.0, 400.0, 420.0),
+                    "rig_a",
+                    0.9,
+                ),
+                _object(
+                    "rig_b:tumbler:0",
+                    "tumbler",
+                    (200.0, 200.0, 240.0, 280.0),
+                    "rig_b",
+                    0.99,
+                ),
+                _object(
+                    "rig_b:bench:0",
+                    "bench",
+                    (180.0, 300.0, 420.0, 430.0),
+                    "rig_b",
+                ),
+            ],
+            camera_ids=["rig_a", "rig_b"],
+        )
+        ranked = rank_object_candidates(parsed, round_)
+        self.assertTrue(ranked)
+        self.assertEqual("rig_a:tumbler:0", ranked[0].target.candidate_id)
+        self.assertEqual("police_car", ranked[0].anchor.class_name)
 
     def test_world_on_prefers_contact_inside_bench_footprint(self):
         from marc_agent.perception.cctv_project import (

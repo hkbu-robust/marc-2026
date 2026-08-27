@@ -453,6 +453,8 @@ class AboveModePatchTests(unittest.TestCase):
         patch = _load_patch()
         self.assertIn("person_prone", patch.NEW_COMBOS)
         self.assertIn("TRAINER_SAR_RECIPES", patch.NEW_COMBOS)
+        self.assertIn("_marc_yolo_mode", patch.NEW_COMBOS)
+        self.assertIn("TRAINER_YOLO_MODE", patch.NEW_COMBOS)
         self.assertIn("_marc_sar_recipe_cursor_start", patch.NEW_COMBOS)
         self.assertIn("TRAINER_SAR_RECIPE_CURSOR", patch.NEW_COMBOS)
         self.assertIn("_ON_SEAT_POSES", patch.NEW_COMBOS)
@@ -854,6 +856,67 @@ class AboveModePatchTests(unittest.TestCase):
         self.assertTrue(all(c in chars for c in seen))
         self.assertNotEqual(seen, [chars[0]] * len(seen))
         self.assertGreater(len(set(seen)), 1)
+
+    def test_yolo_mode_seats_only_bench_or_table(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<yolo-mode-seat>", "exec"), namespace)
+        poses = [
+            "person_sitting", "person_walking", "person_lying_down",
+            "person_prone", "person_reaching", "person_crouching",
+            "person_reclining", "person_walking_away", "person_bending",
+        ]
+        chars = ["female_student_01", "male_student_01"]
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_YOLO_MODE"] = "1"
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "1"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "1"
+            os.environ["TRAINER_PEOPLE_WRONG_PLACE_PROB"] = "1"
+            os.environ["TRAINER_PEOPLE_ALL_CHARS"] = "1"
+            for seed in range(24):
+                namespace["random"].seed(seed)
+                landmarks, specs = namespace["build"](
+                    [
+                        {"name": "bench_0"},
+                        {"name": "vending_machine_0"},
+                        {"name": "trash_can_0"},
+                        {"name": "taxi_0"},
+                    ],
+                    chars,
+                    poses,
+                )
+                people = [o for o in specs if o.get("character")]
+                self.assertEqual(len(people), 2)
+                for person in people:
+                    pl = person.get("placement") or {}
+                    self.assertFalse(pl.get("above"))
+                    self.assertNotIn("recipe_id", pl)
+                    lm = pl.get("on_landmark_type")
+                    if lm is not None:
+                        self.assertIn(lm, ("bench", "picnic_table"))
+                        self.assertIn(
+                            person["type"],
+                            ("person_sitting", "person_reclining",
+                             "person_lying_down", "person_prone"),
+                        )
+                self.assertIn("vending_machine_0", {s["name"] for s in landmarks})
+                self.assertIn("trash_can_0", {s["name"] for s in landmarks})
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
 
 
 if __name__ == "__main__":

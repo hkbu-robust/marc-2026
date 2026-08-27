@@ -22,15 +22,19 @@ import os
 import time
 
 import numpy as np
-from sensor_msgs.msg import JointState
-
-import arm_kin
 
 ARM_JOINT_NAMES = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 GRIPPER_JOINT_NAMES = ["left_outer_knuckle_joint", "right_outer_knuckle_joint"]
 
 GRIPPER_OPEN, GRIPPER_CLOSE = 0.0, 0.703  # aligned to the outer_knuckle joint limit 40.3deg (0.703rad)
 HOME = [0.0, 0.262, -2.094, 0.0, -0.785, 1.571]  # default pose = arm_kin.DEFAULT_ARM_Q
+
+# Scripted-pick close matches teleop: json grip_close is a ceiling floor, not the
+# held command. A full squeeze after contact makes Isaac eject the object.
+DEFAULT_GRIP_CEILING = 0.68
+DEFAULT_GRIP_RAMP_S = 1.2
+DEFAULT_GRIP_EXTRA = 0.02
+DEFAULT_GRIP_STOP_ON_GRASP = True
 
 # URDF (loaded via placo). gen3 6DoF + robotiq 140. (the kit uses the urdf/ subfolder)
 _URDF = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -51,9 +55,15 @@ _PARAMS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pnp_par
 _KIN = None
 
 
+def _arm_kin():
+    import arm_kin
+    return arm_kin
+
+
 def _kin():
     global _KIN
     if _KIN is None:
+        arm_kin = _arm_kin()
         _KIN = arm_kin.PlacoArmKinematics(_URDF, _EE_FRAME, list(ARM_JOINT_NAMES))
     return _KIN
 
@@ -73,6 +83,7 @@ def load_params():
 
 
 def _make_js(arm_q, grip):
+    from sensor_msgs.msg import JointState
     js = JointState()
     js.name = list(ARM_JOINT_NAMES) + list(GRIPPER_JOINT_NAMES)
     js.position = ([float(q) for q in arm_q]
@@ -105,7 +116,7 @@ def build_waypoints(p, phase="full"):
     pick = [
         ("pre",     pre,          op,   0.3,  "cart"),   # straight above the target
         ("descend", g,            op,   0.2,  "cart"),   # descend straight down
-        ("grasp",   g,            cl,   d,    "cart"),   # close the gripper to grab
+        ("grasp",   g,            cl,   d,    "cart"),   # close (ramped in run_motion; json is ceiling)
         ("lift",    lift,         cl,   0.3,  "cart"),   # straight up (above the base)
     ]
     place_wps = [
@@ -197,6 +208,117 @@ def _sleep(client, seconds):
         time.sleep(seconds)
 
 
+def _env_float(name, default):
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_bool(name, default):
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return bool(default)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def grip_stop_on_grasp():
+    """True unless MARC_GRIP_STOP_ON_GRASP is an explicit off value."""
+    return _env_bool("MARC_GRIP_STOP_ON_GRASP", DEFAULT_GRIP_STOP_ON_GRASP)
+
+
+def grip_close_ceiling(p):
+    """Max squeeze command. Env overrides; otherwise max(json, 0.68), clamped to the joint limit."""
+    json_close = float(p.get("grip_close", GRIPPER_CLOSE))
+    raw = os.environ.get("MARC_GRIP_CLOSE")
+    if raw is None or str(raw).strip() == "":
+        ceiling = max(json_close, DEFAULT_GRIP_CEILING)
+    else:
+        try:
+            ceiling = float(raw)
+        except (TypeError, ValueError):
+            ceiling = max(json_close, DEFAULT_GRIP_CEILING)
+    return min(GRIPPER_CLOSE, max(0.0, ceiling))
+
+
+def close_until_holding(
+    *,
+    start_grip,
+    ceiling,
+    extra,
+    ramp_s,
+    hold_s,
+    rate_hz,
+    is_grasping,
+    publish,
+    sleep,
+    stop_on_grasp=True,
+    log=None,
+):
+    """Ramp the gripper toward `ceiling`, optionally stopping once a hold is reported.
+
+    Returns the latched command. `is_grasping` / `publish` / `sleep` are injected so
+    this can run without Isaac. After contact, `extra` rad of bite is added and that
+    value is held for `hold_s` (0 skips the extra hold).
+    """
+    start = float(start_grip)
+    ceiling = float(ceiling)
+    extra = max(0.0, float(extra))
+    rate = max(1e-6, float(rate_hz))
+    dt = 1.0 / rate
+    ramp_ticks = max(1, int(max(0.1, float(ramp_s)) * rate))
+    hold_ticks = max(0, int(max(0.0, float(hold_s)) * rate))
+    emit = log if callable(log) else getattr(log, "info", None)
+    cmd = start
+    latched_at = None
+    n_ticks = ramp_ticks + max(hold_ticks, 1)
+    for i in range(1, n_ticks + 1):
+        if latched_at is None and i <= ramp_ticks:
+            frac = float(i) / float(ramp_ticks)
+            cmd = start + (ceiling - start) * frac
+        publish(float(cmd))
+        holding = None
+        try:
+            holding = is_grasping()
+        except Exception:
+            holding = None
+        if stop_on_grasp and latched_at is None and holding is True:
+            latched_at = i
+            cmd = min(ceiling, float(cmd) + extra)
+            publish(float(cmd))
+            if emit:
+                emit(
+                    "  [grip] holding at grip=%.3f after %.2fs — stopped closing "
+                    "(ceiling %.3f)" % (cmd, i * dt, ceiling)
+                )
+            if hold_ticks <= 0:
+                break
+        if latched_at is not None and i - latched_at >= hold_ticks:
+            break
+        sleep(dt)
+    if stop_on_grasp and latched_at is None and emit:
+        emit("  [grip] no hold during close; at grip=%.3f" % cmd)
+    return float(cmd)
+
+
+def latch_closed_grip(seq, value):
+    """Keep the latched squeeze for every remaining closed waypoint (not release)."""
+    value = float(value)
+    seq._grip = value
+    waypoints = getattr(seq, "_waypoints", None)
+    if not waypoints:
+        return value
+    start = int(getattr(seq, "_idx", 0) or 0)
+    for i in range(start, len(waypoints)):
+        label, ee, grip, hold, mode = waypoints[i]
+        if float(grip) > 1e-3:
+            waypoints[i] = (label, ee, value, hold, mode)
+    return value
+
+
 # Hold detection - passive inner_finger_knuckle angle (deg). On an empty-hand close it reaches ~35deg;
 # if an object blocks the fingers it stops below that (outer_knuckle is force-driven and pinned to the
 # commanded angle -> no contact information). The driver publishes joint_states' inner_finger_knuckle (in rad).
@@ -250,6 +372,7 @@ def run_motion(client, log, p, phase="full"):
     Returns: gripper hold decision (True/False/None) - computed from gripper feedback right after reaching lift.
     """
     _log = log if callable(log) else log.info
+    arm_kin = _arm_kin()
     kin = _kin()
     base_quat = arm_kin.R_to_quat(kin.fk(arm_kin.DEFAULT_ARM_Q)[:3, :3])
 
@@ -284,6 +407,8 @@ def run_motion(client, log, p, phase="full"):
     holding = None            # hold decision (True/False/None). The caller treats None as success.
     probed = set()            # hold-check waypoint labels already measured (prevents duplicate measurement)
     aborted = False           # whether the sequence was aborted early due to failure
+    grasp_closed = False      # True after the grasp dwell has been handled (ramp or json latch)
+    stop_on_grasp = grip_stop_on_grasp()
     prev_q = None
     prev_t = time.monotonic()
     prev_label = None
@@ -302,7 +427,43 @@ def run_motion(client, log, p, phase="full"):
         cmd = seq.tick(arm_q)
         if cmd is not None:
             q, grip = cmd   # grip = gripper command value (0.0 open ~ grip_close)
-            client.send_arm_command(_make_js(q, grip))
+            if (not grasp_closed
+                    and stop_on_grasp
+                    and seq.label == "grasp"
+                    and seq._phase == "dwell"):
+                # WaypointSequence latches json grip_close on reach; do not publish
+                # that squeeze. Freeze dwell (wall monotonic) while the ramp runs.
+                seq._dwell_until = time.monotonic() + 1e9
+                ceiling = grip_close_ceiling(p)
+                _log("  [grip] close-until-holding ceiling=%.3f (json grip_close=%.3f)"
+                     % (ceiling, float(p.get("grip_close", GRIPPER_CLOSE))))
+                hold_q = np.asarray(q, dtype=np.float64).copy()
+
+                def _publish_grip(g, _hold=hold_q):
+                    aq = _read_arm_q(client)
+                    pose = aq if aq is not None else _hold
+                    client.send_arm_command(_make_js(pose, g))
+
+                latched = close_until_holding(
+                    start_grip=GRIPPER_OPEN,
+                    ceiling=ceiling,
+                    extra=_env_float("MARC_GRIP_EXTRA", DEFAULT_GRIP_EXTRA),
+                    ramp_s=_env_float("MARC_GRIP_RAMP", DEFAULT_GRIP_RAMP_S),
+                    hold_s=float(p.get("grip_dwell", 1.0)),
+                    rate_hz=rate,
+                    is_grasping=getattr(client, "is_grasping", lambda: None),
+                    publish=_publish_grip,
+                    sleep=lambda s: _sleep(client, s),
+                    stop_on_grasp=True,
+                    log=_log,
+                )
+                latch_closed_grip(seq, latched)
+                seq._dwell_until = time.monotonic()
+                grasp_closed = True
+            else:
+                if seq.label == "grasp" and seq._phase == "dwell":
+                    grasp_closed = True
+                client.send_arm_command(_make_js(q, grip))
         if dbg is not None:
             now = time.monotonic()
             loop_dt = now - prev_t

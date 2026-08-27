@@ -431,7 +431,7 @@ def path_is_blocked(planner, waypoints, extra_obstacles=None, inflation_m=0.25):
     cmin = max(0, min(c for _, c in cells) - pad)
     cmax = min(planner._w, max(c for _, c in cells) + pad + 1)
     sub = planner._grid[rmin:rmax, cmin:cmax]
-    trav = sub == 0
+    trav = OccupancyGridPlanner._traversable(sub)
     if planner._overlay is not None:
         trav = np.logical_and(
             trav, np.logical_not(planner._overlay[rmin:rmax, cmin:cmax]))
@@ -654,6 +654,8 @@ class OccupancyGridPlanner:
         self._overlay_t = None   # float64 last restamp time (sim s)
         self.last_method = None  # "dstar" | "astar"
         self.last_status = None  # "ok" | "no_map" | "no_path"
+        self.last_start_trav = None  # bool | None after last plan
+        self.last_goal_trav = None
 
     def update_from_msg(self, msg) -> bool:
         """Update the grid from a nav_msgs/OccupancyGrid message."""
@@ -765,7 +767,7 @@ class OccupancyGridPlanner:
                 reuse = False
 
         sub = self._grid[rmin:rmax, cmin:cmax]
-        trav = sub == 0
+        trav = self._traversable(sub)
         if self._overlay is not None:
             trav = np.logical_and(
                 trav, np.logical_not(self._overlay[rmin:rmax, cmin:cmax]))
@@ -777,8 +779,13 @@ class OccupancyGridPlanner:
         ls, lg = (sr - rmin, sc - cmin), (gr - rmin, gc - cmin)
         H, W = trav.shape
         goal_free = (0 <= lg[0] < H and 0 <= lg[1] < W and bool(trav[lg[0], lg[1]]))
-        ls = self._snap(trav, ls, snap_m)
-        lg = self._snap(trav, lg, snap_m)
+        self.last_start_trav = (
+            0 <= ls[0] < H and 0 <= ls[1] < W and bool(trav[ls[0], ls[1]])
+        )
+        self.last_goal_trav = goal_free
+        cell_m = float(self._res) if self._res else 0.05
+        ls = self._snap(trav, ls, snap_m, cell_m)
+        lg = self._snap(trav, lg, snap_m, cell_m)
         if ls is None or lg is None:
             self._dstar = None
             return None
@@ -878,6 +885,10 @@ class OccupancyGridPlanner:
         r0, r1, c0, c1, disc = sl
         self._overlay[r0:r1, c0:c1][disc] = False
 
+    def clear_start_hole(self, start_xy, exclude_m=0.6):
+        """Keep the robot cell traversable: drop overlay around the current pose."""
+        self.clear_goal_hole(start_xy, exclude_m=exclude_m)
+
     def _block_obstacles(self, trav, obstacles, rmin, cmin):
         """Mark each (x, y, radius) disc from extra_obstacles as not traversable in trav."""
         H, W = trav.shape
@@ -897,6 +908,12 @@ class OccupancyGridPlanner:
 
     def _in_bounds(self, r, c):
         return 0 <= r < self._h and 0 <= c < self._w
+
+    @staticmethod
+    def _traversable(sub):
+        """Free (0) and unknown (-1) are open; occupied cells are blocked."""
+        arr = np.asarray(sub)
+        return (arr == 0) | (arr < 0)
 
     @staticmethod
     def _erode(mask, iters):
@@ -921,8 +938,9 @@ class OccupancyGridPlanner:
             return None
         if trav[r, c]:
             return cell
-        # snap_m is in meters, but here it is approximated as a cell-grid radius
-        max_rad = int(max(1, round(snap_m / 0.05)))
+        # snap_m is in meters; use the occupancy resolution, not a hardcoded 5 cm cell.
+        cell_m = float(res_cells) if res_cells else 0.05
+        max_rad = int(max(1, round(snap_m / max(cell_m, 1e-6))))
         for rad in range(1, max_rad + 1):
             for dr in range(-rad, rad + 1):
                 for dc in range(-rad, rad + 1):

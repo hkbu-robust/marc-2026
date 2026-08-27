@@ -188,7 +188,7 @@ def yaw_toward_hint(pose, hint_xy) -> float:
 
 def gated_cmd_vel(pose, linear, angular, hint_xy, hint_radius, dt=TICK_S,
                   slack=RADIUS_SLACK_M):
-    """Zero forward speed that would leave the reveal disc. Yaw-only if already out."""
+    """Block motion that would leave the reveal disc; allow crawl *toward* the center."""
     lin = float(linear)
     ang = float(angular)
     if pose is None or hint_xy is None:
@@ -197,7 +197,15 @@ def gated_cmd_vel(pose, linear, angular, hint_xy, hint_radius, dt=TICK_S,
     if radius <= 0.0:
         return max(0.0, lin), ang
     x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
+    cx, cy = float(hint_xy[0]), float(hint_xy[1])
+    dist = math.hypot(x - cx, y - cy)
     if not inside_reveal_disc((x, y), hint_xy, radius, slack=slack):
+        lin = max(0.0, lin)
+        nx = x + lin * float(dt) * math.cos(yaw)
+        ny = y + lin * float(dt) * math.sin(yaw)
+        closer = math.hypot(nx - cx, ny - cy) < dist - 1e-6
+        if lin > 1e-6 and closer:
+            return lin, ang
         return 0.0, yaw_toward_hint(pose, hint_xy)
     lin = max(0.0, lin)
     if lin <= 1e-6:
@@ -205,6 +213,8 @@ def gated_cmd_vel(pose, linear, angular, hint_xy, hint_radius, dt=TICK_S,
     nx = x + lin * float(dt) * math.cos(yaw)
     ny = y + lin * float(dt) * math.sin(yaw)
     if not inside_reveal_disc((nx, ny), hint_xy, radius, slack=slack):
+        if math.hypot(nx - cx, ny - cy) < dist - 1e-6:
+            return lin, ang
         return 0.0, ang
     return lin, ang
 
@@ -265,6 +275,24 @@ class LocalizedTarget:
     world_xy: Optional[tuple] = None
     valid: bool = False
     reason: str = ""
+    bbox_xyxy: Optional[tuple] = None
+    depth: object = None
+    k: Optional[tuple] = None
+    R: object = None
+    t: object = None
+    rgb_shape: Optional[tuple] = None
+
+
+def _geom(bbox, depth, k, R, t, rgb_shape) -> dict:
+    box = None if bbox is None else tuple(float(v) for v in bbox)
+    return dict(
+        bbox_xyxy=box,
+        depth=depth,
+        k=k,
+        R=R,
+        t=t,
+        rgb_shape=None if rgb_shape is None else tuple(int(v) for v in rgb_shape[:2]),
+    )
 
 
 def localize_detection(
@@ -272,11 +300,14 @@ def localize_detection(
     conf=1.0, name="", arm_base_fwd=ARM_BASE_FWD, R=None, t=None,
 ) -> LocalizedTarget:
     """RGB box + depth image -> arm_base target with radius / range checks."""
+    geom = _geom(bbox, depth, k, R, t, rgb_shape)
     d = depth_in_bbox(depth, bbox, rgb_shape)
     if d is None:
-        return LocalizedTarget(reason="no_depth")
+        return LocalizedTarget(reason="no_depth", **geom)
     if conf is not None and float(conf) < MIN_CONF:
-        return LocalizedTarget(conf=float(conf), name=name or "", reason="low_conf")
+        return LocalizedTarget(
+            conf=float(conf), name=name or "", reason="low_conf", **geom
+        )
     x1, y1, x2, y2 = (float(v) for v in bbox)
     u = 0.5 * (x1 + x2)
     v = 0.5 * (y1 + y2)
@@ -289,16 +320,16 @@ def localize_detection(
         if not inside_reveal_disc(world_xy, hint_xy, hint_radius, slack=RADIUS_SLACK_M):
             return LocalizedTarget(
                 fwd=fwd, lat=lat, z=up, conf=float(conf or 0.0), name=name or "",
-                world_xy=world_xy, valid=False, reason="outside_radius",
+                world_xy=world_xy, valid=False, reason="outside_radius", **geom,
             )
     if not (FWD_MIN_M <= fwd <= FWD_MAX_M) or abs(lat) > LAT_MAX_M:
         return LocalizedTarget(
             fwd=fwd, lat=lat, z=up, conf=float(conf or 0.0), name=name or "",
-            world_xy=world_xy, valid=False, reason="out_of_reach",
+            world_xy=world_xy, valid=False, reason="out_of_reach", **geom,
         )
     return LocalizedTarget(
         fwd=fwd, lat=lat, z=up, conf=float(conf or 0.0), name=name or "",
-        world_xy=world_xy, valid=True, reason="ok",
+        world_xy=world_xy, valid=True, reason="ok", **geom,
     )
 
 
@@ -310,6 +341,7 @@ class Detector(Protocol):
     def load(self) -> bool: ...
     def set_target(self, name: Optional[str]) -> None: ...
     def detect(self, rgb: np.ndarray) -> Optional[dict]: ...
+    def unload(self) -> None: ...
 
 
 class MissingDetector:
@@ -325,6 +357,9 @@ class MissingDetector:
         return None
 
     def detect(self, rgb: np.ndarray) -> Optional[dict]:
+        return None
+
+    def unload(self) -> None:
         return None
 
 
@@ -353,6 +388,11 @@ class YoloDetector:
 
     def detect(self, rgb: np.ndarray) -> Optional[dict]:
         return self._yolo.detect(rgb)
+
+    def unload(self) -> None:
+        unload = getattr(self._yolo, "unload", None)
+        if callable(unload):
+            unload()
 
 
 def make_detector() -> Detector:
@@ -389,9 +429,11 @@ def _yaw_for_err(err: float) -> float:
 class NearFieldAcquire:
     """Search inside the reveal disc, close on bbox depth, emit arm_base 3D."""
 
-    def __init__(self, client, detector: Optional[Detector] = None):
+    def __init__(self, client, detector: Optional[Detector] = None, dump_dir=None):
         self.client = client
         self.detector = detector if detector is not None else make_detector()
+        self._dump_dir = dump_dir
+        self._dumped_phases: set[str] = set()
         self._lock_rgb = None
         self._lock_depth = None
         self._phase = "scan"
@@ -419,6 +461,9 @@ class NearFieldAcquire:
         last: Optional[LocalizedTarget] = None
         last_good_t = c.now_s()
         dt = TICK_S
+        rgb = None
+        bbox = None
+        det = None
 
         while c.is_running and c.now_s() < deadline:
             now = c.now_s()
@@ -457,11 +502,15 @@ class NearFieldAcquire:
                     already = d_obj is not None and d_obj < ALREADY_NEAR_M
                     if cand.valid and (already or (near and centered)):
                         self._stop()
+                        self._dump_frame("localized", rgb, bbox, cand.name)
                         log.info("[nearfield] localized %s fwd=%.2f lat=%.2f z=%.2f d=%.2f",
                                  cand.name, cand.fwd, cand.lat, cand.z, d_obj or -1)
                         return cand
 
+            prev_phase = self._phase
             lin, ang = self._command(now, n_obj, err, d_obj)
+            if self._phase != prev_phase:
+                self._dump_frame(self._phase, rgb, bbox, "" if det is None else (det.get("name") or ""))
             lin, ang = gated_cmd_vel(pose, lin, ang, hint_xy, radius, dt=dt)
             c.send_cmd_vel(linear_x=lin, angular_z=ang)
             if now - last_good_t > STALE_STOP_S:
@@ -470,10 +519,29 @@ class NearFieldAcquire:
 
         self._stop()
         if last is not None and last.valid:
+            self._dump_frame("last_valid", rgb if rgb is not None else None, getattr(last, "bbox_xyxy", None), last.name)
             return last
         reason = "timeout" if last is None else last.reason
+        self._dump_frame("failed", rgb if rgb is not None else None, bbox if det else None, reason)
         log.warning("[nearfield] acquire failed (%s)", reason)
         return last if last is not None else LocalizedTarget(valid=False, reason=reason)
+
+    def _dump_frame(self, tag: str, rgb, bbox=None, label: str = "") -> None:
+        if tag in self._dumped_phases:
+            return
+        self._dumped_phases.add(tag)
+        try:
+            from pathlib import Path
+            from marc_agent.perception.round_dump import dump_nearfield_frame
+        except Exception:
+            return
+        dump_nearfield_frame(
+            None if self._dump_dir is None else Path(self._dump_dir),
+            f"{tag}.png",
+            rgb,
+            bbox,
+            label=label or tag,
+        )
 
     def _enter(self, phase: str, now: float):
         self._phase = phase

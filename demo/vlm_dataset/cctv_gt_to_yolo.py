@@ -27,9 +27,13 @@ if _HERE not in sys.path:
 from cctv_gt_to_qwen import _iter_scenes, _load_pair
 
 # Stable class ids. Extra names found in GT are appended (sorted) after these.
+# Umbrella / long_umbrella / chef / wood stay in the exporter so GT boxes
+# remap cleanly. Training drops long_umbrella, master_chef_can, and wood_block.
+# Ordinary umbrella is kept. GT "wooden_block" maps to wood_block then drops.
 CANONICAL_NAMES = [
     "tumbler", "cracker_box", "cola_can", "disposable_cup",
     "umbrella", "long_umbrella", "juice", "tissue", "mug", "sunblock", "pencilcase",
+    "master_chef_can", "wood_block",
     "bench", "bicycle", "hydrant", "kick_scooter", "picnic_table",
     "postbox", "vending_machine", "trash_can",
     "police_car", "normal_car_1", "normal_car_2",
@@ -40,6 +44,17 @@ CANONICAL_NAMES = [
 ]
 
 MIN_BOX_PX = 4
+EXCLUDED_BOX_CLASSES = frozenset({
+    "long_umbrella", "closedlongumbrella",
+    "master_chef_can", "wood_block",
+})
+CLASS_ALIASES = {
+    "wooden_block": "wood_block",
+    "woodblock": "wood_block",
+    "chef_can": "master_chef_can",
+    "masterchefcan": "master_chef_can",
+}
+MAX_OCCLUSION = 0.85
 
 
 def _collect_scenes(in_dir: str) -> List[Tuple[int, str]]:
@@ -67,10 +82,24 @@ def _link_or_copy(src: str, dst: str) -> None:
         shutil.copy2(src, dst)
 
 
+def _canon_class(cls) -> str:
+    raw = str(cls or "").strip().lower()
+    return CLASS_ALIASES.get(raw, raw)
+
+
 def _write_yolo_line(det: dict, names: List[str], width: float, height: float) -> Optional[str]:
-    cls = det.get("class")
+    cls = _canon_class(det.get("class"))
     if cls not in names:
         return None
+    if cls in EXCLUDED_BOX_CLASSES:
+        return None
+    occ = det.get("occlusion")
+    if occ is not None:
+        try:
+            if float(occ) >= MAX_OCCLUSION:
+                return None
+        except (TypeError, ValueError):
+            pass
     bbox = det.get("bbox")
     if not bbox or len(bbox) < 4:
         return None
@@ -105,15 +134,17 @@ def convert(in_dir: str, out_dir: str, val_frac: float) -> None:
                 continue
             _, payload = pair
             for det in payload.get("detections") or []:
-                cls = det.get("class")
+                cls = _canon_class(det.get("class"))
                 if cls and cls not in names:
-                    extra.add(str(cls))
+                    extra.add(cls)
     names.extend(sorted(extra))
 
     n_cut = max(1, int(round(len(scenes) * (1.0 - val_frac)))) if len(scenes) > 1 else len(scenes)
     counts: Counter = Counter()
     n_img = {"train": 0, "val": 0}
     n_box = {"train": 0, "val": 0}
+    n_drop_excluded = 0
+    n_drop_occlusion = 0
 
     for idx, (scene_id, scene_dir) in enumerate(scenes):
         split = "train" if idx < n_cut else "val"
@@ -134,11 +165,23 @@ def convert(in_dir: str, out_dir: str, val_frac: float) -> None:
                 continue
             lines = []
             for det in payload.get("detections") or []:
+                cls = _canon_class(det.get("class"))
+                if cls in EXCLUDED_BOX_CLASSES:
+                    n_drop_excluded += 1
+                    continue
+                occ = det.get("occlusion")
+                if occ is not None:
+                    try:
+                        if float(occ) >= MAX_OCCLUSION:
+                            n_drop_occlusion += 1
+                            continue
+                    except (TypeError, ValueError):
+                        pass
                 line = _write_yolo_line(det, names, width, height)
                 if line is None:
                     continue
                 lines.append(line)
-                counts[str(det.get("class"))] += 1
+                counts[cls] += 1
             img_name = f"scene_{scene_id:05d}_{stem}.png"
             dst_img = os.path.join(out_dir, "images", split, img_name)
             dst_lbl = os.path.join(out_dir, "labels", split, img_name.replace(".png", ".txt"))
@@ -169,9 +212,14 @@ def convert(in_dir: str, out_dir: str, val_frac: float) -> None:
         "names": names,
         "notes": (
             "Ultralytics detect layout. Canonical pose/object classes; no situation "
-            "labels. Scene-grouped split; use the same --val-frac as "
-            "cctv_gt_to_qwen.py. Do not mix ego-cam frames."
+            "labels. Excluded boxes: long_umbrella, master_chef_can, "
+            "wood_block (and aliases); occlusion>=0.85 dropped. Umbrella is kept. "
+            "Names 4-5 stay umbrella/long_umbrella for the training remap. "
+            "Scene-grouped split; "
+            "use the same --val-frac as cctv_gt_to_qwen.py. Do not mix ego-cam frames."
         ),
+        "dropped_excluded_boxes": n_drop_excluded,
+        "dropped_occlusion_boxes": n_drop_occlusion,
     }
     info_path = os.path.join(out_dir, "dataset_info.json")
     with open(info_path, "w", encoding="utf-8") as f:
@@ -179,6 +227,8 @@ def convert(in_dir: str, out_dir: str, val_frac: float) -> None:
 
     print(f"[yolo] train_img={n_img['train']} val_img={n_img['val']} "
           f"train_box={n_box['train']} val_box={n_box['val']}")
+    print(f"[yolo] dropped excluded={n_drop_excluded} "
+          f"occlusion>={MAX_OCCLUSION}={n_drop_occlusion}")
     if counts:
         print("[yolo] classes:", ", ".join(f"{k}={v}" for k, v in counts.most_common()))
     print(f"[yolo] {yaml_path}")

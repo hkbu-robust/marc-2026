@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import logging
+import re
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -16,6 +17,7 @@ from marc_agent.perception.qwen_runtime import (
     configured_max_crops,
     load_local_qwen,
 )
+from marc_agent.perception.situation_rules import POSE_GROUPS, SUPPORT_CLASSES
 from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidate
 
 _SITUATIONS = frozenset({"normal", "abnormal", "emergency", "accident"})
@@ -69,6 +71,7 @@ class SarSelectionResult:
     reason: str
     raw_output: Optional[str] = None
     verifier_metrics: Optional[VerifierMetrics] = None
+    prompt: Optional[str] = None
 
 
 Verifier = Callable[[CandidateBoard], str]
@@ -141,12 +144,44 @@ def _nearest_anchor(
     return anchor, math.hypot(ax - px, ay - py) / diagonal
 
 
+_ON_TOP_CUE = re.compile(
+    r"\b(?:sitting|sat|climbed|climbing)\b|"
+    r"\bon\s+top\s+of\b"
+)
+
+
+def _on_top_non_mount(command: ParsedCommand, command_text: str) -> bool:
+    landmark = command.landmark
+    if not landmark or landmark not in SUPPORT_CLASSES["non_mount"]:
+        return False
+    return bool(_ON_TOP_CUE.search(command_text or ""))
+
+
+def _on_top_bonus(
+    person: PersonCandidate,
+    anchor: ObjectCandidate,
+    overlap: float,
+) -> float:
+    tcy = _center(person.bbox_xyxy)[1]
+    acy = _center(anchor.bbox_xyxy)[1]
+    seated = person.pose_class in POSE_GROUPS["seated"]
+    above = tcy < acy
+    bonus = 6.0 * overlap
+    if seated:
+        bonus += 8.0
+    if above:
+        bonus += 4.0
+    return bonus
+
+
 def candidate_evidence(
     command: ParsedCommand,
     round_: CctvDetectionRound,
+    command_text: str = "",
 ) -> tuple[CandidateEvidence, ...]:
     """Calculate inspectable pose and person/anchor geometry for every person."""
     requested_situation = command.situation.value if command.situation else None
+    on_top = _on_top_non_mount(command, command_text)
     evidence: list[CandidateEvidence] = []
     for person in round_.people:
         anchor, distance = _nearest_anchor(person, round_.objects, command.landmark)
@@ -175,6 +210,8 @@ def candidate_evidence(
                 score += 0.5 * overlap
                 if vertical_gap is not None and abs(vertical_gap) < 0.08:
                     score += 0.35
+                if on_top:
+                    score += _on_top_bonus(person, anchor, overlap)
         evidence.append(
             CandidateEvidence(
                 person=person,
@@ -294,7 +331,7 @@ def build_candidate_board(
     max_crops: Optional[int] = None,
 ) -> CandidateBoard:
     """Build bounded visual evidence while keeping every candidate in the prompt."""
-    evidence = candidate_evidence(command, round_)
+    evidence = candidate_evidence(command, round_, command_text)
     crop_limit = configured_max_crops() if max_crops is None else max_crops
     if crop_limit < 0:
         raise ValueError("max_crops must be non-negative")
@@ -359,19 +396,32 @@ def parse_verifier_output(
 class QwenSarVerifier:
     """Lazy local-only Transformers adapter for one candidate-board generation."""
 
+    method = "qwen_local"
+
     def __init__(self, config: Optional[QwenRuntimeConfig] = None):
         self.config = config or QwenRuntimeConfig.load()
         self._model = None
         self._processor = None
         self.last_latency_ms: Optional[float] = None
+        self.budget_timeout_s: Optional[float] = None
 
-    method = "qwen_local"
+    def set_budget_timeout(self, timeout_s: float) -> None:
+        self.budget_timeout_s = float(timeout_s)
+
+    def warmup(self) -> None:
+        """Load weights once so the first round does not pay the 8B disk cost."""
+        if self._model is None or self._processor is None:
+            self._model, self._processor = load_local_qwen(self.config)
+
+    def unload(self) -> None:
+        """Drop GPU tensors. The next warmup or generate reloads from disk."""
+        self._model = None
+        self._processor = None
 
     def __call__(self, board: CandidateBoard) -> str:
         started = time.perf_counter()
         try:
-            if self._model is None or self._processor is None:
-                self._model, self._processor = load_local_qwen(self.config)
+            self.warmup()
 
             content = [{"type": "image", "image": image} for image in board.images]
             content.append({"type": "text", "text": board.prompt})
@@ -387,12 +437,18 @@ class QwenSarVerifier:
 
             import torch
 
+            generate_kw = dict(
+                do_sample=False,
+                max_new_tokens=self.config.max_new_tokens,
+            )
+            if self.budget_timeout_s is not None and self.budget_timeout_s > 0:
+                generate_kw["max_time"] = float(self.budget_timeout_s)
             with torch.inference_mode():
-                generated = self._model.generate(
-                    **inputs,
-                    do_sample=False,
-                    max_new_tokens=self.config.max_new_tokens,
-                )
+                try:
+                    generated = self._model.generate(**inputs, **generate_kw)
+                except TypeError:
+                    generate_kw.pop("max_time", None)
+                    generated = self._model.generate(**inputs, **generate_kw)
             trimmed = [
                 output_ids[len(input_ids) :]
                 for input_ids, output_ids in zip(inputs.input_ids, generated)
@@ -476,6 +532,7 @@ def select_sar_candidate(
                 "valid_model_output",
                 raw_output,
                 metrics,
+                board.prompt,
             )
         except Exception as exc:
             metrics = _verifier_metrics(verifier, board)
@@ -510,4 +567,5 @@ def select_sar_candidate(
         fallback_reason,
         raw_output,
         metrics,
+        board.prompt,
     )

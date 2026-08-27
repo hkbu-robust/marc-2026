@@ -396,6 +396,17 @@ class CommandFixtureTests(unittest.TestCase):
         self.assertEqual(Situation.EMERGENCY, result.situation)
         self.assertEqual("road", result.scene_hint)
 
+    def test_parking_and_car_cues_use_vehicle_anchors_not_parser_cars(self):
+        from marc_agent.command_parser import uses_vehicle_anchor
+
+        parsed = parse_command(
+            "I dropped my tumbler as I got out of my car in the parking lot.",
+            expected_intent=Intent.FIND,
+        )
+        self.assertIsNone(parsed.landmark)
+        self.assertEqual("parking", parsed.scene_hint)
+        self.assertTrue(uses_vehicle_anchor(parsed, "I dropped my tumbler as I got out of my car in the parking lot."))
+
 
 if __name__ == "__main__":
     unittest.main()

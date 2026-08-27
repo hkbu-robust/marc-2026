@@ -72,7 +72,7 @@ Stage 1 candidate settings:
 | Variable | Default | Meaning |
 |---|---|---|
 | `MARC_STAGE1_DETECTOR` | bundled YOLO when present | `yolo` for live candidates; `stub` is test-only |
-| `MARC_SAR_DETECTOR` | `fallback` | `qwen` enables Qwen verification; fallback uses deterministic pose/anchor evidence |
+| `MARC_SAR_DETECTOR` | `qwen` | `qwen` enables Qwen verification; `fallback` uses deterministic pose/anchor evidence |
 | `MARC_QWEN_BACKEND` | `local` | `local` loads Transformers in the agent; `remote` calls a workstation vLLM server |
 | `MARC_QWEN_MODEL_DIR` | `/agent/models/runtime/stage1-sar-qwen/model` | Complete pinned local Transformers snapshot |
 | `MARC_QWEN_BASE_URL` | -- | Remote vLLM URL including `/v1`, e.g. `http://192.168.1.20:8000/v1` |
@@ -93,8 +93,11 @@ docker compose -f demo/docker-compose.yml \
   -f demo/docker-compose.qwen-local.yml up --build agent
 ```
 
-The root submission image must eventually bundle this same pinned snapshot because judging
-runs offline and does not apply the development override.
+The root submission image downloads this pinned snapshot during `docker compose`
+build. Judging runtime is offline and does not apply a host bind-mount.
+
+For a faster local rebuild while iterating, you can still mount a host snapshot
+with `demo/docker-compose.qwen-local.yml` as above.
 
 ### Qwen on a separate workstation
 

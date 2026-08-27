@@ -177,6 +177,10 @@ class RemoteQwenSarVerifier:
         self.config = config or QwenRemoteConfig.load()
         self._post = post
         self.last_metrics: QwenRemoteMetrics | None = None
+        self.budget_timeout_s: float | None = None
+
+    def set_budget_timeout(self, timeout_s: float) -> None:
+        self.budget_timeout_s = float(timeout_s)
 
     def __call__(self, board: "CandidateBoard") -> str:
         body = build_remote_payload(board, self.config)
@@ -184,7 +188,12 @@ class RemoteQwenSarVerifier:
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
-        max_attempts = 2
+        timeout_s = float(self.config.timeout_s)
+        capped = False
+        if self.budget_timeout_s is not None:
+            timeout_s = min(timeout_s, float(self.budget_timeout_s))
+            capped = timeout_s + 1e-9 < float(self.config.timeout_s)
+        max_attempts = 1 if capped else 2
         started = time.perf_counter()
         raw = b""
         try:
@@ -197,7 +206,7 @@ class RemoteQwenSarVerifier:
                     len(board.images),
                     len(board.candidate_ids),
                     len(body),
-                    self.config.timeout_s,
+                    timeout_s,
                     attempt,
                     max_attempts,
                 )
@@ -206,7 +215,7 @@ class RemoteQwenSarVerifier:
                         self.config.chat_completions_url,
                         body,
                         headers,
-                        self.config.timeout_s,
+                        timeout_s,
                     )
                     break
                 except QwenRemoteTimeout:

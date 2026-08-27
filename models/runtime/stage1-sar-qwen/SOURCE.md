@@ -1,4 +1,4 @@
-# Qwen3-VL upstream and pending artifact record
+# Qwen3-VL-8B-Instruct runtime snapshot (not in git)
 
 ## Selected upstream
 
@@ -7,27 +7,29 @@
 - Upstream model card: <https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct>
 - Upstream implementation: <https://github.com/QwenLM/Qwen3-VL>
 - License declared upstream: Apache-2.0
+- Size: about 17.5 GB BF16 safetensors. Do not commit `model/`.
 
-The 8B Instruct model is selected as the local visual verifier described in
-`docs/research/stage1-sar-recognizer.md`. It will consume bounded candidate-board imagery
-and emit only a candidate ID plus one of the four situation tokens. It is not a second
-detector and must not emit submission coordinates.
+## How the snapshot gets into the agent
 
-## Artifact state
+`docker compose up --build` runs [`../fetch_runtime_weights.py`](../fetch_runtime_weights.py)
+inside [`demo/Dockerfile`](../../../demo/Dockerfile) **before** `HF_HUB_OFFLINE=1`.
+That downloads this revision into `/agent/models/runtime/stage1-sar-qwen/model`.
+Scoring runtime never talks to the Hub.
 
-The large snapshot has not been materialized in this repository yet. The runtime contract,
-offline loader, Docker dependencies, and target directory are configured so the exact
-snapshot can be added later without changing callers.
+On a developer host (optional, same pins):
 
-When the snapshot is added:
+```bash
+PYTHONPATH=. python3 models/runtime/fetch_runtime_weights.py
+```
 
-1. copy every file from the immutable revision into `model/`;
-2. ensure Git LFS materializes every `*.safetensors` file;
-3. copy the upstream license into this bundle if it is not included in the snapshot;
-4. add and verify SHA-256 checksums for every runtime file;
-5. run `python -m marc_agent.perception.qwen_runtime`;
-6. load and warm the model with network access disabled; and
-7. change `offline_bundle_load_verified` in `runtime_contract.json` only after that test.
+Skip-if-complete: a ready `bundle_status` is left alone. Use `--force` to replace it.
+
+The 4.57.1 loader is `transformers.AutoModelForImageTextToText` (maps `qwen3_vl`
+to `Qwen3VLForConditionalGeneration`). `AutoModelForMultimodalLM` is transformers
+v5 and is not present in the pinned image.
 
 No Hub model ID is accepted by the runtime loader. `local_files_only=True`,
 `HF_HUB_OFFLINE=1`, and `TRANSFORMERS_OFFLINE=1` prevent a runtime download fallback.
+
+After a GPU load of the baked image succeeds, set `offline_bundle_load_verified`
+in `runtime_contract.json`.

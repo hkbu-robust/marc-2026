@@ -5,6 +5,7 @@ services:
       context: .
       dockerfile: demo/Dockerfile
       target: agent
+      network: host
     image: marc-agent:local
     network_mode: host
     environment:
@@ -14,12 +15,21 @@ services:
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent:/agent/demo"
       PYTHONUNBUFFERED: "1"
-      MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-fallback}"
+      MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-qwen}"
       MARC_QWEN_BACKEND: "${MARC_QWEN_BACKEND:-local}"
       MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
+      MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"
+      MARC_CCTV_YOLO_CONF: "${MARC_CCTV_YOLO_CONF:-0.15}"
+      MARC_GRASPGENX_WEIGHTS: "/agent/models/runtime/graspgenx"
+      GRASPGENX_CHECKPOINT_DIR: "/agent/models/runtime/graspgenx"
+      GRASPGENX_GRIPPER_CFG_DIR: "/agent/models/runtime/graspgenx/grippers"
+      MARC_GRASPGENX_GRIPPER: "${MARC_GRASPGENX_GRIPPER:-robotiq_2f_140}"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
+      YOLO_OFFLINE: "1"
+    volumes:
+      - "${MARC_ARTIFACTS_DIR:-./artifacts}:/agent/demo/artifacts"
     deploy:
       resources:
         reservations:

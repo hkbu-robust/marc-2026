@@ -8,3 +8,13 @@ tokens.env
 *.egg-info/
 build/
 dist/
+
+# Large Hub snapshots: fetched inside the image, not sent as build context.
+models/runtime/stage1-sar-qwen/model/**
+!models/runtime/stage1-sar-qwen/model/.gitkeep
+models/runtime/graspgenx/gen/
+models/runtime/graspgenx/dis/
+models/runtime/graspgenx/grippers/
+models/runtime/graspgenx/release/
+demo/weights/*.pt
+demo/weights/*.onnx

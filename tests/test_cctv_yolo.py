@@ -29,11 +29,19 @@ class CctvYoloTests(unittest.TestCase):
     def test_runtime_contract_loads(self):
         with patch.dict(os.environ, {"MARC_CCTV_YOLO_CONF": ""}):
             contract = RuntimeContract.load()
+        payload = json.loads(STAGE1_CCTV_CONTRACT.read_text(encoding="utf-8"))
         self.assertEqual(1920, contract.imgsz)
         self.assertAlmostEqual(0.3, contract.confidence)
         self.assertEqual(33, len(contract.ordered_classes))
         self.assertIn("mug", contract.ordered_classes)
         self.assertIn("person_reclining", contract.ordered_classes)
+        self.assertEqual(
+            ["master_chef_can", "wood_block", "umbrella", "long_umbrella"],
+            payload["ignored_classes"],
+        )
+        self.assertNotIn("master_chef_can", contract.ordered_classes)
+        self.assertNotIn("wood_block", contract.ordered_classes)
+        self.assertNotIn("umbrella", contract.ordered_classes)
 
     def test_runtime_contract_reads_confidence_from_env(self):
         with patch.dict(os.environ, {"MARC_CCTV_YOLO_CONF": "0.15"}):

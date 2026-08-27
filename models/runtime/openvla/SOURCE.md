@@ -44,4 +44,4 @@ unnormalizes with the same numbers a later LoRA train would use.
 |---|---|
 | `MARC_OPENVLA_WEIGHTS` | Path to the HF snapshot (file or directory) |
 | `MARC_OPENVLA_UNNORM_KEY` | Stats key, default `marc_pnp` |
-| `MARC_PICK_POLICY` | `ik` (default) / `openvla` / `openvla_geom` |
+| `MARC_PICK_POLICY` | `graspgenx` (default) / `ik` (OpenVLA is not called at pick) |

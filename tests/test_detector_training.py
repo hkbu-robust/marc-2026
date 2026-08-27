@@ -13,9 +13,19 @@ from training.evaluate_cctv_detector import _score, _select_head, _select_runtim
 
 
 class DetectorDatasetTests(unittest.TestCase):
-    def _source(self, root: Path, excluded_box: bool = False) -> Path:
-        names = {key: f"class_{key}" for key in reversed(range(35))}
+    def _source(
+        self,
+        root: Path,
+        excluded_box: bool = False,
+        *,
+        n_classes: int = 35,
+        extra_names: dict[int, str] | None = None,
+        box_id: int = 6,
+    ) -> Path:
+        names = {key: f"class_{key}" for key in reversed(range(n_classes))}
         names[4], names[5] = "umbrella", "long_umbrella"
+        if extra_names:
+            names.update(extra_names)
         for split in ("train", "val"):
             for camera_id in range(1, 7):
                 stem = f"scene_{camera_id + (0 if split == 'train' else 10):05d}_rig_{camera_id}_a"
@@ -24,7 +34,7 @@ class DetectorDatasetTests(unittest.TestCase):
                 image.parent.mkdir(parents=True, exist_ok=True)
                 label.parent.mkdir(parents=True, exist_ok=True)
                 image.write_bytes(b"fixture")
-                class_id = 4 if excluded_box and camera_id == 1 else 6
+                class_id = 5 if excluded_box and camera_id == 1 else box_id
                 label.write_text(f"{class_id} 0.5 0.5 0.1 0.1\n", encoding="utf-8")
         descriptor = root / "data.yaml"
         descriptor.write_text(yaml.safe_dump({"train": "images/train", "val": "images/val", "names": names}, sort_keys=False))
@@ -36,20 +46,65 @@ class DetectorDatasetTests(unittest.TestCase):
             source = self._source(root / "raw")
             output = root / "processed" / "data.yaml"
             stats = prepare_dataset(source, output, verify_hash=False)
-            self.assertEqual(33, len(stats["names"]))
+            self.assertEqual(34, len(stats["names"]))
+            self.assertEqual(["long_umbrella"], stats["ignored_classes"])
+            self.assertIn("umbrella", stats["names"])
             self.assertEqual(12, sum(stats["boxes"].values()))
-            self.assertEqual("4 0.5 0.5 0.1 0.1", next((output.parent / "labels" / "train").glob("*.txt")).read_text().strip())
+            self.assertEqual("5 0.5 0.5 0.1 0.1", next((output.parent / "labels" / "train").glob("*.txt")).read_text().strip())
             self.assertEqual(6, len(stats["cameras"]["train"]))
             linked = next((output.parent / "images" / "train").glob("*.png"))
             original = next((source.parent / "images" / "train").glob("*.png"))
             self.assertTrue(linked.samefile(original))
 
-    def test_rejects_boxes_for_excluded_classes(self):
+    def test_no_verify_hash_flag_exists(self):
+        from training import train_cctv_detector as module
+        src = Path(module.__file__).read_text(encoding="utf-8")
+        self.assertIn("--no-verify-hash", src)
+        self.assertIn("verify_hash=not args.no_verify_hash", src)
+
+    def test_drops_chef_wood_and_long_umbrella_from_37_class_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._source(
+                root / "raw",
+                n_classes=37,
+                extra_names={11: "master_chef_can", 12: "wood_block"},
+                box_id=6,
+            )
+            stats = prepare_dataset(source, root / "processed" / "data.yaml", verify_hash=False)
+            self.assertEqual(34, len(stats["names"]))
+            self.assertEqual(
+                ["long_umbrella", "master_chef_can", "wood_block"],
+                stats["ignored_classes"],
+            )
+            self.assertNotIn("master_chef_can", stats["names"])
+            self.assertNotIn("wood_block", stats["names"])
+            self.assertIn("umbrella", stats["names"])
+            self.assertEqual(
+                "5 0.5 0.5 0.1 0.1",
+                next((root / "processed" / "labels" / "train").glob("*.txt")).read_text().strip(),
+            )
+
+    def test_drops_long_umbrella_boxes_keeps_umbrella(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = self._source(root / "raw", excluded_box=True)
-            with self.assertRaisesRegex(ValueError, "excluded class 4 has a box"):
-                prepare_dataset(source, root / "processed" / "data.yaml", verify_hash=False)
+            stats = prepare_dataset(source, root / "processed" / "data.yaml", verify_hash=False)
+            self.assertEqual(["long_umbrella"], stats["ignored_classes"])
+            self.assertIn("umbrella", stats["names"])
+            # camera 1 wrote class 5 (dropped); the other five cameras kept box_id 6 → 5
+            self.assertEqual(10, sum(stats["boxes"].values()))
+
+    def test_keeps_umbrella_class_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = self._source(root / "raw", box_id=4)
+            stats = prepare_dataset(source, root / "processed" / "data.yaml", verify_hash=False)
+            self.assertIn("umbrella", stats["names"])
+            self.assertEqual(
+                "4 0.5 0.5 0.1 0.1",
+                next((root / "processed" / "labels" / "train").glob("*.txt")).read_text().strip(),
+            )
 
     def test_refuses_to_write_inside_raw_dataset(self):
         with tempfile.TemporaryDirectory() as temp:

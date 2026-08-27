@@ -44,8 +44,10 @@ object, landmark, and person/pose candidates.
   `88dee1597d7a25d7b1dc23bc7814da3669ee28e750ccf22a42c15499eca1d66c`
 - Training code commit: `b2afe15524c6ff42f7b9db1eb049d83e4424bf43`
 - Classes: 33 ordered classes recorded in `runtime_contract.json`
-- Ignored organizer-excluded classes: `master_chef_can`, `wood_block`,
-  `umbrella`, and `long_umbrella`
+- Organizer-excluded on **this** checkpoint: `umbrella` and `long_umbrella`.
+  `master_chef_can` and `wood_block` are also missing from this 33-class head.
+  The next detector train keeps `umbrella` and drops `long_umbrella`,
+  `master_chef_can`, and `wood_block`.
 - Input geometry: native 1280x720 frames, rectangular letterbox to
   `imgsz=1920`
 - Training: 100-epoch maximum, batch 4, seed 0, AMP, `rect=True`,

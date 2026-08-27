@@ -164,6 +164,9 @@ NEW_COMBOS = '''    combos = []
     def _marc_flag(name, default="0"):
         raw = os.environ.get(name, default)
         return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
+    def _marc_yolo_mode():
+        """[marc-patch] _marc_yolo_mode: ordinary CCTV, no SAR climb seating."""
+        return _marc_flag("TRAINER_YOLO_MODE", "0")
     def _marc_csv_names(name):
         return [x.strip() for x in (os.environ.get(name, "") or "").split(",")
                 if x.strip()]
@@ -339,7 +342,14 @@ NEW_COMBOS = '''    combos = []
     _ON_ABOVE_POSES = (
         "person_crouching", "person_sitting", "person_walking",
         "person_reaching")
-    _above_mode = _marc_people_above()
+    _yolo_mode = _marc_yolo_mode()
+    if _yolo_mode and (
+            _marc_flag("TRAINER_SAR_RECIPES", "0")
+            or _marc_flag("TRAINER_PEOPLE_ABOVE", "0")):
+        if not globals().get("_marc_yolo_mode_logged"):
+            globals()["_marc_yolo_mode_logged"] = True
+            print("[people-patch] TRAINER_YOLO_MODE=1: ignoring SAR recipes and PEOPLE_ABOVE")
+    _above_mode = False if _yolo_mode else _marc_people_above()
     _target = None
     if (not _above_mode and
             random.random() < _marc_frac("TRAINER_FORCE_CLIMB_LANDMARK_PROB", 0.35)):
@@ -472,7 +482,7 @@ NEW_COMBOS = '''    combos = []
         except Exception:
             pass
     _recipe = None
-    if _marc_flag("TRAINER_SAR_RECIPES", "0"):
+    if (not _yolo_mode) and _marc_flag("TRAINER_SAR_RECIPES", "0"):
         _recs = _marc_sar_recipe_list()
         if _recs:
             global _marc_sar_recipe_cursor
@@ -575,14 +585,14 @@ NEW_COMBOS = '''    combos = []
             }
         elif (not _above_mode) and random.random() < _marc_frac(
                 "TRAINER_PEOPLE_ON_LANDMARK_PROB", 0.45):
-            want_wrong = random.random() < _marc_frac(
+            want_wrong = (not _yolo_mode) and random.random() < _marc_frac(
                 "TRAINER_PEOPLE_WRONG_PLACE_PROB", 0.55)
             lm_typ = None
             if want_wrong and _wrongs:
                 lm_typ = random.choice(_wrongs)
             elif _seats:
                 lm_typ = random.choice(_seats)
-            elif _wrongs:
+            elif (not _yolo_mode) and _wrongs:
                 lm_typ = random.choice(_wrongs)
             if lm_typ and lm_typ != _target:
                 spec["placement"] = {
@@ -635,6 +645,84 @@ def main():
 
     if MARKER in src:
         changed = False
+        if "_marc_yolo_mode" not in src:
+            _old_flag_fn = (
+                '    def _marc_flag(name, default="0"):\n'
+                '        raw = os.environ.get(name, default)\n'
+                '        return str(raw).strip().lower() not in '
+                '("0", "false", "no", "off", "")\n'
+                '    def _marc_csv_names(name):\n'
+            )
+            _new_flag_fn = (
+                '    def _marc_flag(name, default="0"):\n'
+                '        raw = os.environ.get(name, default)\n'
+                '        return str(raw).strip().lower() not in '
+                '("0", "false", "no", "off", "")\n'
+                '    def _marc_yolo_mode():\n'
+                '        """[marc-patch] _marc_yolo_mode: ordinary CCTV, '
+                'no SAR climb seating."""\n'
+                '        return _marc_flag("TRAINER_YOLO_MODE", "0")\n'
+                '    def _marc_csv_names(name):\n'
+            )
+            if _old_flag_fn in src:
+                src = src.replace(_old_flag_fn, _new_flag_fn, 1)
+                changed = True
+            _old_above_assign = (
+                '    _above_mode = _marc_people_above()\n'
+            )
+            _new_above_assign = (
+                '    _yolo_mode = _marc_yolo_mode()\n'
+                '    if _yolo_mode and (\n'
+                '            _marc_flag("TRAINER_SAR_RECIPES", "0")\n'
+                '            or _marc_flag("TRAINER_PEOPLE_ABOVE", "0")):\n'
+                '        if not globals().get("_marc_yolo_mode_logged"):\n'
+                '            globals()["_marc_yolo_mode_logged"] = True\n'
+                '            print("[people-patch] TRAINER_YOLO_MODE=1: '
+                'ignoring SAR recipes and PEOPLE_ABOVE")\n'
+                '    _above_mode = False if _yolo_mode else '
+                '_marc_people_above()\n'
+            )
+            if _old_above_assign in src:
+                src = src.replace(_old_above_assign, _new_above_assign, 1)
+                changed = True
+            _old_sar_if = (
+                '    _recipe = None\n'
+                '    if _marc_flag("TRAINER_SAR_RECIPES", "0"):\n'
+            )
+            _new_sar_if = (
+                '    _recipe = None\n'
+                '    if (not _yolo_mode) and _marc_flag('
+                '"TRAINER_SAR_RECIPES", "0"):\n'
+            )
+            if _old_sar_if in src:
+                src = src.replace(_old_sar_if, _new_sar_if, 1)
+                changed = True
+            _old_wrong = (
+                '            want_wrong = random.random() < _marc_frac(\n'
+                '                "TRAINER_PEOPLE_WRONG_PLACE_PROB", 0.55)\n'
+                '            lm_typ = None\n'
+                '            if want_wrong and _wrongs:\n'
+                '                lm_typ = random.choice(_wrongs)\n'
+                '            elif _seats:\n'
+                '                lm_typ = random.choice(_seats)\n'
+                '            elif _wrongs:\n'
+                '                lm_typ = random.choice(_wrongs)\n'
+            )
+            _new_wrong = (
+                '            want_wrong = (not _yolo_mode) and '
+                'random.random() < _marc_frac(\n'
+                '                "TRAINER_PEOPLE_WRONG_PLACE_PROB", 0.55)\n'
+                '            lm_typ = None\n'
+                '            if want_wrong and _wrongs:\n'
+                '                lm_typ = random.choice(_wrongs)\n'
+                '            elif _seats:\n'
+                '                lm_typ = random.choice(_seats)\n'
+                '            elif (not _yolo_mode) and _wrongs:\n'
+                '                lm_typ = random.choice(_wrongs)\n'
+            )
+            if _old_wrong in src:
+                src = src.replace(_old_wrong, _new_wrong, 1)
+                changed = True
         _old_vend_w = (
             '        if typ == "vending_machine":\n'
             '            return 3.0\n'
@@ -1419,11 +1507,13 @@ def _log_people():
         "0", "false", "no", "off", "") else "OFF (ground scenes, no stacking)"
     recipes = os.environ.get("TRAINER_SAR_RECIPES", "0")
     cursor = os.environ.get("TRAINER_SAR_RECIPE_CURSOR", "") or "auto"
+    yolo = os.environ.get("TRAINER_YOLO_MODE", "0")
     print(f"[people-patch] all identities per scene "
           f"(TRAINER_PEOPLE_ALL_CHARS={mode}); chars={chars} poses={poses}; "
           f"on-landmark p={on_p}; "
           f"above={above} [{on_off}] clearance={clearance} weights={weights}; "
-          f"sar_recipes={recipes} recipe_cursor={cursor}")
+          f"sar_recipes={recipes} recipe_cursor={cursor}; "
+          f"yolo_mode={yolo}")
 
 
 if __name__ == "__main__":

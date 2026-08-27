@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import unittest
 
 import numpy as np
 import yaml
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEMO = os.path.join(_ROOT, "demo")
+if _DEMO not in sys.path:
+    sys.path.insert(0, _DEMO)
 
 from marc_agent.navigation_runtime import NavStatus, Stage2Navigator
 from marc_agent.retrieval_state import search_area_approach_goal
@@ -167,6 +173,90 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertNotIn("_DELIVERY_COORD", src)
         self.assertIn("Stage2Navigator", src)
         self.assertIn("search_area_approach_goal", src)
+        self.assertIn("expected_intent=Intent.BRING", src)
+        self.assertIn("MARC_STAGE2_MOCK_VLA", src)
+
+    def test_unknown_cells_are_traversable(self):
+        grid = np.full((20, 40), -1, dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([1.0, 5.0, 0.0], occ=occ)
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.0,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=5,
+        )
+        result = nav.navigate_to((8.0, 5.0), 40.0, leg="search", tol=0.7)
+        self.assertEqual("reached", result.status.value)
+
+    def test_no_path_holds_do_not_burn_replan_cap(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        grid[:, 20] = 100
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([2.0, 5.0, 0.0], occ=occ)
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.0,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=3,
+        )
+        result = nav.navigate_to((16.0, 5.0), 2.0, leg="search", tol=0.7)
+        self.assertEqual("no_path", result.status.value)
+        self.assertLessEqual(result.replan_count, 1)
+
+    def test_inflation_fallback_opens_narrow_corridor(self):
+        res = 0.1
+        h, w = 30, 80
+        grid = np.full((h, w), 100, dtype=np.int8)
+        grid[15, :] = 0
+        occ = _Occ(grid, res, 0.0, 0.0)
+        client = FakeClient([0.5, 1.55, 0.0], occ=occ)
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=5,
+        )
+        result = nav.navigate_to((7.0, 1.55), 40.0, leg="search", tol=0.7)
+        self.assertEqual("reached", result.status.value)
+
+    def test_start_hole_clears_lidar_overlay(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        start = (2.0, 5.0)
+        goal = (16.0, 5.0)
+        planner.stamp_overlay([(start[0], start[1], 2.0)])
+        blocked = planner.plan(start, goal, inflation_m=0.0, snap_m=0.5, margin_m=12.0)
+        self.assertIsNone(blocked)
+        planner.clear_start_hole(start, exclude_m=2.5)
+        opened = planner.plan(start, goal, inflation_m=0.0, snap_m=0.5, margin_m=12.0)
+        self.assertIsNotNone(opened)
+
+    def test_snap_uses_grid_resolution(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.full((20, 20), 100, dtype=np.int8)
+        grid[10, 2] = 0
+        grid[10, 6] = 0
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        start = planner._c2w(10, 2)
+        goal = planner._c2w(10, 6)
+        grid[10, 2] = 100
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        missed = planner.plan(start, goal, inflation_m=0.0, snap_m=1.0, margin_m=12.0)
+        self.assertIsNone(missed)
+        found = planner.plan(start, goal, inflation_m=0.0, snap_m=2.5, margin_m=12.0)
+        self.assertIsNotNone(found)
 
 
 if __name__ == "__main__":

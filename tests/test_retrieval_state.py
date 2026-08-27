@@ -9,7 +9,12 @@ from types import SimpleNamespace
 
 import yaml
 
-from marc_agent.retrieval_state import RetrievalState, search_area_approach_goal
+from marc_agent.retrieval_state import (
+    RetrievalState,
+    close_enough_to_search,
+    nearfield_start_reason,
+    search_area_approach_goal,
+)
 
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "nav_runtime_cases.yaml")
@@ -93,6 +98,13 @@ class RetrievalStateTests(unittest.TestCase):
                     self.assertAlmostEqual(dist_goal, radius, delta=0.05)
                 else:
                     self.assertEqual(got, (float(step["pose"][0]), float(step["pose"][1])))
+
+    def test_close_enough_half_metre_outside_three_metre_disc(self):
+        self.assertTrue(close_enough_to_search((3.5, 0.0), (0.0, 0.0), 3.0, 0.7))
+        self.assertEqual(
+            "close_enough",
+            nearfield_start_reason(False, (3.5, 0.0), (0.0, 0.0), 3.0, 0.7),
+        )
 
 
 if __name__ == "__main__":

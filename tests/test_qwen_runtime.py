@@ -156,6 +156,14 @@ class QwenRuntimeTests(unittest.TestCase):
             self.assertFalse(status.ready)
             self.assertTrue(any("Git LFS" in item for item in status.missing))
 
+    def test_contract_loader_is_image_text_to_text(self):
+        contract = json.loads(STAGE1_QWEN_CONTRACT.read_text(encoding="utf-8"))
+        self.assertEqual(
+            "transformers.AutoModelForImageTextToText",
+            contract["inference"]["loader"],
+        )
+        self.assertNotIn("AutoModelForMultimodalLM", contract["inference"]["loader"])
+
 
 if __name__ == "__main__":
     unittest.main()

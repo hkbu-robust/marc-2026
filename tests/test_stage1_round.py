@@ -200,8 +200,85 @@ class Stage1RoundTests(unittest.TestCase):
             verifier=lambda board: "rig_a:person:1|emergency",
             projector=empty,
         )
-        self.assertIsNone(result.grounding)
-        self.assertEqual("projection_failed", result.failure_reason)
+    def test_umbrella_without_target_submits_projected_landmark(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:vending_machine:0",
+                        "vending_machine",
+                        (200.0, 180.0, 420.0, 430.0),
+                        0.92,
+                        "rig_a",
+                        (640, 480),
+                    )
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "Find the umbrella beside the vending machine.",
+            detector=detector,
+            projector=_geometry(),
+        )
+        self.assertIsNotNone(result.grounding)
+        self.assertNotEqual([0.0, 0.0, 0.0], result.grounding.target_coord)
+        self.assertEqual("umbrella", result.grounding.target_type)
+        self.assertEqual("vending_machine", result.grounding.landmark)
+        self.assertEqual("landmark_fallback", result.method)
+
+    def test_bring_intent_reuses_object_pipeline(self):
+        from marc_agent.command_parser import Intent
+
+        def detector(client, *, stub_path=None):
+            return _object_round()
+
+        result = run_stage1_round(
+            object(),
+            "Bring the mug on the picnic table.",
+            detector=detector,
+            projector=_geometry(),
+            expected_intent=Intent.BRING,
+        )
+        self.assertIsNotNone(result.grounding)
+        self.assertEqual("bring", result.candidates.parsed.intent.value)
+        self.assertEqual("picnic_table", result.grounding.landmark)
+
+    def test_parking_submit_copies_vehicle_class_as_landmark(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:tumbler:0",
+                        "tumbler",
+                        (40.0, 300.0, 80.0, 380.0),
+                        0.7,
+                        "rig_a",
+                        (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:police_car:0",
+                        "police_car",
+                        (90.0, 280.0, 400.0, 420.0),
+                        0.9,
+                        "rig_a",
+                        (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "Find the tumbler dropped in the empty parking space.",
+            detector=detector,
+            projector=_geometry(),
+        )
+        self.assertIsNotNone(result.grounding)
+        self.assertEqual("police_car", result.grounding.landmark)
+        self.assertEqual("near", result.grounding.relation)
+        self.assertEqual("tumbler", result.grounding.target_type)
 
 
 if __name__ == "__main__":

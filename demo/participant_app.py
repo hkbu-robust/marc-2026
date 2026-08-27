@@ -24,17 +24,36 @@ import threading
 
 from marc_sdk import MARCClient
 
+from marc_agent.command_parser import Intent
 from marc_agent.navigation_runtime import Stage2Navigator
-from marc_agent.perception.cctv_dump import maybe_dump_cctv_round
+from marc_agent.gpu_handoff import (
+    after_successful_pick,
+    before_graspgenx,
+    before_reacquire,
+    unload_cctv_yolo,
+    unload_qwen,
+)
+from marc_agent.perception.round_dump import (
+    dump_json,
+    dump_stage_round,
+    stage1_dir,
+    stage2_dir,
+)
 from marc_agent.perception.cctv_project import CctvProjector
 from marc_agent.perception.cctv_round import discovery_timeout_from_limit
 from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
+    get_default_verifier,
     log_qwen_startup_status,
     run_stage1_round,
 )
 from marc_agent.pick_runtime import PickRuntime
-from marc_agent.retrieval_state import RetrievalState, search_area_approach_goal
+from marc_agent.retrieval_state import (
+    RetrievalState,
+    nearfield_start_reason,
+    search_area_approach_goal,
+)
+from marc_agent.round_clock import RoundClock
 from mock_agent_vla import MockVLAGrounding
 from mock_agent_navigation import lidar_cloud_to_obstacles, frontal_hit
 from nearfield import NearFieldAcquire, make_detector
@@ -78,6 +97,9 @@ class DemoParticipant:
         self._last_stage1_candidates = None
         self._stage1_lock = threading.Lock()
         self._stage1_projector = None
+        self._nearfield_detector = None
+        self._round_clock = RoundClock()
+        self._qwen_verifier = get_default_verifier()
         self._register_handlers()
 
     # -- handler registration --
@@ -90,6 +112,7 @@ class DemoParticipant:
         c.on_stage2_run(self._drive)
         c.on_score(self._on_score)
         c.on_state_change(self._on_state_change)
+        c.on_time_remaining(self._on_time_remaining)
         c.on_time_expired(self._on_time_expired)
 
     # -- Stage 1 --
@@ -116,15 +139,18 @@ class DemoParticipant:
         timeout_s = discovery_timeout_from_limit(getattr(mission, "time_limit", None))
         if self._stage1_projector is None:
             self._stage1_projector = CctvProjector.from_client(self.client)
+        self._round_clock.begin(getattr(mission, "time_limit", None), self.client.now_s())
         round_result = run_stage1_round(
             self.client,
             mission.voice_command,
             discovery_timeout_s=timeout_s,
             projector=self._stage1_projector,
+            clock=self._round_clock,
+            verifier=self._qwen_verifier,
         )
         self._last_stage1_candidates = round_result.candidates
         self._last_detections = round_result.candidates.detections
-        maybe_dump_cctv_round(self._last_detections, round_num=mission.round)
+        dump_path = dump_stage_round(stage1_dir(mission.round), round_result)
         log.info(
                  "[Stage1] CCTV round: %d cameras, %d frames, %d objects, "
                  "%d people, selected=%s method=%s reason=%s",
@@ -142,7 +168,11 @@ class DemoParticipant:
             "artifacts/stage1_rounds.jsonl",
         )
         try:
-            append_stage1_record(self._last_stage1_candidates, metrics_path)
+            append_stage1_record(
+                self._last_stage1_candidates,
+                metrics_path,
+                extra={"dump_dir": str(dump_path) if dump_path else None},
+            )
         except OSError as exc:
             log.warning("[Stage1] could not append metrics to %s: %s", metrics_path, exc)
 
@@ -179,13 +209,64 @@ class DemoParticipant:
         self._state.adopt_mission(mission)
         if self._state.owner_xy is not None:
             log.info("[Stage2] owner_position(runtime-provided)=%s", self._state.owner_xy)
-        if self._stage2_vla is None:
-            self._stage2_vla = MockVLAGrounding()
-        result = self._stage2_vla.process_stage2(mission.task_description)
-        self.client.submit_stage2_grounding(result)
-        self._state.adopt_grounding(result.target_coord)
-        log.info("[Stage2] submitted grounding target=%s (owner stored=%s)",
-                 self._state.grounding_xy, self._state.owner_xy)
+        self._round_clock.begin(getattr(mission, "time_limit", None), self.client.now_s())
+        if os.environ.get("MARC_STAGE2_MOCK_VLA", "").strip() == "1":
+            if self._stage2_vla is None:
+                self._stage2_vla = MockVLAGrounding()
+            result = self._stage2_vla.process_stage2(mission.task_description)
+            self.client.submit_stage2_grounding(result)
+            self._state.adopt_grounding(result.target_coord)
+            log.info("[Stage2] submitted mock grounding target=%s (owner stored=%s)",
+                     self._state.grounding_xy, self._state.owner_xy)
+            dump_json(
+                stage2_dir(),
+                "grounding.json",
+                {
+                    "submitted": {
+                        "target_coord": getattr(result, "target_coord", None),
+                        "target_type": getattr(result, "target_type", None),
+                    },
+                    "method": "mock_vla",
+                    "failure_reason": None,
+                },
+            )
+            dump_json(stage2_dir(), "summary.json", {
+                "method": "mock_vla",
+                "task": mission.task_description,
+            })
+            return
+        if self._stage1_projector is None:
+            self._stage1_projector = CctvProjector.from_client(self.client)
+        timeout_s = discovery_timeout_from_limit(getattr(mission, "time_limit", None))
+        round_result = run_stage1_round(
+            self.client,
+            mission.task_description,
+            expected_intent=Intent.BRING,
+            projector=self._stage1_projector,
+            discovery_timeout_s=timeout_s,
+            clock=self._round_clock,
+            verifier=self._qwen_verifier,
+        )
+        dump_stage_round(stage2_dir(), round_result)
+        grounding = round_result.grounding
+        if grounding is None:
+            log.info(
+                "[Stage2] skip submit reason=%s (no zero-coordinate fallback)",
+                round_result.failure_reason,
+            )
+            return
+        self.client.submit_stage2_grounding(grounding)
+        self._state.adopt_grounding(grounding.target_coord)
+        log.info(
+            "[Stage2] submitted grounding camera=%s target_id=%s method=%s "
+            "target_xyz=%s landmark=%s relation=%s",
+            grounding.camera_id,
+            round_result.target_id,
+            round_result.method,
+            grounding.target_coord,
+            grounding.landmark,
+            grounding.relation,
+        )
 
     def _on_stage2_reveal(self, reveal):
         """Stage 2 post-grounding reveal (msg 411) -- search area, not the object.
@@ -209,6 +290,7 @@ class DemoParticipant:
         c = self.client
         # SIM-time deadline (via /clock) -- shared across all legs, robust to real-time factor < 1.
         deadline = c.now_s() + STAGE2_NAV_TIMEOUT_S
+        dump = stage2_dir()
 
         self._wait_for_search_goal(timeout=5.0)
         search = self._state.search_xy()
@@ -217,11 +299,17 @@ class DemoParticipant:
                  STAGE2_NAV_TIMEOUT_S)
 
         self._stow_arm()
+        unload_cctv_yolo()
+        unload_qwen()
+        self._qwen_verifier = None
+        detector = self._preload_nearfield()
 
         picked = False
         reached_search = False
+        handoff = "skip_no_search"
         if search is None:
             log.warning("[Stage2] no search goal (no reveal, no grounding) -- skip nav and pick")
+            dump_json(dump, "nav.json", {"skipped": True, "reason": "no_search_goal"})
         else:
             pose = c.get_world_pose()
             pose_xy = (pose[0], pose[1]) if pose is not None else search
@@ -238,35 +326,86 @@ class DemoParticipant:
                 leg="search",
             )
             reached_search = result.reached
-            log.info("[Stage2] leg1 result=%s reason=%s replans=%d",
-                     result.status.value, result.reason, result.replan_count)
+            pose_after = c.get_world_pose()
+            pose_xy = (pose_after[0], pose_after[1]) if pose_after is not None else pose_xy
+            handoff = nearfield_start_reason(
+                reached_search, pose_xy, search, self._state.hint_radius, GOAL_TOLERANCE,
+            )
+            log.info("[Stage2] leg1 result=%s reason=%s replans=%d yolo=%s",
+                     result.status.value, result.reason, result.replan_count, handoff)
+            dump_json(dump, "nav.json", {
+                "status": result.status.value,
+                "reason": result.reason,
+                "reached": reached_search,
+                "replan_count": result.replan_count,
+                "search": list(search) if search is not None else None,
+                "hint_radius": self._state.hint_radius,
+                "approach": list(approach),
+                "pose_xy": list(pose_xy) if pose_xy is not None else None,
+                "handoff": handoff,
+            })
         if not c.is_running:
             return
-        if not reached_search:
-            log.warning("[Stage2] search area not reached -- skip pick (fail closed)")
+        start_yolo = not str(handoff).startswith("skip")
+        if not start_yolo:
+            log.warning("[Stage2] skip pick -- near-field not started (%s)", handoff)
+            dump_json(dump, "pick.json", {"skipped": True, "reason": handoff})
         else:
+            log.info("[Stage2] starting near-field YOLO (%s)", handoff)
             reveal = self._reveal if self._reveal is not None else c.stage2_reveal
-            target = NearFieldAcquire(c, make_detector()).acquire(reveal, deadline)
+            target = NearFieldAcquire(c, detector, dump_dir=dump).acquire(reveal, deadline)
             for _ in range(5):
                 c.send_cmd_vel(0.0, 0.0)
                 c.sleep(0.1)
             if not target.valid:
                 log.warning("[Stage2] near-field acquire failed (%s) -- skip pick (fail closed)",
                             target.reason)
+                dump_json(dump, "pick.json", {
+                    "skipped": True,
+                    "reason": target.reason,
+                    "valid": False,
+                })
             else:
                 log.info("[Stage2] localized %s grasp=(%.2f, %.2f, z=%.2f) conf=%.2f",
                          target.name or "?", target.fwd, target.lat, target.z, target.conf)
+                before_graspgenx(detector)
+                pick_rt = PickRuntime(c, log)
+
                 def _reacquire():
-                    nxt = NearFieldAcquire(c, make_detector()).acquire(reveal, deadline)
+                    before_reacquire(pick_rt, detector)
+                    nxt = NearFieldAcquire(c, detector, dump_dir=dump).acquire(
+                        reveal, deadline)
                     for _ in range(3):
                         c.send_cmd_vel(0.0, 0.0)
                         c.sleep(0.05)
+                    if nxt is not None and getattr(nxt, "valid", False):
+                        before_graspgenx(detector)
                     return nxt
-                pick = PickRuntime(c, log, reacquire_fn=_reacquire).run(
-                    target, deadline=deadline, reveal=reveal)
+
+                pick_rt._reacquire_fn = _reacquire
+                pick = pick_rt.run(target, deadline=deadline, reveal=reveal)
                 self._state.adopt_pick(pick)
                 picked = pick.ok
                 c.send_cmd_vel(0.0, 0.0)
+                if picked:
+                    after_successful_pick(pick_rt, detector)
+                dump_json(dump, "pick.json", {
+                    "ok": pick.ok,
+                    "reason": pick.reason,
+                    "attempts": pick.attempts,
+                    "grasped": pick.grasped,
+                    "basket_occupied": pick.basket_occupied,
+                    "policy": pick.policy,
+                    "target": {
+                        "name": target.name,
+                        "fwd": target.fwd,
+                        "lat": target.lat,
+                        "z": target.z,
+                        "conf": target.conf,
+                        "valid": target.valid,
+                        "bbox_xyxy": list(target.bbox_xyxy) if target.bbox_xyxy else None,
+                    },
+                })
                 log.info("[Stage2] pick %s reason=%s attempts=%d grasping=%s basket=%s policy=%s",
                          "ok" if picked else "failed", pick.reason, pick.attempts,
                          pick.grasped, pick.basket_occupied, pick.policy)
@@ -275,9 +414,18 @@ class DemoParticipant:
             self._stow_arm()
 
         c.stop()
-        log.info("[Stage2] search-area nav finished (reached=%s) -> task_complete",
-                 reached_search)
+        log.info("[Stage2] search-area nav finished (reached=%s yolo=%s) -> task_complete",
+                 reached_search, handoff)
         c.task_complete()
+
+    def _preload_nearfield(self):
+        if self._nearfield_detector is None:
+            self._nearfield_detector = make_detector()
+        try:
+            self._nearfield_detector.load()
+        except Exception as exc:
+            log.warning("[Stage2] near-field YOLO preload failed: %s", exc)
+        return self._nearfield_detector
 
     def _stow_arm(self):
         """Fold the arm to the HOME pose to lower the center of gravity -- tip-over prevention.
@@ -402,13 +550,26 @@ class DemoParticipant:
     # -- notifications --
 
     def _on_score(self, score):
+        payload = {
+            "stage": score.stage,
+            "round": score.round,
+            "scores": score.scores,
+            "total": score.total,
+            "is_final": score.is_final,
+        }
         if score.is_final:
             log.info("[FINAL] %s", score.scores)
+            dump_json(stage2_dir(), "score.json", payload)
         else:
             log.info("[Score] round %s: total=%s", score.round, score.total)
+            if score.round is not None:
+                dump_json(stage1_dir(score.round), "score.json", payload)
 
     def _on_state_change(self, old, new):
         log.info("[STATE] %s -> %s", old, new)
+
+    def _on_time_remaining(self, remaining):
+        self._round_clock.note(remaining, self.client.now_s())
 
     def _on_time_expired(self, which):
         log.info("[TIME] expired: %s", which)

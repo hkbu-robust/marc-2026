@@ -19,7 +19,10 @@ CAMERA_RE = re.compile(r"(rig_\d+_[a-z])$")
 
 def _frames(data_yaml: Path) -> tuple[list[str], list[dict]]:
     data = yaml.safe_load(data_yaml.read_text(encoding="utf-8"))
-    names = [data["names"][key] for key in range(33)]
+    names_map = {int(key): value for key, value in data["names"].items()}
+    if sorted(names_map) != list(range(len(names_map))):
+        raise ValueError("data.yaml names must be contiguous class IDs from 0")
+    names = [names_map[key] for key in range(len(names_map))]
     root = data_yaml.parent
     images = sorted((root / data["val"]).glob("*.png"))
     frames = []
@@ -201,8 +204,8 @@ def main() -> None:
 
     names, frames = _frames(args.data.resolve())
     check_det_dataset(str(args.data.resolve()), autodownload=False)
-    if len(names) != 33 or not frames:
-        raise ValueError("expected a non-empty 33-class validation dataset")
+    if not names or not frames:
+        raise ValueError("expected a non-empty validation dataset")
     checkpoints = [checkpoint.resolve() for checkpoint in args.checkpoints]
     if args.preflight:
         for checkpoint in checkpoints:

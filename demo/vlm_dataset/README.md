@@ -4,9 +4,10 @@ Host-side converter. **Does not** start Isaac. `dataset-gen` writes detector GT
 (`scene_XXXXX/{camera}.png` + `.json`); this turns that into chat turns for
 Qwen2-VL-Instruct / LLaMA-Factory.
 
-Generate with recipe-driven SAR scenes plus object copies (4–6, umbrellas
-skipped to match the 33-class runtime contract, ~35% of non-vehicle landmark
-types per scene). From `simulation-platform/`:
+Generate with recipe-driven SAR scenes plus object copies (4–6,
+`long_umbrella` / `master_chef_can` / `wood_block` skipped, ~35% of
+non-vehicle landmark types per scene).
+From `simulation-platform/`:
 
 ```bash
 TRAINER_SAR_RECIPES=1 TRAINER_PEOPLE_ALL_CHARS=1 \
@@ -62,10 +63,24 @@ dropped; `person_prone` is always `accident`. Parking-proxy frames
 Object rows keep eight-relation referring expressions without grounding xyz,
 and only when the chosen landmark/relation uniquely identifies that instance
 (ambiguous nearest-2D `near` / `beside` among same-class clones is skipped).
-Umbrellas stay skipped.
+Ordinary `umbrella` object rows are kept; `long_umbrella`, `master_chef_can`,
+and `wood_block` are skipped.
 
 Same dump also converts to YOLO (object-detection training export; **no**
-situation labels; same `--val-frac` / scene grouping):
+situation labels; same `--val-frac` / scene grouping). **Do not convert a
+SAR-recipe dump as detector gold.** Generate ordinary CCTV with
+`TRAINER_YOLO_MODE=1` (bench/table seats only; injects `umbrella` if the GUI
+catalog omitted it; does not spawn chef/wood; wins over recipes and
+`TRAINER_PEOPLE_ABOVE`):
+
+```bash
+ENV_MARC_SCENARIO=marc2026_chungmu TRAINER_YOLO_MODE=1 TRAINER_PEOPLE_ALL_CHARS=1 \
+  TRAINER_SAR_RECIPES=0 TRAINER_PEOPLE_ABOVE=0 \
+  TRAINER_AUTO_SCENES=4803 HEADLESS=true \
+  docker compose --profile dataset-gen up --force-recreate
+```
+
+Then from the repo root:
 
 ```bash
 python3 demo/vlm_dataset/cctv_gt_to_yolo.py \
@@ -73,8 +88,16 @@ python3 demo/vlm_dataset/cctv_gt_to_yolo.py \
   --out trainer_output/yolo_cctv
 ```
 
-YOLO classes are poses (`person_crouching`) and the canonical 33 object /
-landmark names, not identity meshes. Do **not** mix ego-cam frames.
+The converter writes `umbrella` boxes, drops `long_umbrella`, `master_chef_can`,
+and `wood_block` (`wooden_block` aliases to `wood_block` then drops), and drops
+detections with `occlusion >= 0.85`. Train a new corpus without rewriting the
+archived 33-class pins:
+
+`python3 training/train_cctv_detector.py --no-verify-hash ...`
+
+YOLO classes are poses (`person_crouching`) and the canonical object /
+landmark names, including `umbrella`. The training job drops `long_umbrella`,
+`master_chef_can`, and `wood_block`. Do **not** mix ego-cam frames.
 
 New `dataset-gen` runs stamp `world_xyz`, `support_class`, `surface_class`,
 and `recipe_id` on person detections (boot patch `patch_gt_world_xyz.py`).
