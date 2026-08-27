@@ -15,6 +15,12 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from marc_agent.graspgenx_policy import (
+    best_grasp,
+    grasp_yaw_from_matrix,
+    load_graspgenx,
+    points_from_target,
+)
 from marc_agent.openvla_actions import (
     ACTION_DIM,
     GRIPPER_CLOSE,
@@ -22,9 +28,7 @@ from marc_agent.openvla_actions import (
     pick_instruction,
 )
 from marc_agent.openvla_policy import (
-    GeometricGraspStub,
     PolicyObservation,
-    load_openvla,
 )
 
 _DEMO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo")
@@ -38,7 +42,7 @@ DEFAULT_GRASP_POLL = 8
 DEFAULT_BASKET_POLL = 10
 DEFAULT_POLL_DT = 0.05
 DEFAULT_POLICY_TICKS = 80
-DEFAULT_POLICY = "ik"
+DEFAULT_POLICY = "graspgenx"
 REASON_OK = "ok"
 REASON_NO_GRASP = "no_grasp"
 REASON_DROP = "drop"
@@ -59,7 +63,7 @@ def _env_int(name: str, default: int) -> int:
 
 def pick_policy_name() -> str:
     raw = (os.environ.get("MARC_PICK_POLICY") or DEFAULT_POLICY).strip().lower()
-    if raw in ("openvla", "openvla_geom", "ik"):
+    if raw in ("graspgenx", "ik", "openvla", "openvla_geom"):
         return raw
     return DEFAULT_POLICY
 
@@ -92,6 +96,7 @@ class PickRuntime:
         place_fn: Optional[Callable] = None,
         recover_fn: Optional[Callable] = None,
         reacquire_fn: Optional[Callable] = None,
+        grasp_generator: Optional[Callable] = None,
         poll_dt: float = DEFAULT_POLL_DT,
         grasp_poll: int = DEFAULT_GRASP_POLL,
         basket_poll: int = DEFAULT_BASKET_POLL,
@@ -108,12 +113,14 @@ class PickRuntime:
         self._place_fn = place_fn
         self._recover_fn = recover_fn
         self._reacquire_fn = reacquire_fn
+        self._grasp_generator = grasp_generator
         self.poll_dt = float(poll_dt)
         self.grasp_poll = int(grasp_poll)
         self.basket_poll = int(basket_poll)
         self.policy_ticks = int(policy_ticks)
         self._teleop = None
         self._openvla_fallback_logged = False
+        self._graspgenx_fallback_logged = False
 
     def _emit(self, msg: str) -> None:
         if callable(self._log):
@@ -200,6 +207,9 @@ class PickRuntime:
             z = float(z)
             if -0.45 <= z <= -0.05:
                 p["grasp_down"] = z
+        yaw = getattr(target, "grasp_yaw", None)
+        if yaw is not None:
+            p["grasp_yaw"] = float(yaw)
         arm_pick.run_motion(self.client, self._log, p, "pick")
 
     def _snapshot_obs(self, target=None) -> PolicyObservation:
@@ -272,22 +282,47 @@ class PickRuntime:
             if gripper_should_close(float(action[6]), signed=signed):
                 arm.apply_delta(grip=close_cmd)
 
+    def _apply_graspgenx(self, target) -> None:
+        generator = self._grasp_generator
+        if generator is None:
+            if self._graspgenx_fallback_logged:
+                return
+            generator = load_graspgenx()
+            if generator is None:
+                self._emit("[pick] GraspGen-X unavailable -- IK fallback")
+                self._graspgenx_fallback_logged = True
+                return
+            self._grasp_generator = generator
+        try:
+            points = points_from_target(target, client=self.client)
+            pose = best_grasp(points, generate_fn=generator)
+        except Exception as exc:
+            pose = None
+            if not self._graspgenx_fallback_logged:
+                self._emit("[pick] GraspGen-X failed (%s) -- IK fallback" % exc)
+                self._graspgenx_fallback_logged = True
+        if pose is None:
+            if not self._graspgenx_fallback_logged:
+                self._emit("[pick] GraspGen-X unavailable -- IK fallback")
+                self._graspgenx_fallback_logged = True
+            return
+        target.fwd, target.lat, target.z = pose.xyz
+        yaw = grasp_yaw_from_matrix(pose.matrix)
+        if yaw is not None:
+            target.grasp_yaw = yaw
+
+    def unload_generator(self) -> None:
+        self._grasp_generator = None
+
     def _grasp(self, target) -> None:
         if self._grasp_fn is not None:
             self._grasp_fn(target)
             return
-        if self.policy == "openvla_geom":
-            z = float(getattr(target, "z", -0.30))
-            stub = GeometricGraspStub((float(target.fwd), float(target.lat), z))
-            self._geom_or_openvla_grasp(target, stub)
-            return
-        if self.policy == "openvla":
-            loaded = load_openvla()
-            if loaded is not None:
-                self._geom_or_openvla_grasp(target, loaded)
-                return
+        if self.policy == "graspgenx":
+            self._apply_graspgenx(target)
+        elif self.policy in ("openvla", "openvla_geom"):
             if not self._openvla_fallback_logged:
-                self._emit("[pick] OpenVLA unavailable -- IK fallback")
+                self._emit("[pick] OpenVLA is not used at pick -- IK")
                 self._openvla_fallback_logged = True
         self._ik_grasp(target)
 

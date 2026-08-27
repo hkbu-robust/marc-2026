@@ -7,7 +7,7 @@
     "format": "Hugging Face Transformers safetensors snapshot"
   },
   "inference": {
-    "loader": "transformers.AutoModelForMultimodalLM",
+    "loader": "transformers.AutoModelForImageTextToText",
     "processor": "transformers.AutoProcessor",
     "local_files_only": true,
     "dtype": "bfloat16",

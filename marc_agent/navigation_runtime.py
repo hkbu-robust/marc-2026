@@ -57,6 +57,17 @@ class ReplanReason:
     FIRST_PLAN = "first_plan"
 
 
+def _plan_attempts(inflation_m: float):
+    """Configured inflation first, then thinner inflation, then a wider crop."""
+    attempts = [(float(inflation_m), 12.0)]
+    for infl in (0.10, 0.0):
+        if infl < float(inflation_m) - 1e-9:
+            attempts.append((infl, 12.0))
+    for margin in (40.0, 80.0):
+        attempts.append((float(inflation_m), margin))
+    return attempts
+
+
 @dataclass
 class NavigationResult:
     status: NavStatus
@@ -93,6 +104,29 @@ class Stage2Navigator:
         self.stuck_move_m = float(stuck_move_m)
         self.replan_cap = int(replan_cap)
         self.cruise = bool(cruise)
+        self._path_inflation = float(inflation_m)
+
+    def _plan_path(self, planner, start_xy, goal_xy):
+        """Plan with inflation then crop-margin fallbacks. First success wins."""
+        for inflation, margin in _plan_attempts(self.inflation_m):
+            path = planner.plan(
+                start_xy,
+                goal_xy,
+                inflation_m=inflation,
+                snap_m=8.0,
+                margin_m=margin,
+            )
+            if path:
+                self._path_inflation = float(inflation)
+                if abs(inflation - self.inflation_m) > 1e-9 or abs(margin - 12.0) > 1e-9:
+                    log.info(
+                        "[Stage2] path fallback inflation=%.2f margin=%.1f method=%s",
+                        inflation,
+                        margin,
+                        planner.last_method or "dstar",
+                    )
+                return path
+        return None
 
     def navigate_to(self, goal_xy, deadline_s, *, leg: str = "search",
                     tol=DEFAULT_GOAL_TOLERANCE, extra_obstacles=None) -> NavigationResult:
@@ -165,6 +199,7 @@ class Stage2Navigator:
             hole = max(float(self.exclude_m), cur_tol)
             planner.stamp_overlay(extra + lidar_obs, now_s)
             planner.clear_goal_hole(cur_goal, exclude_m=hole)
+            planner.clear_start_hole((x, y), exclude_m=hole)
 
             hold_linear = frontal_hit(extra + lidar_obs, pose)
             need_replan = follower is None
@@ -196,7 +231,7 @@ class Stage2Navigator:
 
             if follower is not None and not need_replan:
                 remain = [(x, y)] + follower.path[follower.idx:]
-                if path_is_blocked(planner, remain, inflation_m=self.inflation_m):
+                if path_is_blocked(planner, remain, inflation_m=self._path_inflation):
                     log.info("[Stage2] %s path blocked -> replan", leg)
                     need_replan = True
                     replan_reason = ReplanReason.PATH_BLOCKED
@@ -212,18 +247,25 @@ class Stage2Navigator:
                     client.send_cmd_vel(0.0, 0.0)
                     client.sleep(self.dt)
                     continue
-                n_replan += 1
-                if n_replan > self.replan_cap:
-                    log.error("[Stage2] %s ABORTED after %d replans", leg, self.replan_cap)
-                    client.send_cmd_vel(0.0, 0.0)
-                    return NavigationResult(
-                        NavStatus.ABORTED, reason=ReplanReason.REPLAN_CAP,
-                        replan_count=n_replan, goal_xy=cur_goal, pose_xy=(x, y), leg=leg,
+                counts_cap = replan_reason == ReplanReason.PATH_BLOCKED or (
+                    had_path
+                    and replan_reason in (
+                        ReplanReason.STALL,
+                        ReplanReason.FRONTAL,
+                        ReplanReason.GOAL_RETARGET,
                     )
-                if replan_reason:
+                )
+                if counts_cap:
+                    n_replan += 1
+                    if n_replan > self.replan_cap:
+                        log.error("[Stage2] %s ABORTED after %d replans", leg, self.replan_cap)
+                        client.send_cmd_vel(0.0, 0.0)
+                        return NavigationResult(
+                            NavStatus.ABORTED, reason=ReplanReason.REPLAN_CAP,
+                            replan_count=n_replan, goal_xy=cur_goal, pose_xy=(x, y), leg=leg,
+                        )
                     log.info("[Stage2] %s replan reason=%s count=%d", leg, replan_reason, n_replan)
-                path = planner.plan(
-                    (x, y), cur_goal, inflation_m=self.inflation_m, snap_m=8.0)
+                path = self._plan_path(planner, (x, y), cur_goal)
                 if path:
                     follower = PathFollower(path, passthrough=self.cruise)
                     had_path = True
@@ -237,11 +279,15 @@ class Stage2Navigator:
                     gr, gc = planner._w2c(*cur_goal)
                     sv = int(planner._grid[sr, sc]) if planner._in_bounds(sr, sc) else 99
                     gv = int(planner._grid[gr, gc]) if planner._in_bounds(gr, gc) else 99
+                    start_trav = planner.last_start_trav
+                    goal_trav = planner.last_goal_trav
                     if now_s - last_log_t >= 1.0:
                         log.warning("[Stage2] %s NO_PATH (%s) -- holding "
-                                    "(start cell=(%d,%d) val=%d, goal cell=(%d,%d) val=%d) "
+                                    "(start cell=(%d,%d) val=%d trav=%s, "
+                                    "goal cell=(%d,%d) val=%d trav=%s) "
                                     "[0=free 100=occ -1=unknown]",
-                                    leg, planner.last_status, sr, sc, sv, gr, gc, gv)
+                                    leg, planner.last_status, sr, sc, sv, start_trav,
+                                    gr, gc, gv, goal_trav)
                         last_log_t = now_s
                     client.send_cmd_vel(0.0, 0.0)
                     client.sleep(self.dt)

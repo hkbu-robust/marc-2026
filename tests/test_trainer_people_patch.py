@@ -503,6 +503,8 @@ class AboveModePatchTests(unittest.TestCase):
         patch = _load_patch()
         self.assertIn("person_prone", patch.NEW_COMBOS)
         self.assertIn("TRAINER_SAR_RECIPES", patch.NEW_COMBOS)
+        self.assertIn("_marc_yolo_mode", patch.NEW_COMBOS)
+        self.assertIn("TRAINER_YOLO_MODE", patch.NEW_COMBOS)
         self.assertIn("_marc_sar_recipe_cursor_start", patch.NEW_COMBOS)
         self.assertIn("TRAINER_SAR_RECIPE_CURSOR", patch.NEW_COMBOS)
         self.assertIn("_ON_SEAT_POSES", patch.NEW_COMBOS)
@@ -973,6 +975,54 @@ class AboveModePatchTests(unittest.TestCase):
                 self.assertEqual(pl.get("recipe_id"), recipe_id)
                 self.assertEqual(pl.get("on_landmark_type"), landmark, recipe_id)
                 self.assertFalse(pl.get("above"))
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_yolo_mode_seats_only_bench_or_table(self):
+        namespace = self._exec_combos("<yolo-mode-seat>")
+        poses = [
+            "person_sitting", "person_walking", "person_lying_down",
+            "person_prone", "person_reaching", "person_crouching",
+            "person_reclining", "person_walking_away", "person_bending",
+        ]
+        chars = ["female_student_01", "male_student_01"]
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_YOLO_MODE"] = "1"
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "1"
+            os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "1"
+            os.environ["TRAINER_PEOPLE_WRONG_PLACE_PROB"] = "1"
+            os.environ["TRAINER_PEOPLE_ALL_CHARS"] = "1"
+            for seed in range(24):
+                namespace["random"].seed(seed)
+                landmarks, specs = namespace["build"](
+                    [
+                        {"name": "bench_0"},
+                        {"name": "vending_machine_0"},
+                        {"name": "trash_can_0"},
+                        {"name": "taxi_0"},
+                    ],
+                    chars,
+                    poses,
+                )
+                people = [o for o in specs if o.get("character")]
+                self.assertEqual(len(people), 2)
+                for person in people:
+                    pl = person.get("placement") or {}
+                    self.assertFalse(pl.get("above"))
+                    self.assertNotIn("recipe_id", pl)
+                    lm = pl.get("on_landmark_type")
+                    if lm is not None:
+                        self.assertIn(lm, ("bench", "picnic_table"))
+                        self.assertIn(
+                            person["type"],
+                            ("person_sitting", "person_reclining",
+                             "person_lying_down", "person_prone"),
+                        )
+                self.assertIn("vending_machine_0", {s["name"] for s in landmarks})
+                self.assertIn("trash_can_0", {s["name"] for s in landmarks})
         finally:
             os.environ.clear()
             os.environ.update(old)

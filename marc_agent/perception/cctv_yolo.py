@@ -247,8 +247,24 @@ class CctvYoloDetector:
 
         return all_objects, all_people
 
+    def unload(self) -> None:
+        model = self.model
+        self.model = None
+        self.names = {}
+        if model is not None:
+            del model
+
 
 _detector: Optional[CctvYoloDetector] = None
+
+
+def unload_detector() -> None:
+    """Drop the process-wide CCTV YOLO singleton."""
+    global _detector
+    if _detector is None:
+        return
+    _detector.unload()
+    _detector = None
 
 
 def detect_frames_with_yolo(

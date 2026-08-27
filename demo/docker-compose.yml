@@ -22,6 +22,7 @@ services:
       context: ..                 # starter kit root (includes marc_sdk + demo)
       dockerfile: demo/Dockerfile
       target: agent
+      network: host
     image: marc-agent:local       # local build artifact (do not redistribute)
     network_mode: host            # DDS discovery over the LAN via the participant machine NIC
     environment:
@@ -34,16 +35,22 @@ services:
       MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"    # <- your assigned token
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"                     # same value as the platform machine
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
-      PYTHONPATH: "/agent"
-      # Keep Qwen disabled until models/runtime/stage1-sar-qwen/model is complete.
-      MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-fallback}"
+      PYTHONPATH: "/agent:/agent/demo"
+      PYTHONUNBUFFERED: "1"
+      # Local Qwen is baked at image build. Overlay demo/docker-compose.qwen-remote.yml for vLLM.
+      MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-qwen}"
       MARC_QWEN_BACKEND: "${MARC_QWEN_BACKEND:-local}"
       MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
       MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"
       MARC_CCTV_YOLO_CONF: "${MARC_CCTV_YOLO_CONF:-0.15}"
+      MARC_GRASPGENX_WEIGHTS: "/agent/models/runtime/graspgenx"
+      GRASPGENX_CHECKPOINT_DIR: "/agent/models/runtime/graspgenx"
+      GRASPGENX_GRIPPER_CFG_DIR: "/agent/models/runtime/graspgenx/grippers"
+      MARC_GRASPGENX_GRIPPER: "${MARC_GRASPGENX_GRIPPER:-robotiq_2f_140}"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
+      YOLO_OFFLINE: "1"
     # GPU for VLA inference (uses the participant machine's GPU). If no GPU is needed, the deploy block can be removed.
     # Requires: nvidia-container-toolkit installed on the participant machine.
     deploy:
@@ -105,7 +112,7 @@ services:
               count: all
               capabilities: [gpu]
 
-  # Practice Stage 2 with YOLO (torch lives in manip-probe). Graded `agent` stays torch-free.
+  # Practice Stage 2 with YOLO. Graded `agent` already includes torch, CCTV YOLO, Qwen, and GraspGen-X.
   #   MARC_TEAM_ID=... docker compose up --build agent-nearfield
   agent-nearfield:
     profiles: ["tools"]

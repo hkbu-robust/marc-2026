@@ -104,6 +104,19 @@ _LANDMARK_ALIASES = {
 
 MISSION_OBJECT_TYPES = frozenset(_OBJECT_ALIASES)
 LANDMARK_TYPES = frozenset(_LANDMARK_ALIASES)
+SEATING_LANDMARKS = frozenset({"picnic_table", "bench"})
+VEHICLE_LANDMARKS = frozenset(
+    {
+        "police_car",
+        "taxi",
+        "normal_car_1",
+        "normal_car_2",
+        "sports_car",
+        "sports_car_2",
+        "suv",
+    }
+)
+PARKING_SCENES = frozenset({"parking", "parking_space"})
 
 _SCENE_HINTS = (
     ("empty parking space", "parking_space"),
@@ -138,6 +151,11 @@ _HELP_CUE_PATTERN = (
 _SCENE_LOCATION_PATTERN = r"at|in|on|near|around"
 _LANDMARK_LOCATION_PATTERN = rf"{_SCENE_LOCATION_PATTERN}|by"
 _NEXT_TO_PATTERN = r"next\s+to"
+_VEHICLE_CUE_RE = re.compile(
+    r"\b(?:(?:got|getting)\s+out\s+of|out\s+of)\s+(?:my|the|an?)\s+car\b|"
+    r"\b(?:my|the)\s+car\b"
+)
+_DEMONSTRATIVE_PLACE_RE = re.compile(r"\b(?:there|here)\b")
 _FIND_RE = re.compile(rf"\b(?:{_FIND_PATTERN})\b")
 _BRING_RE = re.compile(rf"\b(?:{_BRING_PATTERN})\b")
 _ACTION_RE = re.compile(rf"\b(?:{_FIND_PATTERN}|{_BRING_PATTERN})\b")
@@ -507,6 +525,42 @@ def _relation_candidates(text: str, landmarks: list[_Match], landmark: Optional[
     if landmark is not None:
         relations.update(_pronoun_relations(text, landmark))
 
+    return relations
+
+
+def _has_vehicle_cue(text: str) -> bool:
+    return bool(_VEHICLE_CUE_RE.search(text))
+
+
+def uses_vehicle_anchor(parsed: ParsedCommand, text: str = "") -> bool:
+    """True when ranking should pair the target with YOLO vehicle classes."""
+    if parsed.landmark is not None or parsed.target_type == "person":
+        return False
+    if parsed.scene_hint in PARKING_SCENES:
+        return True
+    return bool(text) and _has_vehicle_cue(text)
+
+
+def implicit_anchor_classes(parsed: ParsedCommand, text: str = "") -> frozenset[str]:
+    """Detector classes that may stand in for a missing named landmark."""
+    if parsed.landmark is not None:
+        return frozenset({parsed.landmark})
+    if uses_vehicle_anchor(parsed, text):
+        return VEHICLE_LANDMARKS
+    return frozenset()
+
+
+def _implicit_support_on(
+    text: str, landmark: Optional[str], relations: set[Relation]
+) -> set[Relation]:
+    """Placement at a seating landmark with no attached relation is ``on``."""
+    if relations or landmark not in SEATING_LANDMARKS:
+        return relations
+    if not re.search(rf"\b(?:{_PLACEMENT_PATTERN})\b", text):
+        return relations
+    if re.search(r"\bbehind\s*$", text) and not _DEMONSTRATIVE_PLACE_RE.search(text):
+        return relations
+    relations.add(Relation.ON)
     return relations
 
 
@@ -905,7 +959,9 @@ def parse_command(
             scene_hint=hint,
         )
 
-    relations = _relation_candidates(scope, landmarks, landmark)
+    relations = _implicit_support_on(
+        scope, landmark, _relation_candidates(scope, landmarks, landmark)
+    )
     if relations and landmark is None:
         raise CommandParseError(
             ParseErrorCode.UNKNOWN_LANDMARK,
@@ -931,9 +987,14 @@ __all__ = [
     "Intent",
     "LANDMARK_TYPES",
     "MISSION_OBJECT_TYPES",
+    "PARKING_SCENES",
     "ParseErrorCode",
     "ParsedCommand",
     "Relation",
+    "SEATING_LANDMARKS",
     "Situation",
+    "VEHICLE_LANDMARKS",
+    "implicit_anchor_classes",
     "parse_command",
+    "uses_vehicle_anchor",
 ]

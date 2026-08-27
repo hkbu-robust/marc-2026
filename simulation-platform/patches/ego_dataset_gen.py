@@ -19,7 +19,7 @@
 #   EGO_BEARING_DEG     object azimuth half-FOV deg (default 50)
 #   EGO_ROBOT_XY        robot wander radius around start_point m (default 4)
 #   EGO_YAW_SPAN        robot yaw randomisation deg (default 360 = full turn)
-#   EGO_SKIP_CLASSES    comma names to drop (default umbrella,long_umbrella)
+#   EGO_SKIP_CLASSES    comma names to drop (default long_umbrella)
 #   EGO_EMPTY_FRAC      fraction of empty (negative) scenes (default 0.05)
 #   EGO_VAL_FRAC        validation fraction (default 0.2)
 #   EGO_OUT             output root (default trainer_output/ego_yolo)
@@ -301,13 +301,14 @@ log.addHandler(_log_handler)
 log.propagate = False
 
 # Keep class ids stable and aligned with the CCTV / approach object list.
-# Umbrellas are skipped: long thin silhouettes dominate the frame and poison
-# the approach detector. Override via EGO_SKIP_CLASSES.
+# Long umbrellas are skipped: thin silhouettes dominate the frame. Ordinary
+# umbrella, master_chef_can, and wood_block are kept. Override via EGO_SKIP_CLASSES.
 CANONICAL_NAMES = [
     "tumbler", "cracker_box", "cola_can", "disposable_cup",
     "juice", "tissue", "mug", "sunblock", "pencilcase",
+    "master_chef_can", "wood_block", "umbrella",
 ]
-DEFAULT_SKIP = ("umbrella", "long_umbrella")
+DEFAULT_SKIP = ("long_umbrella",)
 
 CAM_W, CAM_H = 640, 480
 MIN_BOX_PX = 8
@@ -319,17 +320,14 @@ _BEARING_BINS = (-0.9, -0.55, -0.25, 0.0, 0.25, 0.55, 0.9)
 def _skip_classes():
     raw = os.environ.get("EGO_SKIP_CLASSES")
     names = raw.split(",") if raw else list(DEFAULT_SKIP)
-    skip = {n.strip() for n in names if n.strip()}
-    # Any type with "umbrella" in the name is also dropped (closedlongumbrella, …).
+    skip = {n.strip().lower() for n in names if n.strip()}
+    if "long_umbrella" in skip or "closedlongumbrella" in skip:
+        skip.update(("long_umbrella", "closedlongumbrella"))
     return skip
 
 
 def _is_skipped(name, skip):
-    if name in skip:
-        return True
-    if "umbrella" in name.lower() and any("umbrella" in s.lower() for s in skip):
-        return True
-    return False
+    return str(name or "").lower() in skip
 
 
 def _env_int(name, default):

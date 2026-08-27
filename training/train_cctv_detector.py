@@ -21,14 +21,19 @@ SOURCE_DATA_SHA256 = "88dee1597d7a25d7b1dc23bc7814da3669ee28e750ccf22a42c15499ec
 SOURCE_MODEL_SHA256 = "9fdd44a31c504547ffb81d2c6d9e6dac3493c8eaa8b0398d3f43bae6c7003e92"
 SOURCE_DATA_REVISION = "075767315653d3286fb636e9f278397ae73d84c9"
 EXPECTED_COUNTS = {"images": {"train": 3733, "val": 415}, "boxes": {"train": 139505, "val": 15311}}
-REMOVED_IDS = {4, 5}
-IGNORED_CLASSES = ("master_chef_can", "wood_block", "umbrella", "long_umbrella")
+ORGANIZER_EXCLUDED_CLASSES = frozenset({
+    "long_umbrella", "closedlongumbrella",
+    "master_chef_can", "wood_block",
+})
 CAMERA_RE = re.compile(r"rig_(\d+)_([a-z])$")
 
 
 def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _pairs(root: Path, split: str) -> list[tuple[Path, Path]]:
@@ -48,7 +53,27 @@ def _camera(stem: str) -> str:
     return f"rig_{match.group(1)}_{match.group(2)}"
 
 
-def _remap_label(source: Path, destination: Path, class_count: int) -> tuple[int, Counter]:
+def _excluded_ids(names: dict[int, str]) -> set[int]:
+    return {int(key) for key, value in names.items() if str(value) in ORGANIZER_EXCLUDED_CLASSES}
+
+
+def _id_map(names: dict[int, str], excluded: set[int]) -> dict[int, int]:
+    mapping = {}
+    new_id = 0
+    for old_id in range(len(names)):
+        if old_id in excluded:
+            continue
+        mapping[old_id] = new_id
+        new_id += 1
+    return mapping
+
+
+def _remap_label(
+    source: Path,
+    destination: Path,
+    id_map: dict[int, int],
+    class_count: int,
+) -> tuple[int, Counter]:
     output, counts = [], Counter()
     for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
         fields = line.split()
@@ -59,9 +84,9 @@ def _remap_label(source: Path, destination: Path, class_count: int) -> tuple[int
             coords = [float(value) for value in fields[1:]]
         except ValueError as error:
             raise ValueError(f"{source}:{line_number}: invalid YOLO label") from error
-        if old_id in REMOVED_IDS:
-            raise ValueError(f"{source}:{line_number}: excluded class {old_id} has a box")
-        new_id = old_id - 2 if old_id > max(REMOVED_IDS) else old_id
+        if old_id not in id_map:
+            continue
+        new_id = id_map[old_id]
         if not 0 <= new_id < class_count:
             raise ValueError(f"{source}:{line_number}: class {old_id} is out of bounds")
         if not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in coords) or coords[2] <= 0 or coords[3] <= 0:
@@ -86,13 +111,14 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_hash: bool =
             raise ValueError(f"unexpected source dataset revision or tracked changes: {revision}, {sorted(changed)}")
     source = yaml.safe_load(source_yaml.read_text(encoding="utf-8"))
     source["names"] = {int(key): value for key, value in source["names"].items()}
-    if sorted(source["names"]) != list(range(35)):
-        raise ValueError("source descriptor must contain contiguous class IDs 0..34")
-    if tuple(source["names"][key] for key in sorted(REMOVED_IDS)) != ("umbrella", "long_umbrella"):
-        raise ValueError("source classes 4 and 5 are not the expected exclusions")
-    names = [source["names"][key] for key in range(35) if key not in REMOVED_IDS]
-    if len(names) != 33 or len(set(names)) != 33:
-        raise ValueError("derived class map must contain 33 unique names")
+    if sorted(source["names"]) != list(range(len(source["names"]))):
+        raise ValueError("source descriptor must contain contiguous class IDs from 0")
+    excluded = _excluded_ids(source["names"])
+    id_map = _id_map(source["names"], excluded)
+    names = [source["names"][key] for key in range(len(source["names"])) if key not in excluded]
+    ignored = [source["names"][key] for key in sorted(excluded)]
+    if len(names) != len(set(names)):
+        raise ValueError("derived class map must contain unique names")
 
     output_root.mkdir(parents=True, exist_ok=True)
     stats = {"images": {}, "boxes": {}, "cameras": {}, "class_boxes": Counter()}
@@ -120,7 +146,7 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_hash: bool =
         for image, label in pairs:
             cameras[_camera(image.stem)] += 1
             split_scenes.add(image.stem.split("_rig_", 1)[0])
-            count, class_counts = _remap_label(label, label_dir / label.name, len(names))
+            count, class_counts = _remap_label(label, label_dir / label.name, id_map, len(names))
             boxes += count
             stats["class_boxes"].update(class_counts)
         _pairs(output_root, split)
@@ -139,14 +165,14 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_hash: bool =
         "train": "images/train",
         "val": "images/val",
         "names": dict(enumerate(names)),
-        "ignored_classes": list(IGNORED_CLASSES),
+        "ignored_classes": ignored,
         "source_revision": SOURCE_DATA_REVISION,
         "source_data_yaml_sha256": sha256(source_yaml),
     }
     output_yaml.write_text(yaml.safe_dump(descriptor, sort_keys=False), encoding="utf-8")
     stats["class_boxes"] = {names[key]: stats["class_boxes"][key] for key in range(len(names))}
     stats["names"] = names
-    stats["ignored_classes"] = list(IGNORED_CLASSES)
+    stats["ignored_classes"] = ignored
     (output_root / "dataset_summary.json").write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")
     return stats
 
@@ -172,13 +198,18 @@ def main() -> None:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--model", type=Path, help="official yolo26x.pt checkpoint")
     source.add_argument("--resume", type=Path, help="last.pt from this run")
-    parser.add_argument("--source-data", required=True, type=Path, help="raw 35-class data.yaml")
-    parser.add_argument("--data", required=True, type=Path, help="derived 33-class data.yaml to create/validate")
+    parser.add_argument("--source-data", required=True, type=Path, help="raw YOLO data.yaml (long_umbrella/chef/wood dropped by name)")
+    parser.add_argument("--data", required=True, type=Path, help="derived data.yaml with organizer-excluded classes removed")
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--name", required=True)
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--device", default="0")
     parser.add_argument("--preflight", action="store_true", help="prepare and load inputs without training")
+    parser.add_argument(
+        "--no-verify-hash",
+        action="store_true",
+        help="skip pinned-dump checksums so a new YOLO corpus can train",
+    )
     args = parser.parse_args()
 
     import torch
@@ -186,7 +217,7 @@ def main() -> None:
     from ultralytics.cfg import get_cfg
     from ultralytics.data.utils import check_det_dataset
 
-    stats = prepare_dataset(args.source_data, args.data)
+    stats = prepare_dataset(args.source_data, args.data, verify_hash=not args.no_verify_hash)
     checked = check_det_dataset(str(args.data), autodownload=False)
     checkpoint = (args.resume or args.model).resolve()
     if not checkpoint.is_file():

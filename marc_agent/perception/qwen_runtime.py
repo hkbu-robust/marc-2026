@@ -250,12 +250,26 @@ def require_local_bundle(
     return cfg
 
 
+def _qwen_model_cls():
+    """Qwen3-VL class for transformers 4.57.1 (AutoModelForMultimodalLM is v5)."""
+    try:
+        from transformers import AutoModelForImageTextToText
+
+        return AutoModelForImageTextToText
+    except ImportError:
+        from transformers import Qwen3VLForConditionalGeneration
+
+        return Qwen3VLForConditionalGeneration
+
+
 def load_local_qwen(config: Optional[QwenRuntimeConfig] = None):
     """Load the processor and model from disk without any Hub fallback."""
     cfg = require_local_bundle(config)
     try:
         import torch
-        from transformers import AutoModelForMultimodalLM, AutoProcessor
+        from transformers import AutoProcessor
+
+        model_cls = _qwen_model_cls()
     except ImportError as exc:
         raise ImportError(
             "Qwen inference requires torch, transformers, accelerate, and safetensors "
@@ -277,7 +291,7 @@ def load_local_qwen(config: Optional[QwenRuntimeConfig] = None):
         str(cfg.model_dir),
         local_files_only=True,
     )
-    model = AutoModelForMultimodalLM.from_pretrained(
+    model = model_cls.from_pretrained(
         str(cfg.model_dir),
         local_files_only=True,
         dtype=dtype,

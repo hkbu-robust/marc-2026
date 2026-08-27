@@ -136,3 +136,48 @@ class RetrievalState:
         if pose_xy is None:
             return center
         return search_area_approach_goal(center, self.hint_radius, pose_xy)
+
+
+def close_enough_to_search(
+    pose_xy,
+    hint_center,
+    hint_radius,
+    goal_tol: float = DEFAULT_GOAL_TOLERANCE,
+) -> bool:
+    """True when the chassis is inside the disc or within ``goal_tol`` of its rim."""
+    if pose_xy is None or hint_center is None:
+        return False
+    if len(pose_xy) < 2 or len(hint_center) < 2:
+        return False
+    dist = math.hypot(
+        float(pose_xy[0]) - float(hint_center[0]),
+        float(pose_xy[1]) - float(hint_center[1]),
+    )
+    radius = float(hint_radius or 0.0)
+    return dist <= radius + float(goal_tol)
+
+
+def nearfield_start_reason(
+    reached: bool,
+    pose_xy,
+    hint_center,
+    hint_radius,
+    goal_tol: float = DEFAULT_GOAL_TOLERANCE,
+) -> str:
+    """Why near-field YOLO should start (or `skip_*` if it should not)."""
+    if reached:
+        return "nav_reached"
+    if pose_xy is None or hint_center is None:
+        return "skip_no_pose"
+    if len(pose_xy) < 2 or len(hint_center) < 2:
+        return "skip_no_pose"
+    dist = math.hypot(
+        float(pose_xy[0]) - float(hint_center[0]),
+        float(pose_xy[1]) - float(hint_center[1]),
+    )
+    radius = float(hint_radius or 0.0)
+    if dist <= radius:
+        return "inside_disc"
+    if dist <= radius + float(goal_tol):
+        return "close_enough"
+    return "skip_too_far"

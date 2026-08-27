@@ -18,7 +18,9 @@ from marc_agent.perception.sar_selection import (
 )
 from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
+    get_default_verifier,
     log_qwen_startup_status,
+    reset_cached_verifier,
     run_stage1_candidate_pipeline,
 )
 from marc_agent.types import (
@@ -58,8 +60,12 @@ def _round() -> CctvDetectionRound:
 
 class SarSelectionTests(unittest.TestCase):
     def setUp(self):
+        reset_cached_verifier()
         self.text = "Find the person bent over near the trash can who needs urgent help."
         self.command = parse_command(self.text)
+
+    def tearDown(self):
+        reset_cached_verifier()
 
     def test_board_keeps_every_person_and_requested_anchor(self):
         board = build_candidate_board(self.text, self.command, _round())
@@ -159,6 +165,53 @@ class SarSelectionTests(unittest.TestCase):
         result = select_sar_candidate(self.text, self.command, round_)
 
         self.assertEqual("rig_a:person:1", result.selected.candidate_id)
+        self.assertEqual("deterministic_fallback", result.method)
+
+    def test_sitting_on_trash_can_beats_closer_standing_person(self):
+        text = "Find the person sitting on top of the trash can in the parking lot."
+        command = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                ObjectCandidate(
+                    "rig_a:trash_can:0",
+                    "trash_can",
+                    (300.0, 200.0, 430.0, 430.0),
+                    0.9,
+                    "rig_a",
+                    (640, 480),
+                ),
+                ObjectCandidate(
+                    "rig_b:trash_can:0",
+                    "trash_can",
+                    (200.0, 200.0, 320.0, 400.0),
+                    0.95,
+                    "rig_b",
+                    (640, 480),
+                ),
+            ],
+            people=[
+                PersonCandidate(
+                    "rig_a:person:0",
+                    (310.0, 80.0, 410.0, 210.0),
+                    "person_sitting",
+                    0.55,
+                    "rig_a",
+                    (640, 480),
+                ),
+                PersonCandidate(
+                    "rig_b:person:0",
+                    (205.0, 210.0, 310.0, 395.0),
+                    "person_walking",
+                    0.99,
+                    "rig_b",
+                    (640, 480),
+                ),
+            ],
+            camera_ids=["rig_a", "rig_b"],
+        )
+        result = select_sar_candidate(text, command, round_)
+        self.assertEqual("rig_a:person:0", result.selected.candidate_id)
+        self.assertEqual("abnormal", result.requested_situation)
         self.assertEqual("deterministic_fallback", result.method)
 
     def test_round_pipeline_returns_selection_without_coordinates(self):
@@ -307,6 +360,34 @@ class SarSelectionTests(unittest.TestCase):
         ):
             log_qwen_startup_status()
         self.assertIn("health=failed", "\n".join(captured.output))
+
+    def test_default_verifier_is_cached(self):
+        env = {
+            "MARC_SAR_DETECTOR": "qwen",
+            "MARC_QWEN_BACKEND": "remote",
+            "MARC_QWEN_BASE_URL": "http://workstation:8000/v1",
+            "MARC_QWEN_API_KEY": "private-test-key",
+        }
+        with patch.dict("os.environ", env, clear=False):
+            first = get_default_verifier()
+            second = get_default_verifier()
+        self.assertIs(first, second)
+
+    def test_local_startup_calls_warmup(self):
+        env = {
+            "MARC_SAR_DETECTOR": "qwen",
+            "MARC_QWEN_BACKEND": "local",
+        }
+        with (
+            patch.dict("os.environ", env, clear=False),
+            patch(
+                "marc_agent.perception.sar_selection.QwenSarVerifier.warmup",
+            ) as warmup,
+            self.assertLogs("marc_agent.stage1_pipeline", level="INFO") as captured,
+        ):
+            log_qwen_startup_status()
+        warmup.assert_called_once()
+        self.assertIn("backend=local", "\n".join(captured.output))
 
     def test_parse_failure_does_not_fetch_cctv(self):
         called = False

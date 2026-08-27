@@ -203,8 +203,9 @@ def _is_person(cls: str) -> bool:
     return c == "person" or c.startswith("person_") or any(c.startswith(p) for p in _PERSON_PREFIXES)
 
 
-def _is_umbrella(cls: str) -> bool:
-    return "umbrella" in (cls or "").lower()
+def _is_long_umbrella(cls: str) -> bool:
+    c = (cls or "").lower().replace("-", "_")
+    return c in ("long_umbrella", "closedlongumbrella")
 
 
 def _sar_pose_speak(cls: str) -> str:
@@ -823,7 +824,7 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
         d for d in dets
         if (d.get("kind") or "object") != "landmark"
         and not _is_person(str(d.get("class") or ""))
-        and not _is_umbrella(str(d.get("class") or ""))
+        and not _is_long_umbrella(str(d.get("class") or ""))
         and d.get("class")
         and _bbox_center(d.get("bbox"))
     ]
@@ -863,7 +864,7 @@ def _payload_landmarks(dets, objects):
         d for d in dets
         if (d.get("kind") == "landmark" or str(d.get("class") or "") in DISPLAY)
         and d.get("class")
-        and not _is_umbrella(str(d.get("class") or ""))
+        and not _is_long_umbrella(str(d.get("class") or ""))
         and not _is_person(str(d.get("class") or ""))
         and _bbox_center(d.get("bbox"))
         and (d.get("kind") == "landmark" or str(d.get("class")) not in object_classes)
@@ -873,7 +874,7 @@ def _payload_landmarks(dets, objects):
             d for d in dets
             if d not in objects and d.get("class") and _bbox_center(d.get("bbox"))
             and not _is_person(str(d.get("class") or ""))
-            and not _is_umbrella(str(d.get("class") or ""))
+            and not _is_long_umbrella(str(d.get("class") or ""))
         ]
     return landmarks
 
@@ -894,7 +895,7 @@ def _sar_pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int
         d for d in dets
         if (d.get("kind") or "object") != "landmark"
         and not _is_person(str(d.get("class") or ""))
-        and not _is_umbrella(str(d.get("class") or ""))
+        and not _is_long_umbrella(str(d.get("class") or ""))
         and d.get("class")
     ]
     landmarks = _payload_landmarks(dets, objects)
@@ -956,7 +957,7 @@ def _gt_candidate_rows(people: List[dict], camera_id: str, payload: dict) -> Lis
         d for d in dets
         if (d.get("kind") or "object") != "landmark"
         and not _is_person(str(d.get("class") or ""))
-        and not _is_umbrella(str(d.get("class") or ""))
+        and not _is_long_umbrella(str(d.get("class") or ""))
         and d.get("class")
     ]
     landmarks = _payload_landmarks(dets, objects)

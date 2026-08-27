@@ -436,6 +436,12 @@ class SarLabelTests(unittest.TestCase):
             _payload([cup_a, cup_b, bench]), random.Random(0), 4)
         self.assertEqual(rows, [])
 
+    def test_long_umbrella_skipped_ordinary_umbrella_kept(self):
+        self.assertTrue(q._is_long_umbrella("long_umbrella"))
+        self.assertTrue(q._is_long_umbrella("closedlongumbrella"))
+        self.assertFalse(q._is_long_umbrella("umbrella"))
+        self.assertFalse(q._is_long_umbrella("master_chef_can"))
+
 
 if __name__ == "__main__":
     unittest.main()

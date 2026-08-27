@@ -130,12 +130,19 @@ services:
       TRAINER_VEHICLE_MAX_INSTANCES: "${TRAINER_VEHICLE_MAX_INSTANCES:-1}"
       TRAINER_VEHICLE_INCLUSION_PROBABILITY: "${TRAINER_VEHICLE_INCLUSION_PROBABILITY:-0.15}"
       TRAINER_VEHICLE_MAX_TYPES: "${TRAINER_VEHICLE_MAX_TYPES:-1}"
-      # Lost objects never spawned (umbrella / long_umbrella / *umbrella*).
-      TRAINER_SKIP_CLASSES: "${TRAINER_SKIP_CLASSES:-umbrella,long_umbrella}"
+      # Lost objects never spawned. Organizer exclusions: long_umbrella,
+      # master_chef_can, wood_block. closedlongumbrella is the same long mesh.
+      # Ordinary umbrella is trained.
+      TRAINER_SKIP_CLASSES: "${TRAINER_SKIP_CLASSES:-long_umbrella,master_chef_can,wood_block}"
       # 1 = one of each person identity per scene (female/professor/weight/male),
       # random pose. 0 = stock radio (one character x all poses).
       TRAINER_PEOPLE_ALL_CHARS: "${TRAINER_PEOPLE_ALL_CHARS:-1}"
       TRAINER_SAR_RECIPES: "${TRAINER_SAR_RECIPES:-0}"
+      # 1 = ordinary CCTV for YOLO26x (no SAR climb seating; inject catalog
+      # extras the GUI left unchecked; force-spawn umbrella if the GUI omitted it).
+      # Wins over TRAINER_SAR_RECIPES and TRAINER_PEOPLE_ABOVE.
+      TRAINER_YOLO_MODE: "${TRAINER_YOLO_MODE:-0}"
+      TRAINER_YOLO_FORCE_CLASSES: "${TRAINER_YOLO_FORCE_CLASSES:-umbrella}"
       # Empty = continue from max scene_* + 1. Set to an int to pin the cycle.
       TRAINER_SAR_RECIPE_CURSOR: "${TRAINER_SAR_RECIPE_CURSOR:-}"
       # Seat a fraction of people on landmark tops (vending machine, trash can,
@@ -233,7 +240,7 @@ services:
       EGO_BEARING_DEG: "${EGO_BEARING_DEG:-50}"
       EGO_ROBOT_XY: "${EGO_ROBOT_XY:-4}"
       EGO_YAW_SPAN: "${EGO_YAW_SPAN:-360}"
-      EGO_SKIP_CLASSES: "${EGO_SKIP_CLASSES:-umbrella,long_umbrella}"
+      EGO_SKIP_CLASSES: "${EGO_SKIP_CLASSES:-long_umbrella}"
       EGO_EMPTY_FRAC: "${EGO_EMPTY_FRAC:-0.05}"
       EGO_VAL_FRAC: "${EGO_VAL_FRAC:-0.2}"
       EGO_OUT: "${EGO_OUT:-/metacom2026/trainer_output/ego_yolo}"

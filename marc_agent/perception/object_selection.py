@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
-from marc_agent.command_parser import ParsedCommand, Relation
+from marc_agent.command_parser import ParsedCommand, Relation, implicit_anchor_classes, uses_vehicle_anchor
 from marc_agent.perception.cctv_project import pair_alignment_score
 from marc_agent.perception.qwen_runtime import configured_max_crops
 from marc_agent.types import CctvDetectionRound, ObjectCandidate
@@ -22,12 +22,7 @@ log = logging.getLogger("marc_agent.object_selection")
 
 ObjectVerifier = Callable[["ObjectBoard"], str]
 
-# YOLO confuses small drinkware; expand only when a landmark can disambiguate.
-TARGET_CLASS_ALIASES = {
-    "tumbler": frozenset({"tumbler", "mug", "disposable_cup"}),
-}
 OBJECT_BOARD_LIMIT = 12
-_ALIAS_SCORE_SCALE = 0.85
 
 
 @dataclass(frozen=True)
@@ -38,6 +33,8 @@ class ObjectSelection:
     anchor: Optional[ObjectCandidate]
     score: float
     method: str = "object_relation"
+    raw_output: Optional[str] = None
+    prompt: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -123,22 +120,19 @@ def _relation_score(
 
 
 def _target_classes(parsed: ParsedCommand) -> frozenset[str]:
-    names = frozenset({parsed.target_type})
-    if parsed.landmark is None:
-        return names
-    extra = TARGET_CLASS_ALIASES.get(parsed.target_type)
-    return names if extra is None else names | extra
-
-
-def _class_scale(class_name: str, target_type: str) -> float:
-    return 1.0 if class_name == target_type else _ALIAS_SCORE_SCALE
+    return frozenset({parsed.target_type})
 
 
 def _rerank_by_world(
     ranked: tuple[ObjectSelection, ...],
     parsed: ParsedCommand,
     projector,
+    command_text: str = "",
 ) -> tuple[ObjectSelection, ...]:
+    relation = parsed.relation
+    if relation is None and uses_vehicle_anchor(parsed, command_text):
+        relation = Relation.NEAR
+
     def key(item: ObjectSelection) -> tuple:
         if item.anchor is None:
             return (1, 0.0, -item.score, item.target.candidate_id)
@@ -147,7 +141,7 @@ def _rerank_by_world(
             item.target.camera_id,
             item.target.bbox_xyxy,
             item.anchor.bbox_xyxy,
-            parsed.relation,
+            relation,
             item.anchor.class_name,
         )
         if world is None:
@@ -162,15 +156,19 @@ def rank_object_candidates(
     round_: CctvDetectionRound,
     *,
     projector=None,
+    command_text: str = "",
 ) -> tuple[ObjectSelection, ...]:
     """Rank matching object (and same-camera landmark) pairs across cameras."""
     targets = [
-        item for item in round_.objects if item.class_name in _target_classes(parsed)
+        item
+        for item in round_.objects
+        if item.class_name in _target_classes(parsed)
     ]
     if not targets:
         return ()
 
-    if not parsed.landmark:
+    anchor_names = implicit_anchor_classes(parsed, command_text)
+    if not anchor_names:
         ranked = [
             ObjectSelection(target=item, anchor=None, score=item.confidence)
             for item in targets
@@ -178,23 +176,34 @@ def rank_object_candidates(
         ranked.sort(key=lambda item: (-item.score, item.target.candidate_id))
         return tuple(ranked)[:OBJECT_BOARD_LIMIT]
 
+    relation = parsed.relation
+    if relation is None and uses_vehicle_anchor(parsed, command_text):
+        relation = Relation.NEAR
     landmarks = [
-        item for item in round_.objects if item.class_name == parsed.landmark
+        item for item in round_.objects if item.class_name in anchor_names
     ]
     selected: list[ObjectSelection] = []
     for target in targets:
         same_camera = [
             item for item in landmarks if item.camera_id == target.camera_id
         ]
-        scale = _class_scale(target.class_name, parsed.target_type)
         for anchor in same_camera:
             selected.append(
                 ObjectSelection(
                     target=target,
                     anchor=anchor,
-                    score=scale * _relation_score(target, anchor, parsed.relation),
+                    score=_relation_score(target, anchor, relation),
                 )
             )
+    if not selected:
+        if parsed.landmark is not None:
+            return ()
+        ranked = [
+            ObjectSelection(target=item, anchor=None, score=item.confidence)
+            for item in targets
+        ]
+        ranked.sort(key=lambda item: (-item.score, item.target.candidate_id))
+        return tuple(ranked)[:OBJECT_BOARD_LIMIT]
     selected.sort(
         key=lambda item: (
             -item.score,
@@ -204,7 +213,9 @@ def rank_object_candidates(
     )
     ranked = tuple(selected)
     if projector is not None:
-        ranked = _rerank_by_world(ranked, parsed, projector)
+        ranked = _rerank_by_world(
+            ranked, parsed, projector, command_text=command_text
+        )
     return ranked[:OBJECT_BOARD_LIMIT]
 
 
@@ -296,8 +307,7 @@ def format_object_verifier_prompt(
     return (
         "Select the single object candidate that best matches the spatial request. "
         "The request is language to satisfy, not visual ground truth. Use the images and "
-        "detector metadata together. Similar drinkware may be labeled tumbler, mug, or "
-        "disposable_cup; choose the instance that matches the request. NEAR and BESIDE "
+        "detector metadata together. NEAR and BESIDE "
         "mean beside the landmark, not sitting on top of it. Reply with exactly "
         "TARGET_ID|ANCHOR_ID and nothing else. ANCHOR_ID must be none when the request "
         "has no landmark.\n"
@@ -349,8 +359,11 @@ def build_object_board(
     prompt = format_object_verifier_prompt(
         command_text,
         parsed.target_type,
-        parsed.relation.value if parsed.relation else None,
-        parsed.landmark,
+        parsed.relation.value
+        if parsed.relation
+        else ("near" if uses_vehicle_anchor(parsed, command_text) else None),
+        parsed.landmark
+        or ("vehicle" if uses_vehicle_anchor(parsed, command_text) else None),
         rows,
     )
     return ObjectBoard(tuple(images), prompt, ranked)
@@ -409,7 +422,9 @@ def select_object_candidate(
     projector=None,
 ) -> Optional[ObjectSelection]:
     """Return the best matching object, optionally verified, or None."""
-    ranked = rank_object_candidates(parsed, round_, projector=projector)
+    ranked = rank_object_candidates(
+        parsed, round_, projector=projector, command_text=command_text
+    )
     if not ranked:
         return None
     geometry = ranked[0]
@@ -442,7 +457,12 @@ def select_object_candidate(
             " ".join(raw_output.split()),
         )
         return ObjectSelection(
-            selected.target, selected.anchor, selected.score, method
+            selected.target,
+            selected.anchor,
+            selected.score,
+            method,
+            raw_output,
+            board.prompt,
         )
     except Exception as exc:
         raw_output = locals().get("raw_output")

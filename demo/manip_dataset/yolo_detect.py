@@ -194,6 +194,14 @@ class YoloTracker:
             print(f"[yolo] {self._last_fail}")
             return False
 
+    def unload(self) -> None:
+        model = self.model
+        self.model = None
+        self.names = {}
+        self._class_ids = None
+        if model is not None:
+            del model
+
     def detect(self, rgb: np.ndarray, conf: Optional[float] = None) -> Optional[dict]:
         """Return the best box vs image center (always a dict if infer ran).
 

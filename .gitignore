@@ -17,6 +17,14 @@ simulation-platform/.env
 /demo/weights/*.pt
 /demo/weights/*.onnx
 
+# Hub snapshots baked into the agent image at docker build, not git.
+/models/runtime/stage1-sar-qwen/model/**
+!/models/runtime/stage1-sar-qwen/model/.gitkeep
+/models/runtime/graspgenx/gen/
+/models/runtime/graspgenx/dis/
+/models/runtime/graspgenx/grippers/
+/models/runtime/graspgenx/release/
+
 # submission: omit these
 /datasets/**
 !/datasets/README.md
@@ -28,3 +36,4 @@ simulation-platform/.env
 # luka: workstation specific & personal
 docs/luka/
 .DS_Store
+.Xauthority
