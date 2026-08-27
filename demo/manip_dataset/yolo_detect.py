@@ -1,7 +1,8 @@
-"""YOLO detector for auto-approach centering (pretrained now, fine-tuned later)."""
+"""Exact-target Stage 2 YOLO detector with a legacy single-box wrapper."""
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,18 +45,16 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
-# Names skipped when picking a box (bystander / robot-adjacent false positives).
-# Class *filter at predict time* is only applied once the weights actually contain
-# the MARC target name (a fine-tune). Pretrained COCO uses classes=None.
-SKIP_NAMES = frozenset({"person"})
-
 _PKG_DIR = Path(__file__).resolve().parent
-DEFAULT_WEIGHTS = str((_PKG_DIR.parent / "weights" / "yolo11x.pt").resolve())
+DEFAULT_WEIGHTS = str(
+    (_PKG_DIR.parents[1] / "models/runtime/stage2-nearfield-detector/model.pt").resolve()
+)
 DEFAULT_CONF = 0.15
-DEFAULT_IMGSZ = 640
+DEFAULT_IMGSZ = 1920
 DEFAULT_DEVICE = "0"
 DEFAULT_HALF = False
 DEFAULT_CAM = "base_left"
+MAX_CANDIDATES = 20
 
 
 @dataclass
@@ -66,16 +65,32 @@ class YoloConfig:
     device: str = DEFAULT_DEVICE
     half: bool = DEFAULT_HALF
     camera: str = DEFAULT_CAM
+    nms_iou: float = 0.7
+    end2end: bool = False
+    candidate_limit: int = MAX_CANDIDATES
+    status: str = "unknown"
+    known_limitations: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "YoloConfig":
+        weights = _env_str("MARC_YOLO_WEIGHTS", DEFAULT_WEIGHTS)
+        contract_path = Path(weights).with_name("runtime_contract.json")
+        contract = json.loads(contract_path.read_text()) if contract_path.is_file() else {}
+        inference = contract.get("inference", {})
         return cls(
-            weights=_env_str("MARC_YOLO_WEIGHTS", DEFAULT_WEIGHTS),
-            conf=_env_float("MARC_YOLO_CONF", DEFAULT_CONF),
-            imgsz=_env_int("MARC_YOLO_IMGSZ", DEFAULT_IMGSZ),
+            weights=weights,
+            conf=_env_float("MARC_YOLO_CONF", inference.get("confidence", DEFAULT_CONF)),
+            imgsz=_env_int("MARC_YOLO_IMGSZ", inference.get("imgsz", DEFAULT_IMGSZ)),
             device=_env_str("MARC_YOLO_DEVICE", DEFAULT_DEVICE),
             half=_env_bool("MARC_YOLO_HALF", DEFAULT_HALF),
             camera=_env_str("MARC_YOLO_CAM", DEFAULT_CAM),
+            nms_iou=float(inference.get("nms_iou") or 0.7),
+            end2end=bool(inference.get("end2end", False)),
+            candidate_limit=max(
+                1, min(MAX_CANDIDATES, int(inference.get("candidate_limit", MAX_CANDIDATES)))
+            ),
+            status=str(contract.get("status", "unknown")),
+            known_limitations=tuple(str(item) for item in contract.get("known_limitations", ())),
         )
 
 
@@ -88,42 +103,18 @@ def _resolve_device(requested: str) -> str:
 
         if torch.cuda.is_available():
             return req
-        print("[yolo] CUDA not available — falling back to CPU (YOLO11x will be slow)")
+        print("[yolo] CUDA not available — falling back to CPU (YOLO will be slow)")
     except Exception:
         print("[yolo] torch not importable — falling back to CPU")
     return "cpu"
 
 
 def _ensure_weights(path: Path) -> str:
-    """Return a weights path Ultralytics can open, downloading yolo11x if needed."""
+    """Return an explicit local checkpoint path; runtime downloads are forbidden."""
     path = path.expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("YOLO_CONFIG_DIR", str(path.parent))
-    try:
-        from ultralytics import settings
-
-        settings.update(weights_dir=str(path.parent))
-    except Exception:
-        pass
-    if path.exists():
-        return str(path)
-    cwd = Path.cwd()
-    try:
-        os.chdir(path.parent)
-        from ultralytics import YOLO
-
-        print(f"[yolo] {path.name} missing — downloading into {path.parent} ...")
-        YOLO(path.name if path.suffix == ".pt" else "yolo11x.pt")
-    finally:
-        os.chdir(cwd)
-    downloaded = path if path.exists() else (path.parent / "yolo11x.pt")
-    if not downloaded.exists():
-        raise FileNotFoundError(
-            f"YOLO weights not found at {path} and download did not produce yolo11x.pt"
-        )
-    if downloaded.resolve() != path.resolve() and not path.exists():
-        downloaded.replace(path)
-    return str(path if path.exists() else downloaded)
+    if not path.is_file():
+        raise FileNotFoundError(f"local YOLO weights not found: {path}")
+    return str(path)
 
 
 class YoloTracker:
@@ -135,23 +126,10 @@ class YoloTracker:
         self.names: dict = {}
         self.device = "cpu"
         self._target: Optional[str] = None
-        self._class_ids: Optional[list] = None
         self._last_fail = ""
 
     def set_target(self, name: Optional[str]):
         self._target = None if not name else str(name).strip()
-        self._refresh_classes()
-
-    def _refresh_classes(self):
-        """Restrict predict() only when the checkpoint has the MARC class name."""
-        if not self.names:
-            self._class_ids = None
-            return
-        inv = {str(n): int(i) for i, n in self.names.items()}
-        if self._target and self._target in inv:
-            self._class_ids = [inv[self._target]]
-            return
-        self._class_ids = None
 
     def load(self) -> bool:
         if self.model is not None:
@@ -177,16 +155,12 @@ class YoloTracker:
             self.model = YOLO(weights)
             raw_names = getattr(self.model, "names", None) or {}
             self.names = {int(k): str(v) for k, v in dict(raw_names).items()}
-            self._refresh_classes()
-            if self._class_ids is not None:
-                n_cls = ",".join(self.names[i] for i in self._class_ids)
-            else:
-                n_cls = "all (no class filter)"
             print(
-                f"[yolo] ready  classes={n_cls}  "
-                f"target={self._target or '-'}  "
-                f"conf={self.cfg.conf}"
+                f"[yolo] ready status={self.cfg.status} classes={len(self.names)} "
+                f"conf={self.cfg.conf} max={self.cfg.candidate_limit}"
             )
+            if self.cfg.status == "provisional":
+                print("[yolo] PROVISIONAL_PIPELINE_ONLY: ordinary umbrella is unsupported")
             return True
         except Exception as e:
             self.model = None
@@ -198,21 +172,24 @@ class YoloTracker:
         model = self.model
         self.model = None
         self.names = {}
-        self._class_ids = None
         if model is not None:
             del model
 
-    def detect(self, rgb: np.ndarray, conf: Optional[float] = None) -> Optional[dict]:
-        """Return the best box vs image center (always a dict if infer ran).
-
-        Pass a PIL RGB image so Ultralytics does not treat the array as BGR.
-        Do not pass ``half=`` (deprecated; also spams every tick).
-        """
-        if self.model is None or rgb is None or rgb.size == 0:
-            return None
+    def detect_candidates(
+        self, rgb: np.ndarray, target_type: str, conf: Optional[float] = None
+    ) -> dict:
+        """Return up to 20 confidence-sorted candidates for one exact target."""
+        target = str(target_type or "").strip()
+        class_ids = {name: class_id for class_id, name in self.names.items()}
+        if target not in class_ids:
+            return {"status": "unsupported_target", "target_type": target, "rgb_shape": None, "candidates": []}
+        if self.model is None:
+            return {"status": "detector_unavailable", "target_type": target, "rgb_shape": None, "candidates": []}
+        if rgb is None or not isinstance(rgb, np.ndarray) or rgb.size == 0:
+            return {"status": "invalid_image", "target_type": target, "rgb_shape": None, "candidates": []}
         h, w = rgb.shape[:2]
         if h < 2 or w < 2:
-            return None
+            return {"status": "invalid_image", "target_type": target, "rgb_shape": (int(h), int(w)), "candidates": []}
         src = np.ascontiguousarray(rgb)
         try:
             from PIL import Image
@@ -225,86 +202,76 @@ class YoloTracker:
             conf=float(self.cfg.conf if conf is None else conf),
             imgsz=int(self.cfg.imgsz),
             device=self.device,
+            classes=[class_ids[target]],
+            max_det=min(MAX_CANDIDATES, int(self.cfg.candidate_limit)),
+            end2end=bool(self.cfg.end2end),
+            iou=float(self.cfg.nms_iou),
         )
-        if self._class_ids is not None:
-            kw["classes"] = self._class_ids
         try:
             results = self.model.predict(src, **kw)
         except Exception as e:
             self._last_fail = f"predict: {e}"
-            return None
-        empty = {
-            "error": None,
-            "n_obj": 0,
-            "n_raw": 0,
-            "bbox": None,
-            "conf": None,
-            "cls": None,
-            "name": None,
-            "raw": [],
-            "rgb_shape": (int(h), int(w)),
-        }
+            return {"status": "inference_error", "target_type": target, "rgb_shape": (int(h), int(w)), "candidates": []}
         if not results:
-            return empty
+            return {"status": "not_detected", "target_type": target, "rgb_shape": (int(h), int(w)), "candidates": []}
         r = results[0]
         boxes = getattr(r, "boxes", None)
         if boxes is None or len(boxes) == 0:
-            return empty
+            return {"status": "not_detected", "target_type": target, "rgb_shape": (int(h), int(w)), "candidates": []}
 
         xyxy = boxes.xyxy.detach().cpu().numpy()
         confs = boxes.conf.detach().cpu().numpy()
         clss = boxes.cls.detach().cpu().numpy()
-        n_raw = int(len(xyxy))
-        raw = []
-        for i in range(n_raw):
-            cls_id = int(clss[i])
-            raw.append((self.names.get(cls_id, str(cls_id)), float(confs[i])))
-        empty["n_raw"] = n_raw
-        empty["raw"] = raw
-
         candidates = []
-        skipped = []
-        for i in range(n_raw):
-            x1, y1, x2, y2 = (float(v) for v in xyxy[i])
-            conf = float(confs[i])
-            cls_id = int(clss[i])
-            name = self.names.get(cls_id, str(cls_id))
-            rec = (x1, y1, x2, y2, conf, cls_id, name)
-            if name in SKIP_NAMES:
-                skipped.append(rec)
-            else:
-                candidates.append(rec)
-        if not candidates:
-            candidates = skipped
-        if not candidates:
-            return empty
+        for box, confidence, class_id in zip(xyxy, confs, clss):
+            cls_id = int(class_id)
+            if self.names.get(cls_id) != target:
+                continue
+            x1, y1, x2, y2 = (float(v) for v in box)
+            x1, x2 = sorted((float(np.clip(x1, 0, w)), float(np.clip(x2, 0, w))))
+            y1, y2 = sorted((float(np.clip(y1, 0, h)), float(np.clip(y2, 0, h))))
+            candidates.append({
+                "xyxy": (x1, y1, x2, y2),
+                "confidence": float(confidence),
+                "class_id": cls_id,
+                "class_name": target,
+            })
+        candidates.sort(key=lambda item: item["confidence"], reverse=True)
+        candidates = candidates[:MAX_CANDIDATES]
+        return {
+            "status": "ok" if candidates else "not_detected",
+            "target_type": target,
+            "rgb_shape": (int(h), int(w)),
+            "candidates": candidates,
+        }
 
-        best = None
-        best_score = -1.0
-        for x1, y1, x2, y2, conf, cls_id, name in candidates:
-            bw = max(1.0, x2 - x1)
-            bh = max(1.0, y2 - y1)
-            cx = 0.5 * (x1 + x2)
-            cy = 0.5 * (y1 + y2)
-            area = (bw * bh) / float(w * h)
-            vert = float(np.clip(cy / float(h), 0.0, 1.0))
-            name_boost = 1.5 if self._target and name == self._target else 1.0
-            score = conf * (0.35 + 0.65 * vert) * (0.4 + area) * name_boost
-            if score > best_score:
-                best_score = score
-                err = (cx - 0.5 * (w - 1)) / (0.5 * (w - 1))
-                best = {
-                    "error": float(np.clip(err, -1.0, 1.0)),
-                    "n_obj": 1,
-                    "n_raw": n_raw,
-                    "raw": raw,
-                    "bbox": (x1, y1, x2, y2),
-                    "conf": conf,
-                    "cls": cls_id,
-                    "name": name,
-                    "cx": cx,
-                    "cy": cy,
-                    "area": float(area),
-                    "rgb_shape": (int(h), int(w)),
-                }
-        return best if best is not None else empty
+    def detect(self, rgb: np.ndarray, conf: Optional[float] = None) -> dict:
+        """Return the highest-confidence exact-target box for legacy callers."""
+        result = self.detect_candidates(rgb, self._target or "", conf=conf)
+        shape = result.get("rgb_shape")
+        empty = {
+            "status": result["status"], "error": None, "n_obj": 0,
+            "n_raw": len(result["candidates"]), "bbox": None, "conf": None,
+            "cls": None, "name": None, "raw": [], "rgb_shape": shape,
+        }
+        if not result["candidates"] or shape is None:
+            return empty
+        candidate = result["candidates"][0]
+        x1, y1, x2, y2 = candidate["xyxy"]
+        h, w = shape
+        cx, cy = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
+        area = max(1.0, x2 - x1) * max(1.0, y2 - y1) / float(w * h)
+        return {
+            **empty,
+            "status": "ok",
+            "error": float(np.clip((cx - 0.5 * (w - 1)) / (0.5 * (w - 1)), -1.0, 1.0)),
+            "n_obj": 1,
+            "bbox": candidate["xyxy"],
+            "conf": candidate["confidence"],
+            "cls": candidate["class_id"],
+            "name": candidate["class_name"],
+            "raw": [(item["class_name"], item["confidence"]) for item in result["candidates"]],
+            "cx": cx,
+            "cy": cy,
+            "area": float(area),
+        }

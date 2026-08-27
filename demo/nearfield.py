@@ -51,20 +51,6 @@ LAT_MAX_M = 0.45
 MIN_CONF = 0.12
 STALE_STOP_S = 0.8
 
-# MARC class -> COCO names used only while the checkpoint lacks the MARC label.
-COCO_ALIASES = {
-    "tumbler": ("cup", "bottle", "wine glass"),
-    "mug": ("cup",),
-    "disposable_cup": ("cup", "bottle"),
-    "cola_can": ("bottle", "cup"),
-    "juice": ("bottle", "cup"),
-    "cracker_box": ("book",),
-    "tissue": ("book",),
-    "sunblock": ("bottle",),
-    "pencilcase": ("book", "cell phone"),
-}
-
-
 def _wrap_pi(a: float) -> float:
     while a > math.pi:
         a -= 2.0 * math.pi
@@ -340,6 +326,7 @@ def localize_detection(
 class Detector(Protocol):
     def load(self) -> bool: ...
     def set_target(self, name: Optional[str]) -> None: ...
+    def detect_candidates(self, rgb: np.ndarray, target_type: str) -> dict: ...
     def detect(self, rgb: np.ndarray) -> Optional[dict]: ...
     def unload(self) -> None: ...
 
@@ -356,6 +343,9 @@ class MissingDetector:
     def set_target(self, name: Optional[str]) -> None:
         return None
 
+    def detect_candidates(self, rgb: np.ndarray, target_type: str) -> dict:
+        return {"status": "detector_unavailable", "target_type": target_type, "rgb_shape": None, "candidates": []}
+
     def detect(self, rgb: np.ndarray) -> Optional[dict]:
         return None
 
@@ -364,7 +354,7 @@ class MissingDetector:
 
 
 class YoloDetector:
-    """Adapter over ``manip_dataset.yolo_detect.YoloTracker`` plus COCO aliases."""
+    """Adapter over the existing near-field YOLO seam."""
 
     def __init__(self, tracker):
         self._yolo = tracker
@@ -373,18 +363,10 @@ class YoloDetector:
         return bool(self._yolo.load())
 
     def set_target(self, name: Optional[str]) -> None:
-        raw = None if not name else str(name).strip()
-        names = getattr(self._yolo, "names", None) or {}
-        inv = {str(n): int(i) for i, n in names.items()}
-        if raw and raw in inv:
-            self._yolo.set_target(raw)
-            return
-        if raw:
-            for alias in COCO_ALIASES.get(raw, ()):
-                if alias in inv:
-                    self._yolo.set_target(alias)
-                    return
-        self._yolo.set_target(None)
+        self._yolo.set_target(name)
+
+    def detect_candidates(self, rgb: np.ndarray, target_type: str) -> dict:
+        return self._yolo.detect_candidates(rgb, target_type)
 
     def detect(self, rgb: np.ndarray) -> Optional[dict]:
         return self._yolo.detect(rgb)
@@ -396,7 +378,7 @@ class YoloDetector:
 
 
 def make_detector() -> Detector:
-    """Production detector: pretrained YOLO if ultralytics loads, else missing."""
+    """Production detector: bundled Stage 2 YOLO if available, else missing."""
     try:
         from manip_dataset.yolo_detect import YoloTracker
     except ImportError as e:
@@ -472,6 +454,9 @@ class NearFieldAcquire:
             det = None
             if rgb is not None:
                 det = self.detector.detect(rgb)
+                if det is not None and det.get("status") == "unsupported_target":
+                    self._stop()
+                    return LocalizedTarget(valid=False, reason="unsupported_target")
                 last_good_t = now
 
             n_obj = 0 if det is None else int(det.get("n_obj") or 0)
