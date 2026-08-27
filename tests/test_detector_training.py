@@ -155,6 +155,19 @@ class DetectorDatasetTests(unittest.TestCase):
         ]
         self.assertTrue(_select_head(comparisons))
 
+    def test_zero_recall_head_loses_without_aborting_selection(self):
+        def result(end2end, recall):
+            bucket = {"recall": recall}
+            return {
+                "end2end": end2end, "nms_iou": 0.7, "confidence": 0.001,
+                "candidate_limit": 20, "recall": recall, "macro_recall": recall,
+                "macro_f1": recall, "mean_inference_ms": 10.0,
+                "classes": {"target": bucket}, "cameras": {"all": bucket},
+                "sizes": {"tiny": bucket, "small": bucket},
+            }
+
+        self.assertFalse(_select_head([result(True, 0.0), result(False, 0.8)]))
+
     def test_runtime_selection_considers_every_nms_setting(self):
         def result(nms_iou, macro_f1):
             bucket = {"recall": 0.9}

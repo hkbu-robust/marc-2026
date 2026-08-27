@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 from PIL import Image
 
+from training.evaluate_cctv_detector import _best_available, _frames, _select, _training_record
 from training.stage2_detector import prepare_dataset
 
 
@@ -58,6 +59,10 @@ class Stage2DatasetTests(unittest.TestCase):
             self.assertEqual(0, manifest["split_checks"]["image_stem_overlap"])
             self.assertTrue((output.parent / "images/train/00000.jpg").samefile(raw / "images/train/00000.jpg"))
             self.assertEqual("8 0.5 0.5 0.25 0.5", (output.parent / "labels/train/00002.txt").read_text().strip())
+            names_out, frames = _frames(output)
+            self.assertEqual(names[:9], names_out)
+            self.assertEqual(3, len(frames))
+            self.assertEqual((48, 64), frames[0]["shape"])
 
     def test_refuses_output_inside_source(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -66,6 +71,41 @@ class Stage2DatasetTests(unittest.TestCase):
             source.write_text("names: {}\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "outside the raw dataset root"):
                 prepare_dataset(source, source.parent / "derived/data.yaml", verify_source=False)
+
+    def test_training_config_is_the_agreed_single_run(self):
+        config = yaml.safe_load(
+            (Path(__file__).parents[1] / "training/configs/stage2-roboview-yolo26x.yaml").read_text()
+        )
+        self.assertEqual(1920, config["imgsz"])
+        self.assertEqual(4, config["batch"])
+        self.assertEqual(100, config["epochs"])
+        self.assertEqual(20, config["patience"])
+        self.assertEqual(10, config["save_period"])
+        self.assertTrue(config["cls_remap"])
+        self.assertEqual(0.0, config["mosaic"])
+        self.assertEqual(0.0, config["mixup"])
+        self.assertEqual(0.0, config["cutmix"])
+
+    def test_selection_rejects_zero_recall(self):
+        def result(macro_f1: float, recall: float) -> dict:
+            bucket = {"recall": recall}
+            return {
+                "macro_f1": macro_f1,
+                "recall": recall,
+                "candidate_limit": 20,
+                "classes": {"target": bucket},
+                "sizes": {"tiny": bucket, "small": bucket},
+            }
+
+        self.assertEqual(0.8, _select([result(0.99, 0.0), result(0.8, 0.8)])["macro_f1"])
+        self.assertEqual(0.8, _best_available([result(0.99, 0.0), result(0.8, 0.8)])["macro_f1"])
+
+    def test_smoke_record_cannot_be_promoted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            record = Path(temp) / "training_record.json"
+            record.write_text('{"promotion_eligible": false}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "smoke checkpoints"):
+                _training_record(record)
 
 
 if __name__ == "__main__":

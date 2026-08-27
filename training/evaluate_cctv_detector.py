@@ -1,4 +1,4 @@
-"""Evaluate Stage 1 CCTV checkpoints on both YOLO26 heads and select runtime settings."""
+"""Evaluate YOLO26 checkpoints, heads, settings, and runtime resolution."""
 
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import yaml
+from PIL import Image
 
 
 CAMERA_RE = re.compile(r"(rig_\d+_[a-z])$")
+RUNTIME_IMAGE_SIZES = (640, 1280, 1920)
 
 
 def _frames(data_yaml: Path) -> tuple[list[str], list[dict]]:
@@ -24,17 +26,25 @@ def _frames(data_yaml: Path) -> tuple[list[str], list[dict]]:
         raise ValueError("data.yaml names must be contiguous class IDs from 0")
     names = [names_map[key] for key in range(len(names_map))]
     root = data_yaml.parent
-    images = sorted((root / data["val"]).glob("*.png"))
+    images = sorted(
+        path for path in (root / data["val"]).iterdir()
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
     frames = []
     for image in images:
         match = CAMERA_RE.search(image.stem)
-        if not match:
-            raise ValueError(f"cannot identify camera from {image.name}")
         labels = []
         for line in (root / "labels" / "val" / f"{image.stem}.txt").read_text().splitlines():
             class_id, cx, cy, width, height = map(float, line.split())
             labels.append((int(class_id), cx, cy, width, height))
-        frames.append({"image": image, "camera": match.group(1), "labels": labels})
+        with Image.open(image) as opened:
+            shape = (opened.height, opened.width)
+        frames.append({
+            "image": image,
+            "camera": match.group(1) if match else "all",
+            "labels": labels,
+            "shape": shape,
+        })
     return names, frames
 
 
@@ -49,7 +59,10 @@ def _iou(a: list[float], b: list[float]) -> float:
 def _score(frames: list[dict], predictions: dict[str, list[dict]], names: list[str], conf: float, budget: int) -> dict:
     totals, classes, cameras, sizes = Counter(), defaultdict(Counter), defaultdict(Counter), defaultdict(Counter)
     for frame in frames:
-        height, width = predictions[frame["image"].name][0]["shape"] if predictions[frame["image"].name] else (720, 1280)
+        height, width = frame.get("shape") or (
+            predictions[frame["image"].name][0]["shape"]
+            if predictions[frame["image"].name] else (720, 1280)
+        )
         gt = []
         for class_id, cx, cy, box_width, box_height in frame["labels"]:
             pixel_width, pixel_height = box_width * width, box_height * height
@@ -131,21 +144,59 @@ def _select_head(comparisons: list[dict]) -> bool:
         if item["confidence"] == 0.001 and item["candidate_limit"] == 20
     ]
     best_per_head = [
-        max((item for item in equal_budget if item["end2end"] == end2end), key=_recall_rank)
+        _best_available(item for item in equal_budget if item["end2end"] == end2end)
         for end2end in (True, False)
     ]
+    eligible = [item for item in best_per_head if _eligible(item)]
+    if not eligible:
+        raise ValueError("neither inference head detects every supported class")
     return max(
-        best_per_head,
-        key=lambda item: (*_recall_rank(item), not item["end2end"], -item["mean_inference_ms"]),
+        eligible,
+        key=lambda item: (*_selection_rank(item), not item["end2end"], -item["mean_inference_ms"]),
     )["end2end"]
 
 
 def _select_runtime(comparisons: list[dict], end2end: bool) -> dict:
     """Select settings across every candidate configuration for the chosen head."""
-    return max(
-        (item for item in comparisons if item["end2end"] == end2end),
-        key=lambda item: (item["macro_f1"], *_recall_rank(item), -item["candidate_limit"]),
+    return _select(item for item in comparisons if item["end2end"] == end2end)
+
+
+def _selection_rank(item: dict) -> tuple:
+    return (
+        item["macro_f1"],
+        min(value["recall"] for value in item["classes"].values() if value["recall"] is not None),
+        item["sizes"].get("tiny", {}).get("recall") or 0,
+        item["sizes"].get("small", {}).get("recall") or 0,
+        item["recall"],
     )
+
+
+def _select(items) -> dict:
+    eligible = [item for item in items if _eligible(item)]
+    if not eligible:
+        raise ValueError("no candidate detects every supported class")
+    return _best(eligible)
+
+
+def _eligible(item: dict) -> bool:
+    return all((value["recall"] or 0) > 0 for value in item["classes"].values())
+
+
+def _best(items) -> dict:
+    return max(items, key=lambda item: (*_selection_rank(item), -item["candidate_limit"]))
+
+
+def _best_available(items) -> dict:
+    items = list(items)
+    eligible = [item for item in items if _eligible(item)]
+    return _best(eligible or items)
+
+
+def _training_record(path: Path) -> dict:
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if not record.get("promotion_eligible", True):
+        raise ValueError("disposable smoke checkpoints cannot produce a runtime contract")
+    return record
 
 
 def _predict(model, frames: list[dict], *, imgsz: int, batch: int, device: str,
@@ -187,7 +238,7 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--device", default="0")
     parser.add_argument("--confidence", nargs="+", type=float, default=(0.01, 0.02, 0.05, 0.1, 0.2, 0.3))
-    parser.add_argument("--candidate-limits", nargs="+", type=int, default=(10, 20, 30, 50))
+    parser.add_argument("--candidate-limits", nargs="+", type=int, default=(10, 20))
     parser.add_argument("--nms-iou", nargs="+", type=float, default=(0.5, 0.7))
     parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args()
@@ -195,6 +246,8 @@ def main() -> None:
         parser.error("--candidate-limits must include 20 for equal-budget checkpoint selection")
     if any(confidence < 0.001 for confidence in args.confidence):
         parser.error("--confidence values must be at least the 0.001 collection floor")
+    if any(limit > 20 for limit in args.candidate_limits):
+        parser.error("--candidate-limits cannot exceed the runtime contract's top-20 bound")
     if not args.preflight and args.training_record is None:
         parser.error("--training-record is required for final checkpoint provenance")
 
@@ -215,10 +268,14 @@ def main() -> None:
                 raise ValueError(f"checkpoint class order does not match the derived dataset: {checkpoint}")
         print(json.dumps({"checkpoints": [str(item) for item in checkpoints], "images": len(frames), "names": names}, indent=2))
         return
-    training_record = json.loads(args.training_record.read_text(encoding="utf-8"))
+    training_record = _training_record(args.training_record)
     weights_dir = Path(training_record["outputs"]["last"]).resolve().parent
     if any(checkpoint.parent != weights_dir for checkpoint in checkpoints):
         raise ValueError(f"all evaluated checkpoints must belong to the recorded run: {weights_dir}")
+    saved_checkpoints = {path.resolve() for path in weights_dir.glob("*.pt")}
+    if set(checkpoints) != saved_checkpoints:
+        missing = sorted(str(path) for path in saved_checkpoints - set(checkpoints))
+        raise ValueError(f"evaluation must include every saved checkpoint; missing={missing}")
 
     screening, screening_comparisons = [], []
     for checkpoint in checkpoints:
@@ -239,12 +296,9 @@ def main() -> None:
             for budget in args.candidate_limits
         ]
         screening_comparisons.extend(checkpoint_comparisons)
-        screening.append(_select_runtime(checkpoint_comparisons, False))
+        screening.append(_best_available(checkpoint_comparisons))
 
-    selected_checkpoint = max(
-        screening,
-        key=lambda item: (item["macro_f1"], *_recall_rank(item), -item["candidate_limit"]),
-    )["checkpoint"]
+    selected_checkpoint = _select(screening)["checkpoint"]
     comparisons, ap = [], []
     for end2end in (True, False):
         # Prediction fuses the selected head; a fresh model keeps the alternate branch available.
@@ -271,13 +325,32 @@ def main() -> None:
 
     selected_head = _select_head(comparisons)
     selected_runtime = _select_runtime(comparisons, selected_head)
+    size_comparisons = []
+    for runtime_imgsz in RUNTIME_IMAGE_SIZES:
+        predictions, profile = _predict(
+            YOLO(selected_checkpoint), frames, imgsz=runtime_imgsz, batch=args.batch,
+            device=args.device, end2end=selected_head,
+            nms_iou=selected_runtime["nms_iou"], max_det=selected_runtime["candidate_limit"],
+        )
+        size_comparisons.append({
+            "imgsz": runtime_imgsz,
+            "end2end": selected_head,
+            "nms_iou": selected_runtime["nms_iou"],
+            **profile,
+            **_score(
+                frames, predictions, names, selected_runtime["confidence"],
+                selected_runtime["candidate_limit"],
+            ),
+        })
+    selected_imgsz = _select(size_comparisons)["imgsz"]
     runtime_settings = {
         key: selected_runtime[key] for key in ("end2end", "nms_iou", "confidence", "candidate_limit")
     }
+    runtime_settings["imgsz"] = selected_imgsz
     if runtime_settings["end2end"]:
         runtime_settings["nms_iou"] = None
     example_result = YOLO(selected_checkpoint).predict(
-        str(frames[0]["image"]), imgsz=args.imgsz, device=args.device, conf=selected_runtime["confidence"],
+        str(frames[0]["image"]), imgsz=selected_imgsz, device=args.device, conf=selected_runtime["confidence"],
         iou=selected_runtime["nms_iou"], max_det=selected_runtime["candidate_limit"],
         end2end=selected_runtime["end2end"],
         quantize=None if str(args.device) == "cpu" else "fp16", verbose=False,
@@ -293,13 +366,19 @@ def main() -> None:
     }
     with Path(selected_checkpoint).open("rb") as checkpoint_stream:
         checkpoint_sha256 = hashlib.file_digest(checkpoint_stream, "sha256").hexdigest()
+    dataset_manifest_path = args.data.with_name("dataset_manifest.json")
+    dataset_manifest = (
+        json.loads(dataset_manifest_path.read_text(encoding="utf-8"))
+        if dataset_manifest_path.is_file() else {}
+    )
     runtime_contract = {
+        "status": dataset_manifest.get("status", "selected"),
         "checkpoint": selected_checkpoint,
         "checkpoint_sha256": checkpoint_sha256,
         "ordered_classes": names,
         "preprocessing": {
             "input": "full-frame PIL.Image RGB (NumPy callers must provide OpenCV BGR uint8 HWC)",
-            "resize": f"Ultralytics letterbox to imgsz={args.imgsz}",
+            "resize": f"Ultralytics letterbox to imgsz={selected_imgsz}",
             "internal": "BGR to RGB, HWC to CHW, FP16/FP32, divide by 255",
         },
         "inference": {
@@ -308,13 +387,15 @@ def main() -> None:
         },
         "local_checkpoint_load_verified": True,
         "offline_bundle_load_verified": False,
+        "known_limitations": dataset_manifest.get("known_limitations", []),
     }
     report = {
         "dataset": str(args.data.resolve()), "imgsz": args.imgsz, "images": len(frames),
         "selection": {
-            "checkpoint_rule": "screen every checkpoint with one one-to-many/NMS IoU 0.7 pass: best macro F1 across the confidence/candidate grid, then candidate-recall rank and smaller candidate limit",
-            "head_rule": "compare each head's best NMS setting at equal confidence 0.001/top-20: macro, worst-class, tiny, small, worst-camera, then overall recall",
-            "runtime_rule": "within the selected head across all NMS settings: macro F1, then candidate-recall rank, then smaller candidate limit",
+            "checkpoint_rule": "screen every saved checkpoint on validation: macro F1, worst-class recall, tiny recall, small recall, overall recall, then smaller candidate limit; reject zero-recall classes",
+            "head_rule": "compare both heads on validation at confidence 0.001/top-20 using the same hierarchy; reject zero-recall classes",
+            "runtime_rule": "select confidence, NMS IoU, and top-10/20 on validation using the same hierarchy",
+            "resolution_rule": "compare 640/1280/1920 on validation using macro F1, worst-class recall, tiny recall, small recall, then overall recall",
             "checkpoint": selected_checkpoint,
             "runtime": runtime_settings,
         },
@@ -322,6 +403,7 @@ def main() -> None:
         "screening_comparisons": screening_comparisons,
         "ap": ap,
         "comparisons": comparisons,
+        "runtime_size_comparisons": size_comparisons,
         "candidate_output_example": candidate_output_example,
         "runtime_contract": runtime_contract,
     }
@@ -329,12 +411,6 @@ def main() -> None:
     args.output.write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
     contract_path = args.output.with_name("runtime_contract.json")
     contract_path.write_text(json.dumps(runtime_contract, indent=2) + "\n", encoding="utf-8")
-    data_descriptor = yaml.safe_load(args.data.read_text(encoding="utf-8"))
-    training_record["dataset"].update({
-        "source_revision": data_descriptor["source_revision"],
-        "source_data_yaml_sha256": data_descriptor["source_data_yaml_sha256"],
-        "splits": {key: data_descriptor[key] for key in ("train", "val")},
-    })
     training_record.update({
         "selected_checkpoint": selected_checkpoint,
         "selected_checkpoint_sha256": checkpoint_sha256,

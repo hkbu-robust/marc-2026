@@ -1,4 +1,4 @@
-"""Prepare the provisional Stage 2 robot-view detector dataset."""
+"""Prepare or train the provisional Stage 2 robot-view detector."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import math
 import os
 import statistics
 import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -21,6 +22,9 @@ SOURCE_DESCRIPTOR_SHA256 = "28827a048bbe1adc80f790dbd3411f1baacb7a44ebc59dbe9328
 EXPECTED_IMAGES = {"train": 2048, "val": 400}
 EXCLUDED_CLASSES = frozenset({"master_chef_can", "wood_block"})
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png"})
+CONFIG = Path(__file__).with_name("configs") / "stage2-roboview-yolo26x.yaml"
+STAGE1_SEED_SHA256 = "cf1d3b7975af147b9406c12baf7dbb64333ef1d5af5620e114325af99a90b55f"
+STAGE1_SEED_RUN = "stage1-cctv-yolo26x-1920-20260824"
 
 
 def sha256(path: Path) -> str:
@@ -73,7 +77,7 @@ def _pairs(root: Path, split: str) -> list[tuple[Path, Path]]:
 
 
 def _write_json(path: Path, value: dict) -> None:
-    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(value, indent=2, default=str) + "\n", encoding="utf-8")
 
 
 def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_source: bool = True) -> dict:
@@ -227,12 +231,126 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_source: bool
     return manifest
 
 
+def train_detector(args: argparse.Namespace) -> None:
+    import torch
+    import torchvision
+    from ultralytics import YOLO, __version__ as ultralytics_version
+    from ultralytics.cfg import get_cfg
+    from ultralytics.data.utils import check_det_dataset
+
+    data, checkpoint = args.data.resolve(), args.model.resolve()
+    if not checkpoint.is_file() or sha256(checkpoint) != STAGE1_SEED_SHA256:
+        raise ValueError("--model must be the original selected Stage 1 last.pt")
+    manifest_path = data.with_name("dataset_manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    names = manifest["derived"]["ordered_classes"]
+    checked = check_det_dataset(str(data), autodownload=False)
+    if list(checked["names"].values()) != names:
+        raise ValueError("dataset class order does not match its manifest")
+    model = YOLO(checkpoint)
+    seed_names = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
+    missing = [name for name in names if name not in seed_names]
+    if missing:
+        raise ValueError(f"Stage 1 seed is missing transferable classes: {missing}")
+
+    overrides = {
+        "model": str(checkpoint),
+        "data": str(data),
+        "project": str(args.project.resolve()),
+        "name": args.name,
+        "device": args.device,
+    }
+    config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+    if not config.get("cls_remap"):
+        raise ValueError("Stage 2 training requires name-based cls_remap")
+    if args.smoke:
+        overrides.update(epochs=1, patience=1, imgsz=640, batch=1, workers=0, cache=False, fraction=0.01)
+    resolved = vars(get_cfg(overrides={**config, **overrides}))
+    run_dir = args.project.resolve() / args.name
+    record = {
+        "status": "disposable_smoke" if args.smoke else "provisional",
+        "promotion_eligible": not args.smoke,
+        "seed_checkpoint": {
+            "path": str(checkpoint),
+            "sha256": STAGE1_SEED_SHA256,
+            "selected_run": STAGE1_SEED_RUN,
+            "ordered_classes": seed_names,
+        },
+        "dataset": {"path": str(data), **manifest},
+        "resolved_args": resolved,
+        "environment": {
+            "python": sys.version,
+            "torch": torch.__version__,
+            "torchvision": torchvision.__version__,
+            "ultralytics": ultralytics_version,
+            "cuda_runtime": torch.version.cuda,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        },
+        "git": {
+            "commit": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[1], text=True
+            ).strip(),
+        },
+    }
+    if args.preflight:
+        print(json.dumps(record, indent=2, default=str))
+        return
+    if run_dir.exists():
+        raise FileExistsError(f"refusing to increment an existing run: {run_dir}")
+    if not torch.cuda.is_available() or str(args.device).lower() == "cpu":
+        raise RuntimeError("Stage 2 training requires CUDA")
+
+    record_path = run_dir / "training_record.json"
+
+    def on_train_start(trainer) -> None:
+        trained_names = list(trainer.model.names.values())
+        if trained_names != names:
+            raise RuntimeError(f"expected remapped nine-class head, got {trained_names}")
+        torch.cuda.reset_peak_memory_stats()
+        record["resolved_args"] = vars(trainer.args)
+        record["trained_class_order"] = trained_names
+        record["resolved_optimizer"] = {
+            "name": type(trainer.optimizer).__name__,
+            "parameter_groups": [
+                {key: value for key, value in group.items() if key != "params"}
+                for group in trainer.optimizer.param_groups
+            ],
+        }
+        record["outputs"] = {"best": str(trainer.best), "last": str(trainer.last)}
+        _write_json(record_path, record)
+
+    def on_train_end(trainer) -> None:
+        record["outputs"] = {"best": str(trainer.best), "last": str(trainer.last)}
+        record["peak_training_memory_gib"] = torch.cuda.max_memory_reserved() / 1024**3
+        record["final_metrics"] = trainer.metrics
+        _write_json(record_path, record)
+
+    model.add_callback("on_train_start", on_train_start)
+    model.add_callback("on_train_end", on_train_end)
+    model.train(cfg=str(args.config), **overrides)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-data", required=True, type=Path)
-    parser.add_argument("--data", required=True, type=Path)
-    parser.add_argument("--no-verify-source", action="store_true")
+    commands = parser.add_subparsers(dest="command", required=True)
+    prepare = commands.add_parser("prepare")
+    prepare.add_argument("--source-data", required=True, type=Path)
+    prepare.add_argument("--data", required=True, type=Path)
+    prepare.add_argument("--no-verify-source", action="store_true")
+    train = commands.add_parser("train")
+    train.add_argument("--model", required=True, type=Path)
+    train.add_argument("--data", required=True, type=Path)
+    train.add_argument("--project", required=True, type=Path)
+    train.add_argument("--name", required=True)
+    train.add_argument("--config", type=Path, default=CONFIG)
+    train.add_argument("--device", default="0")
+    train.add_argument("--preflight", action="store_true")
+    train.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
+    if args.command == "train":
+        train_detector(args)
+        return
     manifest = prepare_dataset(
         args.source_data, args.data, verify_source=not args.no_verify_source
     )
