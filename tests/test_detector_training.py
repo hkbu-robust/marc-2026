@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 import yaml
 
 from training.train_cctv_detector import prepare_dataset
-from training.evaluate_cctv_detector import _score, _select_head, _select_runtime
+from training.evaluate_cctv_detector import _score, _select_head, _select_runtime, _training_record
 
 
 class DetectorDatasetTests(unittest.TestCase):
@@ -125,6 +126,7 @@ class DetectorDatasetTests(unittest.TestCase):
         self.assertEqual(1.0, result["recall"])
         self.assertEqual(1.0, result["precision"])
         self.assertEqual(1.0, result["cameras"]["rig_1_a"]["recall"])
+        self.assertEqual(1.0, result["classes"]["target"]["by_camera"]["rig_1_a"]["precision"])
 
     def test_operational_score_matches_in_confidence_order(self):
         frames = [{
@@ -140,6 +142,57 @@ class DetectorDatasetTests(unittest.TestCase):
 
         self.assertEqual(1.0, result["recall"])
         self.assertEqual(1.0, result["precision"])
+
+    def test_stage1_budget_is_global_before_per_class_scoring(self):
+        frame = {
+            "image": Path("x.png"), "camera": "rig_1_a", "shape": (100, 100),
+            "labels": [(0, 0.5, 0.5, 0.2, 0.2)],
+        }
+        predictions = {"x.png": [
+            {"class_id": 1, "conf": 0.9, "xyxy": [0, 0, 10, 10]},
+            {"class_id": 0, "conf": 0.8, "xyxy": [40, 40, 60, 60]},
+        ]}
+
+        result = _score([frame], predictions, ["target", "distractor"], conf=0.1, budget=1)
+
+        self.assertEqual(0.0, result["classes"]["target"]["recall"])
+        self.assertEqual(
+            "global all-class confidence-descending list before per-class scoring",
+            result["candidate_limit_applied"],
+        )
+
+    def test_detailed_score_retains_selected_candidates(self):
+        frame = {
+            "image": Path("x.png"), "camera": "rig_1_a", "shape": (100, 100),
+            "labels": [(0, 0.5, 0.5, 0.2, 0.2)],
+        }
+        prediction = {"class_id": 0, "conf": 0.9, "xyxy": [40, 40, 60, 60]}
+
+        result = _score(
+            [frame], {"x.png": [prediction]}, ["target"], conf=0.1, budget=20,
+            include_frames=True,
+        )
+
+        self.assertEqual(1, len(result["frames"][0]["candidates"]))
+        self.assertTrue(result["frames"][0]["candidates"][0]["matched"])
+
+    def test_completion_record_accepts_normal_early_stop_and_rejects_epoch_gaps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            best, last, record = root / "best.pt", root / "last.pt", root / "training_record.json"
+            best.touch()
+            last.touch()
+            record.write_text(json.dumps({
+                "final_metrics": {"mAP50": 0.5}, "peak_training_memory_gib": 1.0,
+                "resolved_args": {"epochs": 4, "save_period": 0},
+                "outputs": {"best": str(best), "last": str(last)},
+            }), encoding="utf-8")
+            results = root / "results.csv"
+            results.write_text("epoch,metric\n1,0.1\n2,0.2\n", encoding="utf-8")
+            self.assertEqual(2, _training_record(record)["completed_epoch"])
+            results.write_text("epoch,metric\n1,0.1\n3,0.2\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "contiguous"):
+                _training_record(record)
 
     def test_head_selection_uses_equal_candidate_budget(self):
         def result(end2end, confidence, budget, recall, nms_iou=0.7, macro_f1=None):
