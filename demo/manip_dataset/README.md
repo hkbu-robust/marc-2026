@@ -16,12 +16,13 @@ MARC_TEAM_ID=u1 docker compose up --build agent-manip-probe
 ```
 
 The probe image is a separate Dockerfile target (`manip-probe`) with torch +
-ultralytics. First `--build` is large (CUDA torch). Weights download into
-`demo/weights/yolo11x.pt` on first run; swap that file (or `MARC_YOLO_WEIGHTS`)
-for a fine-tuned checkpoint later.
+ultralytics. First `--build` is large (CUDA torch). The runtime loads
+`models/runtime/stage2-nearfield-detector/model.pt`; use `MARC_YOLO_WEIGHTS` only
+to point a development probe at another explicit local checkpoint. Missing or
+unsupported weights fail closed; nothing downloads at runtime.
 
-Isaac Sim already uses the GPU. If YOLO11x hitch-steps the sim, set
-`MARC_YOLO_WEIGHTS` to `yolo11s.pt` or `MARC_YOLO_DEVICE=cpu`.
+Isaac Sim already uses the GPU. `MARC_YOLO_DEVICE=cpu` is slower but avoids
+sharing CUDA when debugging locally.
 
 Requires an interactive TTY (`stdin_open` / `tty` on `agent-manip-probe`). Press `?` for the key map.
 
@@ -55,7 +56,7 @@ and yaw each scene so boxes are not glued to one patch of the image.
 2. **MANUAL_BASE** — `i/k/j/l` place and aim the chassis; `A` starts auto-approach.
 3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** view (not majority 360×640, which is a gripper-like close-up). Then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **median depth inside the YOLO box** (`MARC_APPROACH_STOP_M`), with no overrun if already closer than `MARC_APPROACH_ALREADY_NEAR` (`C` cancels).
    Each tick logs `err` (box vs image center), `obj=used/raw`, `name`/`conf`, and `d` (bbox depth). `obj=0/0` means YOLO saw nothing; `obj=0/3` means boxes existed but were skipped (e.g. `person`).
-   Pretrained **YOLO11x** (COCO) runs with **no class filter**. `person` boxes are skipped when scoring. After you fine-tune, point `MARC_YOLO_WEIGHTS` at `best.pt` and `O` / `MARC_TARGET_OBJECT` will restrict predict to that class. RGB is passed as a PIL image. Lock dumps PNGs under `datasets/yolo_debug/`.
+   Inference is always restricted to the exact `MARC_TARGET_OBJECT`; an unsupported target fails closed and never falls back to all classes. RGB is passed as a PIL image. Lock dumps PNGs under `datasets/yolo_debug/`.
 4. **ARM_TELEOP** — EE nudges + grip; steps are recorded with live images.
    Closing (`v`) **ramps** over `MARC_GRIP_RAMP` and stops the instant `gripper/holding`
    goes true, plus `MARC_GRIP_EXTRA` rad of bite. `MARC_GRIP_CLOSE` is only the ceiling:
@@ -208,13 +209,13 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 |---|---|---|
 | `MARC_TEAM_ID` | `u1` | Any value, as long as it matches the manip-trainer namespace |
 | `MARC_DATASET_ROOT` | `demo/datasets/marc_pnp` | Success output root |
-| `MARC_YOLO_WEIGHTS` | `demo/weights/yolo11x.pt` | Ultralytics `.pt`. Default downloads YOLO11x; replace with a fine-tuned checkpoint |
+| `MARC_YOLO_WEIGHTS` | `models/runtime/stage2-nearfield-detector/model.pt` | Explicit local Ultralytics `.pt`; runtime downloads are disabled |
 | `MARC_YOLO_CONF` | `0.15` | Detection confidence floor |
-| `MARC_YOLO_IMGSZ` | `640` | YOLO inference size |
+| `MARC_YOLO_IMGSZ` | `1920` | Selected-contract inference size |
 | `MARC_YOLO_DEVICE` | `0` | CUDA index, or `cpu` |
 | `MARC_YOLO_HALF` | `0` | FP16 predict. Off by default (avoids Ultralytics `half` deprecation spam) |
 | `MARC_YOLO_CAM` | `base_left` | RGB camera for centering (`base_left`/`base_right`) |
-| `MARC_TARGET_OBJECT` | `tumbler` | Name cycled by `O`. Filters YOLO only after the weights include that class |
+| `MARC_TARGET_OBJECT` | `tumbler` | Exact required class; unsupported names fail closed |
 | `MARC_APPROACH_STOP_M` | `0.55` | Stop when median depth inside the YOLO box is below this (m) |
 | `MARC_APPROACH_ALREADY_NEAR` | `0.45` | Bbox depth (m) counted as pick range: no yaw, no overrun |
 | `MARC_APPROACH_CRAWL` | `0.30` | Requested approach speed (m/s); clamped by `MAX_STEP` |

@@ -1,20 +1,32 @@
-"""Evaluate Stage 1 CCTV checkpoints on both YOLO26 heads and select runtime settings."""
+"""Evaluate YOLO26 checkpoints, heads, settings, and runtime resolution."""
 
 from __future__ import annotations
 
 import argparse
+import csv
+import gc
 import hashlib
 import json
+import math
 import re
 import statistics
+import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import yaml
+from PIL import Image
 
 
 CAMERA_RE = re.compile(r"(rig_\d+_[a-z])$")
+RUNTIME_IMAGE_SIZES = (640, 1280, 1920)
+RECALL_LIMITS = (1, 5, 10, 20)
+SIZE_BUCKETS = {
+    "tiny": "native-image box short side < 16 px",
+    "small": "native-image box short side >= 16 px and < 32 px",
+    "large": "native-image box short side >= 32 px",
+}
 
 
 def _frames(data_yaml: Path) -> tuple[list[str], list[dict]]:
@@ -24,17 +36,25 @@ def _frames(data_yaml: Path) -> tuple[list[str], list[dict]]:
         raise ValueError("data.yaml names must be contiguous class IDs from 0")
     names = [names_map[key] for key in range(len(names_map))]
     root = data_yaml.parent
-    images = sorted((root / data["val"]).glob("*.png"))
+    images = sorted(
+        path for path in (root / data["val"]).iterdir()
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
     frames = []
     for image in images:
         match = CAMERA_RE.search(image.stem)
-        if not match:
-            raise ValueError(f"cannot identify camera from {image.name}")
         labels = []
         for line in (root / "labels" / "val" / f"{image.stem}.txt").read_text().splitlines():
             class_id, cx, cy, width, height = map(float, line.split())
             labels.append((int(class_id), cx, cy, width, height))
-        frames.append({"image": image, "camera": match.group(1), "labels": labels})
+        with Image.open(image) as opened:
+            shape = (opened.height, opened.width)
+        frames.append({
+            "image": image,
+            "camera": match.group(1) if match else "all",
+            "labels": labels,
+            "shape": shape,
+        })
     return names, frames
 
 
@@ -47,60 +67,88 @@ def _iou(a: list[float], b: list[float]) -> float:
 
 
 def _score(frames: list[dict], predictions: dict[str, list[dict]], names: list[str], conf: float, budget: int) -> dict:
+    """Score the exact-target interface, applying each budget after class filtering."""
     totals, classes, cameras, sizes = Counter(), defaultdict(Counter), defaultdict(Counter), defaultdict(Counter)
     for frame in frames:
-        height, width = predictions[frame["image"].name][0]["shape"] if predictions[frame["image"].name] else (720, 1280)
+        height, width = frame.get("shape") or (
+            predictions[frame["image"].name][0]["shape"]
+            if predictions[frame["image"].name] else (720, 1280)
+        )
         gt = []
         for class_id, cx, cy, box_width, box_height in frame["labels"]:
             pixel_width, pixel_height = box_width * width, box_height * height
+            short_side = min(pixel_width, pixel_height)
             gt.append({
                 "class_id": class_id,
                 "xyxy": [(cx - box_width / 2) * width, (cy - box_height / 2) * height,
                            (cx + box_width / 2) * width, (cy + box_height / 2) * height],
-                "size": "tiny" if pixel_width * pixel_height < 16**2 else "small" if pixel_width * pixel_height < 32**2 else "large",
+                "size": "tiny" if short_side < 16 else "small" if short_side < 32 else "large",
             })
-        selected = sorted(
-            (item for item in predictions[frame["image"].name] if item["conf"] >= conf),
-            key=lambda item: item["conf"], reverse=True,
-        )[:budget]
-        matched_gt, matched_pred = set(), set()
-        for pi, prediction in enumerate(selected):
-            matches = [
-                (_iou(truth["xyxy"], prediction["xyxy"]), gi)
-                for gi, truth in enumerate(gt)
-                if gi not in matched_gt and truth["class_id"] == prediction["class_id"]
-            ]
-            if matches:
-                overlap, gi = max(matches)
+        if not gt:
+            totals["empty_label_frames"] += 1
+        frame_predictions = predictions[frame["image"].name]
+        for class_id in range(len(names)):
+            truths = [truth for truth in gt if truth["class_id"] == class_id]
+            selected = sorted(
+                (
+                    item for item in frame_predictions
+                    if item["class_id"] == class_id and item["conf"] >= conf
+                ),
+                key=lambda item: item["conf"], reverse=True,
+            )[:budget]
+            matched_gt = set()
+            for prediction in selected:
+                matches = [
+                    (_iou(truth["xyxy"], prediction["xyxy"]), gi)
+                    for gi, truth in enumerate(truths)
+                    if gi not in matched_gt
+                ]
+                overlap, gi = max(matches, default=(0.0, -1))
+                if overlap >= 0.5:
+                    matched_gt.add(gi)
+            matched = len(matched_gt)
+            totals.update(gt=len(truths), predictions=len(selected), matched=matched, requests=1)
+            if truths:
+                totals["present_target_requests"] += 1
             else:
-                overlap = 0.0
-            if overlap >= 0.5:
-                matched_gt.add(gi)
-                matched_pred.add(pi)
-        totals.update(gt=len(gt), predictions=len(selected), matched=len(matched_gt))
-        for gi, truth in enumerate(gt):
-            for bucket in (classes[truth["class_id"]], cameras[frame["camera"]], sizes[truth["size"]]):
-                bucket["gt"] += 1
-                bucket["matched"] += gi in matched_gt
-        for prediction in selected:
-            classes[prediction["class_id"]]["predictions"] += 1
-        cameras[frame["camera"]]["predictions"] += len(selected)
+                totals["absent_target_requests"] += 1
+                totals["absent_target_false_candidates"] += len(selected)
+                totals["absent_target_requests_with_candidates"] += bool(selected)
+            if not gt:
+                totals["empty_label_false_candidates"] += len(selected)
+            class_bucket = classes[class_id]
+            class_bucket.update(gt=len(truths), predictions=len(selected), matched=matched)
+            camera_bucket = cameras[frame["camera"]]
+            camera_bucket.update(gt=len(truths), predictions=len(selected), matched=matched)
+            for gi, truth in enumerate(truths):
+                size_bucket = sizes[truth["size"]]
+                size_bucket["gt"] += 1
+                size_bucket["matched"] += gi in matched_gt
 
     def result(bucket: Counter) -> dict:
         recall = bucket["matched"] / bucket["gt"] if bucket["gt"] else None
         precision = bucket["matched"] / bucket["predictions"] if bucket["predictions"] else None
         f1 = 2 * recall * precision / (recall + precision) if recall is not None and precision is not None and recall + precision else 0.0
-        return {**bucket, "recall": recall, "precision": precision, "f1": f1}
+        return {
+            **bucket,
+            "false_candidates": max(0, bucket["predictions"] - bucket["matched"]),
+            "recall": recall,
+            "precision": precision,
+            "f1": f1,
+        }
 
-    class_results = {names[key]: result(value) for key, value in classes.items()}
+    class_results = {name: result(classes[key]) for key, name in enumerate(names)}
     recalls = [value["recall"] for value in class_results.values() if value["recall"] is not None]
     macro_recall = statistics.mean(recalls)
     macro_precision = statistics.mean(value["precision"] or 0.0 for value in class_results.values())
     return {
         "confidence": conf,
         "candidate_limit": budget,
+        "candidate_limit_applied": "after exact-target filtering",
+        "size_bucket_definitions": SIZE_BUCKETS,
         "gt": totals["gt"],
         "predictions": totals["predictions"],
+        "false_candidates": max(0, totals["predictions"] - totals["matched"]),
         "recall": totals["matched"] / totals["gt"],
         "precision": totals["matched"] / totals["predictions"] if totals["predictions"] else 0.0,
         "macro_recall": macro_recall,
@@ -109,6 +157,18 @@ def _score(frames: list[dict], predictions: dict[str, list[dict]], names: list[s
         "classes": class_results,
         "cameras": {key: result(value) for key, value in sorted(cameras.items())},
         "sizes": {key: result(value) for key, value in sizes.items()},
+        "target_requests": {
+            "total": totals["requests"],
+            "present": totals["present_target_requests"],
+            "absent": totals["absent_target_requests"],
+            "absent_with_candidates": totals["absent_target_requests_with_candidates"],
+            "false_candidates_when_absent": totals["absent_target_false_candidates"],
+        },
+        "empty_label_frames": {
+            "frames": totals["empty_label_frames"],
+            "false_candidates": totals["empty_label_false_candidates"],
+            "label": "empty-label frames; intentional-negative status is unknown",
+        },
     }
 
 
@@ -131,48 +191,124 @@ def _select_head(comparisons: list[dict]) -> bool:
         if item["confidence"] == 0.001 and item["candidate_limit"] == 20
     ]
     best_per_head = [
-        max((item for item in equal_budget if item["end2end"] == end2end), key=_recall_rank)
+        _best_available(item for item in equal_budget if item["end2end"] == end2end)
         for end2end in (True, False)
     ]
+    eligible = [item for item in best_per_head if _eligible(item)]
+    if not eligible:
+        raise ValueError("neither inference head detects every supported class")
     return max(
-        best_per_head,
-        key=lambda item: (*_recall_rank(item), not item["end2end"], -item["mean_inference_ms"]),
+        eligible,
+        key=lambda item: (*_selection_rank(item), not item["end2end"], -item["mean_inference_ms"]),
     )["end2end"]
 
 
 def _select_runtime(comparisons: list[dict], end2end: bool) -> dict:
     """Select settings across every candidate configuration for the chosen head."""
-    return max(
-        (item for item in comparisons if item["end2end"] == end2end),
-        key=lambda item: (item["macro_f1"], *_recall_rank(item), -item["candidate_limit"]),
+    return _select(item for item in comparisons if item["end2end"] == end2end)
+
+
+def _selection_rank(item: dict) -> tuple:
+    return (
+        item["macro_f1"],
+        min(value["recall"] for value in item["classes"].values() if value["recall"] is not None),
+        item["sizes"].get("tiny", {}).get("recall") or 0,
+        item["sizes"].get("small", {}).get("recall") or 0,
+        item["recall"],
     )
 
 
-def _predict(model, frames: list[dict], *, imgsz: int, batch: int, device: str,
-             end2end: bool, nms_iou: float, max_det: int) -> tuple[dict, dict]:
-    """Run one validation-image inference pass and return reusable predictions plus its profile."""
+def _select(items) -> dict:
+    eligible = [item for item in items if _eligible(item)]
+    if not eligible:
+        raise ValueError("no candidate detects every supported class")
+    return _best(eligible)
+
+
+def _eligible(item: dict) -> bool:
+    return all((value["recall"] or 0) > 0 for value in item["classes"].values())
+
+
+def _best(items) -> dict:
+    return max(items, key=lambda item: (*_selection_rank(item), -item["candidate_limit"]))
+
+
+def _best_available(items) -> dict:
+    items = list(items)
+    eligible = [item for item in items if _eligible(item)]
+    return _best(eligible or items)
+
+
+def _training_record(path: Path) -> dict:
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if not record.get("promotion_eligible", True):
+        raise ValueError("disposable smoke checkpoints cannot produce a runtime contract")
+    if record.get("completed") is False or not record.get("final_metrics"):
+        raise ValueError("training record does not prove a completed run")
+    if record.get("peak_training_memory_gib") is None:
+        raise ValueError("training record is missing final peak-memory evidence")
+    results_path = path.with_name("results.csv")
+    with results_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    if not rows:
+        raise ValueError("completed run requires a non-empty results.csv")
+    if any(
+        not math.isfinite(float(value))
+        for row in rows for value in row.values() if value not in (None, "")
+    ):
+        raise ValueError("results.csv contains non-finite values")
+    outputs = {key: Path(value).resolve() for key, value in record.get("outputs", {}).items()}
+    if set(outputs) != {"best", "last"} or any(not output.is_file() for output in outputs.values()):
+        raise ValueError("completed run requires readable best.pt and last.pt")
+    final_epoch = int(float(rows[-1]["epoch"]))
+    save_period = int(record.get("resolved_args", {}).get("save_period") or 0)
+    expected_periodic = {
+        outputs["last"].with_name(f"epoch{epoch}.pt")
+        for epoch in range(0, final_epoch, save_period)
+    } if save_period > 0 else set()
+    missing = sorted(str(checkpoint) for checkpoint in expected_periodic if not checkpoint.is_file())
+    if missing:
+        raise ValueError(f"completed run is missing periodic checkpoints: {missing}")
+    record["completed"] = True  # Backfill runs completed before the marker was introduced.
+    return record
+
+
+def _predict_targeted(model, frames: list[dict], names: list[str], *, imgsz: int, batch: int,
+                      device: str, end2end: bool, nms_iou: float, max_det: int,
+                      quantize: str | None) -> tuple[dict, dict]:
+    """Run each exact-class request so max_det is applied after target filtering."""
     import torch
 
     paths = [str(frame["image"]) for frame in frames]
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    started, speeds, predictions = time.perf_counter(), [], {}
-    for offset in range(0, len(paths), batch):
-        results = model.predict(
-            paths[offset:offset + batch], imgsz=imgsz, batch=batch, device=device,
-            conf=0.001, iou=nms_iou, max_det=max_det, end2end=end2end,
-            quantize=None if str(device) == "cpu" else "fp16", verbose=False,
-        )
-        for frame, result in zip(frames[offset:offset + batch], results):
-            shape = tuple(result.orig_shape)
-            speeds.append(result.speed["inference"])
-            predictions[frame["image"].name] = [
-                {"xyxy": box.tolist(), "conf": float(conf), "class_id": int(class_id), "shape": shape}
-                for box, conf, class_id in zip(result.boxes.xyxy.cpu(), result.boxes.conf.cpu(), result.boxes.cls.cpu())
-            ]
+    started, speeds = time.perf_counter(), []
+    predictions = {frame["image"].name: [] for frame in frames}
+    for requested_class in range(len(names)):
+        for offset in range(0, len(paths), batch):
+            results = model.predict(
+                paths[offset:offset + batch], imgsz=imgsz, batch=batch, device=device,
+                conf=0.001, iou=nms_iou, max_det=max_det, end2end=end2end,
+                classes=[requested_class], quantize=quantize, verbose=False,
+            )
+            for frame, result in zip(frames[offset:offset + batch], results):
+                shape = tuple(result.orig_shape)
+                speeds.append(result.speed["inference"])
+                predictions[frame["image"].name].extend(
+                    {
+                        "xyxy": box.tolist(), "conf": float(conf),
+                        "class_id": int(class_id), "shape": shape,
+                    }
+                    for box, conf, class_id in zip(
+                        result.boxes.xyxy.cpu(), result.boxes.conf.cpu(), result.boxes.cls.cpu()
+                    )
+                )
     return predictions, {
         "wall_seconds": time.perf_counter() - started,
         "mean_inference_ms": statistics.mean(speeds),
+        "target_requests": len(speeds),
+        "batch": batch,
+        "quantize": quantize,
         "peak_inference_memory_gib": torch.cuda.max_memory_reserved() / 1024**3 if torch.cuda.is_available() else None,
     }
 
@@ -187,14 +323,17 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--device", default="0")
     parser.add_argument("--confidence", nargs="+", type=float, default=(0.01, 0.02, 0.05, 0.1, 0.2, 0.3))
-    parser.add_argument("--candidate-limits", nargs="+", type=int, default=(10, 20, 30, 50))
+    parser.add_argument("--candidate-limits", nargs="+", type=int, default=(10, 20))
     parser.add_argument("--nms-iou", nargs="+", type=float, default=(0.5, 0.7))
+    parser.add_argument("--quantize", choices=("none", "fp16"), default="fp16")
     parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args()
     if 20 not in args.candidate_limits:
         parser.error("--candidate-limits must include 20 for equal-budget checkpoint selection")
     if any(confidence < 0.001 for confidence in args.confidence):
         parser.error("--confidence values must be at least the 0.001 collection floor")
+    if any(limit > 20 for limit in args.candidate_limits):
+        parser.error("--candidate-limits cannot exceed the runtime contract's top-20 bound")
     if not args.preflight and args.training_record is None:
         parser.error("--training-record is required for final checkpoint provenance")
 
@@ -203,6 +342,7 @@ def main() -> None:
     from ultralytics.data.utils import check_det_dataset
 
     names, frames = _frames(args.data.resolve())
+    quantize = None if str(args.device).lower() == "cpu" or args.quantize == "none" else args.quantize
     check_det_dataset(str(args.data.resolve()), autodownload=False)
     if not names or not frames:
         raise ValueError("expected a non-empty validation dataset")
@@ -213,12 +353,19 @@ def main() -> None:
             model_names = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
             if model_names != names:
                 raise ValueError(f"checkpoint class order does not match the derived dataset: {checkpoint}")
-        print(json.dumps({"checkpoints": [str(item) for item in checkpoints], "images": len(frames), "names": names}, indent=2))
+        print(json.dumps({
+            "checkpoints": [str(item) for item in checkpoints], "images": len(frames),
+            "names": names, "quantize": quantize,
+        }, indent=2))
         return
-    training_record = json.loads(args.training_record.read_text(encoding="utf-8"))
+    training_record = _training_record(args.training_record)
     weights_dir = Path(training_record["outputs"]["last"]).resolve().parent
     if any(checkpoint.parent != weights_dir for checkpoint in checkpoints):
         raise ValueError(f"all evaluated checkpoints must belong to the recorded run: {weights_dir}")
+    saved_checkpoints = {path.resolve() for path in weights_dir.glob("*.pt")}
+    if set(checkpoints) != saved_checkpoints:
+        missing = sorted(str(path) for path in saved_checkpoints - set(checkpoints))
+        raise ValueError(f"evaluation must include every saved checkpoint; missing={missing}")
 
     screening, screening_comparisons = [], []
     for checkpoint in checkpoints:
@@ -226,9 +373,9 @@ def main() -> None:
         model_names = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
         if model_names != names:
             raise ValueError(f"checkpoint class order does not match the derived dataset: {checkpoint}")
-        predictions, profile = _predict(
-            model, frames, imgsz=args.imgsz, batch=args.batch, device=args.device,
-            end2end=False, nms_iou=0.7, max_det=max(args.candidate_limits),
+        predictions, profile = _predict_targeted(
+            model, frames, names, imgsz=args.imgsz, batch=args.batch, device=args.device,
+            end2end=False, nms_iou=0.7, max_det=max(args.candidate_limits), quantize=quantize,
         )
         checkpoint_comparisons = [
             {
@@ -239,20 +386,22 @@ def main() -> None:
             for budget in args.candidate_limits
         ]
         screening_comparisons.extend(checkpoint_comparisons)
-        screening.append(_select_runtime(checkpoint_comparisons, False))
+        screening.append(_best_available(checkpoint_comparisons))
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    selected_checkpoint = max(
-        screening,
-        key=lambda item: (item["macro_f1"], *_recall_rank(item), -item["candidate_limit"]),
-    )["checkpoint"]
+    selected_checkpoint = _select(screening)["checkpoint"]
     comparisons, ap = [], []
     for end2end in (True, False):
         # Prediction fuses the selected head; a fresh model keeps the alternate branch available.
         head_model = YOLO(selected_checkpoint)
         for nms_iou in ((0.7,) if end2end else args.nms_iou):
-            predictions, profile = _predict(
-                head_model, frames, imgsz=args.imgsz, batch=args.batch, device=args.device,
+            predictions, profile = _predict_targeted(
+                head_model, frames, names, imgsz=args.imgsz, batch=args.batch, device=args.device,
                 end2end=end2end, nms_iou=nms_iou, max_det=max(args.candidate_limits),
+                quantize=quantize,
             )
             for conf in (0.001, *args.confidence):
                 for budget in args.candidate_limits:
@@ -260,47 +409,119 @@ def main() -> None:
                         "checkpoint": selected_checkpoint, "end2end": end2end, "nms_iou": nms_iou,
                         **profile, **_score(frames, predictions, names, conf, budget),
                     })
+        del head_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    selected_head = _select_head(comparisons)
+    selected_runtime = _select_runtime(comparisons, selected_head)
     for end2end in (True, False):
         # Validation fuses under torch.inference_mode(); use a fresh model so its tensors are never reused by prediction.
         metrics = YOLO(selected_checkpoint).val(
             data=str(args.data.resolve()), imgsz=args.imgsz, batch=args.batch, device=args.device,
-            end2end=end2end, iou=0.7, conf=0.001, max_det=300, plots=False,
+            end2end=end2end, iou=0.7, conf=0.001, max_det=300, plots=end2end == selected_head,
             project=str(args.output.parent), name=f"{Path(selected_checkpoint).stem}-{'e2e' if end2end else 'nms'}-val",
         )
-        ap.append({"checkpoint": selected_checkpoint, "end2end": end2end, "classes": metrics.summary(), "mean": metrics.results_dict})
+        ap.append({
+            "checkpoint": selected_checkpoint,
+            "end2end": end2end,
+            "save_dir": str(metrics.save_dir),
+            "classes": metrics.summary(),
+            "mean": metrics.results_dict,
+        })
+        del metrics
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    selected_head = _select_head(comparisons)
-    selected_runtime = _select_runtime(comparisons, selected_head)
+    size_comparisons, size_predictions = [], {}
+    for runtime_imgsz in RUNTIME_IMAGE_SIZES:
+        size_model = YOLO(selected_checkpoint)
+        predictions, profile = _predict_targeted(
+            size_model, frames, names, imgsz=runtime_imgsz, batch=args.batch,
+            device=args.device, end2end=selected_head,
+            nms_iou=selected_runtime["nms_iou"], max_det=max(RECALL_LIMITS), quantize=quantize,
+        )
+        size_predictions[runtime_imgsz] = predictions
+        size_comparisons.append({
+            "imgsz": runtime_imgsz,
+            "end2end": selected_head,
+            "nms_iou": selected_runtime["nms_iou"],
+            **profile,
+            **_score(
+                frames, predictions, names, selected_runtime["confidence"],
+                selected_runtime["candidate_limit"],
+            ),
+        })
+        del size_model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    selected_imgsz = _select(size_comparisons)["imgsz"]
     runtime_settings = {
         key: selected_runtime[key] for key in ("end2end", "nms_iou", "confidence", "candidate_limit")
     }
+    runtime_settings["imgsz"] = selected_imgsz
+    runtime_settings["quantize"] = quantize
     if runtime_settings["end2end"]:
         runtime_settings["nms_iou"] = None
-    example_result = YOLO(selected_checkpoint).predict(
-        str(frames[0]["image"]), imgsz=args.imgsz, device=args.device, conf=selected_runtime["confidence"],
-        iou=selected_runtime["nms_iou"], max_det=selected_runtime["candidate_limit"],
-        end2end=selected_runtime["end2end"],
-        quantize=None if str(args.device) == "cpu" else "fp16", verbose=False,
-    )[0]
+    selected_predictions = size_predictions[selected_imgsz]
+    recall_at = {
+        str(limit): _score(
+            frames, selected_predictions, names, selected_runtime["confidence"], limit
+        )
+        for limit in RECALL_LIMITS
+    }
+    example_frame = next(frame for frame in frames if frame["labels"])
+    example_class_id = example_frame["labels"][0][0]
+    example_candidates = sorted(
+        (
+            item for item in selected_predictions[example_frame["image"].name]
+            if item["class_id"] == example_class_id
+            and item["conf"] >= selected_runtime["confidence"]
+        ),
+        key=lambda item: item["conf"], reverse=True,
+    )[:selected_runtime["candidate_limit"]]
     candidate_output_example = {
-        "image": frames[0]["image"].name,
-        "camera": frames[0]["camera"],
-        "image_shape": list(example_result.orig_shape),
+        "status": "ok" if example_candidates else "not_detected",
+        "target_type": names[example_class_id],
+        "image": example_frame["image"].name,
+        "camera": example_frame["camera"],
+        "rgb_shape": list(example_frame["shape"]),
         "candidates": [
-            {"class_id": int(class_id), "class_name": names[int(class_id)], "confidence": float(conf), "xyxy": box.tolist()}
-            for box, conf, class_id in zip(example_result.boxes.xyxy.cpu(), example_result.boxes.conf.cpu(), example_result.boxes.cls.cpu())
+            {
+                "rank": rank, "class_id": item["class_id"],
+                "class_name": names[item["class_id"]], "confidence": item["conf"],
+                "xyxy": item["xyxy"],
+            }
+            for rank, item in enumerate(example_candidates, 1)
         ],
     }
     with Path(selected_checkpoint).open("rb") as checkpoint_stream:
         checkpoint_sha256 = hashlib.file_digest(checkpoint_stream, "sha256").hexdigest()
+    dataset_manifest_path = args.data.with_name("dataset_manifest.json")
+    dataset_manifest = (
+        json.loads(dataset_manifest_path.read_text(encoding="utf-8"))
+        if dataset_manifest_path.is_file() else {}
+    )
+    required_limitations = [
+        "Ordinary umbrella is absent; this provisional dataset covers nine of ten scored classes.",
+        "No independent test split exists.",
+        "No reliable scenario, range, or bearing manifest exists.",
+        "The same validation split is used for model selection and readiness reporting.",
+        "This is a provisional nine-class integration model, not final challenge-readiness evidence.",
+        "Empty-label intent metadata is absent; empty-label frames are not known intentional negatives.",
+    ]
     runtime_contract = {
+        "status": dataset_manifest.get("status", "selected"),
         "checkpoint": selected_checkpoint,
         "checkpoint_sha256": checkpoint_sha256,
         "ordered_classes": names,
         "preprocessing": {
-            "input": "full-frame PIL.Image RGB (NumPy callers must provide OpenCV BGR uint8 HWC)",
-            "resize": f"Ultralytics letterbox to imgsz={args.imgsz}",
-            "internal": "BGR to RGB, HWC to CHW, FP16/FP32, divide by 255",
+            "input": "full-frame PIL.Image RGB or NumPy uint8 HWC RGB",
+            "resize": f"Ultralytics letterbox to imgsz={selected_imgsz}",
+            "internal": "RGB HWC to CHW, FP16/FP32, divide by 255",
         },
         "inference": {
             "full_frame": True,
@@ -308,13 +529,20 @@ def main() -> None:
         },
         "local_checkpoint_load_verified": True,
         "offline_bundle_load_verified": False,
+        "known_limitations": required_limitations,
     }
     report = {
         "dataset": str(args.data.resolve()), "imgsz": args.imgsz, "images": len(frames),
+        "evaluator": {
+            "path": str(Path(__file__).resolve()),
+            "sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "argv": sys.argv,
+        },
         "selection": {
-            "checkpoint_rule": "screen every checkpoint with one one-to-many/NMS IoU 0.7 pass: best macro F1 across the confidence/candidate grid, then candidate-recall rank and smaller candidate limit",
-            "head_rule": "compare each head's best NMS setting at equal confidence 0.001/top-20: macro, worst-class, tiny, small, worst-camera, then overall recall",
-            "runtime_rule": "within the selected head across all NMS settings: macro F1, then candidate-recall rank, then smaller candidate limit",
+            "checkpoint_rule": "screen every saved checkpoint on validation: macro F1, worst-class recall, tiny recall, small recall, overall recall, then smaller candidate limit; reject zero-recall classes",
+            "head_rule": "compare both heads on validation at confidence 0.001/top-20 using the same hierarchy; reject zero-recall classes",
+            "runtime_rule": "select confidence, NMS IoU, and top-10/20 on validation using the same hierarchy",
+            "resolution_rule": "compare 640/1280/1920 on validation using macro F1, worst-class recall, tiny recall, small recall, then overall recall",
             "checkpoint": selected_checkpoint,
             "runtime": runtime_settings,
         },
@@ -322,24 +550,26 @@ def main() -> None:
         "screening_comparisons": screening_comparisons,
         "ap": ap,
         "comparisons": comparisons,
+        "runtime_size_comparisons": size_comparisons,
+        "target_conditioned_recall_at": recall_at,
         "candidate_output_example": candidate_output_example,
+        "known_limitations": required_limitations,
         "runtime_contract": runtime_contract,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, default=str) + "\n", encoding="utf-8")
     contract_path = args.output.with_name("runtime_contract.json")
     contract_path.write_text(json.dumps(runtime_contract, indent=2) + "\n", encoding="utf-8")
-    data_descriptor = yaml.safe_load(args.data.read_text(encoding="utf-8"))
-    training_record["dataset"].update({
-        "source_revision": data_descriptor["source_revision"],
-        "source_data_yaml_sha256": data_descriptor["source_data_yaml_sha256"],
-        "splits": {key: data_descriptor[key] for key in ("train", "val")},
-    })
     training_record.update({
         "selected_checkpoint": selected_checkpoint,
         "selected_checkpoint_sha256": checkpoint_sha256,
+        "evaluation": report["evaluator"],
         "evaluation_report": str(args.output.resolve()),
         "runtime_contract": str(contract_path.resolve()),
+        "selected_validation_plots": next(
+            item["save_dir"] for item in ap if item["end2end"] == selected_head
+        ),
+        "known_limitations": required_limitations,
     })
     args.training_record.write_text(json.dumps(training_record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report["selection"], indent=2))

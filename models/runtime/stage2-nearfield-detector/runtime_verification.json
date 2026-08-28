@@ -1,0 +1,115 @@
+{
+  "verified": true,
+  "offline": true,
+  "weights": "/home/marc2026/marc-2026-robust/models/runtime/stage2-nearfield-detector/model.pt",
+  "weights_sha256": "3092b0c64f5d543f20a8dd6fa0bc9ce645298be9b36722dc39f7878e4ee58232",
+  "image": "/home/marc2026/marc-2026-work/datasets/processed/robust-roboview-yolo9-provisional-6723cca/images/val/00450.png",
+  "target": "tumbler",
+  "runtime_path": "YoloDetector -> YoloTracker.detect_candidates -> NearFieldAcquire candidate/radius selection",
+  "ordered_classes": [
+    "tumbler",
+    "cracker_box",
+    "cola_can",
+    "disposable_cup",
+    "juice",
+    "tissue",
+    "mug",
+    "sunblock",
+    "pencilcase"
+  ],
+  "settings": {
+    "imgsz": 1920,
+    "confidence": 0.3,
+    "nms_iou": 0.5,
+    "end2end": false,
+    "candidate_limit": 10,
+    "quantize": "fp16",
+    "batch": 1
+  },
+  "checks": {
+    "exact_target_only": true,
+    "confidence_descending": true,
+    "bounded_candidates": true,
+    "unsupported_target": "unsupported_target",
+    "blank_frame": "not_detected",
+    "no_all_class_fallback": true,
+    "legacy_first_candidate": true,
+    "nearfield_adapter": true,
+    "nearfield_candidate_radius_selection": true,
+    "per_class_probe": {
+      "tumbler": {
+        "status": "ok",
+        "candidates": 1
+      },
+      "cracker_box": {
+        "status": "not_detected",
+        "candidates": 0
+      },
+      "cola_can": {
+        "status": "ok",
+        "candidates": 1
+      },
+      "disposable_cup": {
+        "status": "not_detected",
+        "candidates": 0
+      },
+      "juice": {
+        "status": "not_detected",
+        "candidates": 0
+      },
+      "tissue": {
+        "status": "not_detected",
+        "candidates": 0
+      },
+      "mug": {
+        "status": "not_detected",
+        "candidates": 0
+      },
+      "sunblock": {
+        "status": "not_detected",
+        "candidates": 0
+      },
+      "pencilcase": {
+        "status": "not_detected",
+        "candidates": 0
+      }
+    }
+  },
+  "candidate_output_example": {
+    "status": "ok",
+    "target_type": "tumbler",
+    "rgb_shape": [
+      480,
+      640
+    ],
+    "candidates": [
+      {
+        "xyxy": [
+          629.3333740234375,
+          152.0,
+          640.0,
+          160.33334350585938
+        ],
+        "confidence": 0.73388671875,
+        "class_id": 0,
+        "class_name": "tumbler",
+        "rank": 1
+      }
+    ]
+  },
+  "benchmark": {
+    "warmup_iterations": 5,
+    "timed_iterations": 30,
+    "mean_ms": 19.496014869461458,
+    "median_ms": 19.48991371318698,
+    "p95_ms": 19.711334258317947,
+    "peak_allocated_gib": 0.5912961959838867,
+    "peak_reserved_gib": 1.125
+  },
+  "machine": {
+    "device": "0",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "torch": "2.13.0+cu130",
+    "ultralytics": "8.4.118"
+  }
+}

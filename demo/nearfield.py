@@ -51,20 +51,6 @@ LAT_MAX_M = 0.45
 MIN_CONF = 0.12
 STALE_STOP_S = 0.8
 
-# MARC class -> COCO names used only while the checkpoint lacks the MARC label.
-COCO_ALIASES = {
-    "tumbler": ("cup", "bottle", "wine glass"),
-    "mug": ("cup",),
-    "disposable_cup": ("cup", "bottle"),
-    "cola_can": ("bottle", "cup"),
-    "juice": ("bottle", "cup"),
-    "cracker_box": ("book",),
-    "tissue": ("book",),
-    "sunblock": ("bottle",),
-    "pencilcase": ("book", "cell phone"),
-}
-
-
 def _wrap_pi(a: float) -> float:
     while a > math.pi:
         a -= 2.0 * math.pi
@@ -340,6 +326,7 @@ def localize_detection(
 class Detector(Protocol):
     def load(self) -> bool: ...
     def set_target(self, name: Optional[str]) -> None: ...
+    def detect_candidates(self, rgb: np.ndarray, target_type: str) -> dict: ...
     def detect(self, rgb: np.ndarray) -> Optional[dict]: ...
     def unload(self) -> None: ...
 
@@ -356,6 +343,9 @@ class MissingDetector:
     def set_target(self, name: Optional[str]) -> None:
         return None
 
+    def detect_candidates(self, rgb: np.ndarray, target_type: str) -> dict:
+        return {"status": "detector_unavailable", "target_type": target_type, "rgb_shape": None, "candidates": []}
+
     def detect(self, rgb: np.ndarray) -> Optional[dict]:
         return None
 
@@ -364,7 +354,7 @@ class MissingDetector:
 
 
 class YoloDetector:
-    """Adapter over ``manip_dataset.yolo_detect.YoloTracker`` plus COCO aliases."""
+    """Adapter over the existing near-field YOLO seam."""
 
     def __init__(self, tracker):
         self._yolo = tracker
@@ -373,18 +363,10 @@ class YoloDetector:
         return bool(self._yolo.load())
 
     def set_target(self, name: Optional[str]) -> None:
-        raw = None if not name else str(name).strip()
-        names = getattr(self._yolo, "names", None) or {}
-        inv = {str(n): int(i) for i, n in names.items()}
-        if raw and raw in inv:
-            self._yolo.set_target(raw)
-            return
-        if raw:
-            for alias in COCO_ALIASES.get(raw, ()):
-                if alias in inv:
-                    self._yolo.set_target(alias)
-                    return
-        self._yolo.set_target(None)
+        self._yolo.set_target(name)
+
+    def detect_candidates(self, rgb: np.ndarray, target_type: str) -> dict:
+        return self._yolo.detect_candidates(rgb, target_type)
 
     def detect(self, rgb: np.ndarray) -> Optional[dict]:
         return self._yolo.detect(rgb)
@@ -396,7 +378,7 @@ class YoloDetector:
 
 
 def make_detector() -> Detector:
-    """Production detector: pretrained YOLO if ultralytics loads, else missing."""
+    """Production detector: bundled Stage 2 YOLO if available, else missing."""
     try:
         from manip_dataset.yolo_detect import YoloTracker
     except ImportError as e:
@@ -424,6 +406,40 @@ def _yaw_for_err(err: float) -> float:
     mag = min(abs(ang), YAW_MAX)
     mag = max(mag, YAW_MIN)
     return math.copysign(mag, ang)
+
+
+def _candidate_detection(result, depth, k, pose, hint_xy, radius, R=None, t=None):
+    """Choose the exact-target candidate nearest the reveal hint with usable depth."""
+    shape = result.get("rgb_shape")
+    if shape is None or depth is None or pose is None:
+        return None
+    h, w = int(shape[0]), int(shape[1])
+    eligible = []
+    for rank, candidate in enumerate(result.get("candidates", ()), 1):
+        bbox = candidate["xyxy"]
+        localized = localize_detection(
+            bbox, depth, shape, k, pose, hint_xy, radius,
+            conf=candidate["confidence"], name=candidate["class_name"], R=R, t=t,
+        )
+        if localized.reason in {"no_depth", "outside_radius"}:
+            continue
+        hint_distance = (
+            math.dist(localized.world_xy, hint_xy)
+            if localized.world_xy is not None and hint_xy is not None else 0.0
+        )
+        eligible.append((hint_distance, -candidate["confidence"], rank, candidate))
+    if not eligible:
+        return None
+    _, _, rank, candidate = min(eligible)
+    bbox = candidate["xyxy"]
+    x1, y1, x2, y2 = bbox
+    cx = 0.5 * (x1 + x2)
+    return {
+        "status": "ok", "n_obj": 1, "bbox": bbox,
+        "conf": candidate["confidence"], "cls": candidate["class_id"],
+        "name": candidate["class_name"], "rank": candidate.get("rank", rank), "rgb_shape": shape,
+        "error": float(np.clip((cx - 0.5 * (w - 1)) / (0.5 * (w - 1)), -1.0, 1.0)),
+    }
 
 
 class NearFieldAcquire:
@@ -471,7 +487,19 @@ class NearFieldAcquire:
             rgb, depth, info, rgb_msg = self._read_locked()
             det = None
             if rgb is not None:
-                det = self.detector.detect(rgb)
+                result = self.detector.detect_candidates(rgb, ttype)
+                status = result.get("status")
+                if status == "unsupported_target":
+                    self._stop()
+                    return LocalizedTarget(valid=False, reason="unsupported_target")
+                if status not in {"ok", "not_detected"}:
+                    self._stop()
+                    return LocalizedTarget(valid=False, reason=str(status or "detector_error"))
+                k = k_from_info(info, rgb.shape[:2])
+                R, tvec = self._cam_to_car(rgb_msg)
+                det = _candidate_detection(
+                    result, depth, k, pose, hint_xy, radius, R=R, t=tvec
+                )
                 last_good_t = now
 
             n_obj = 0 if det is None else int(det.get("n_obj") or 0)
@@ -482,8 +510,6 @@ class NearFieldAcquire:
                 d_obj = depth_in_bbox(depth, bbox, det.get("rgb_shape") or rgb.shape[:2])
 
             if n_obj > 0 and bbox is not None and depth is not None and pose is not None:
-                k = k_from_info(info, rgb.shape[:2] if rgb is not None else (480, 640))
-                R, tvec = self._cam_to_car(rgb_msg)
                 cand = localize_detection(
                     bbox, depth, det.get("rgb_shape") or rgb.shape[:2], k, pose,
                     hint_xy, radius,
@@ -550,7 +576,7 @@ class NearFieldAcquire:
 
     def _command(self, now: float, n_obj: int, err, d_obj) -> tuple:
         since = now - self._phase_t0
-        has = n_obj > 0 and err is not None
+        has = n_obj > 0 and err is not None and d_obj is not None
         if d_obj is not None and n_obj > 0 and d_obj < ALREADY_NEAR_M:
             return 0.0, 0.0
 
