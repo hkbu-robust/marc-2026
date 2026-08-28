@@ -37,6 +37,7 @@ from marc_agent.perception.sar_selection import (
     Verifier,
     candidate_evidence,
     projection_relation,
+    resolve_sar_anchor,
     select_sar_candidate,
 )
 from marc_agent.perception.qwen_remote import (
@@ -378,7 +379,8 @@ def run_stage1_candidate_pipeline(
         )
 
     detections = refine_detection_round(parsed, detections)
-    detections = apply_camera_gate(parsed, detections)
+    if parsed.target_type != "person":
+        detections = apply_camera_gate(parsed, detections)
     selection = None
     object_selection = None
     failure_reason = None
@@ -535,6 +537,8 @@ def _compose_person(
         None,
     )
     anchor = item.anchor if item is not None else None
+    if anchor is None:
+        anchor = resolve_sar_anchor(parsed, person, candidates.detections)
     projected = _project_pair(
         projector,
         person.camera_id,

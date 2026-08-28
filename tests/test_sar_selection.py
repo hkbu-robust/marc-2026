@@ -74,17 +74,34 @@ class SarSelectionTests(unittest.TestCase):
         self.assertIn("rig_a:trash_can:0", board.prompt)
         self.assertIn(self.text, board.prompt)
 
-    def test_board_limits_prompt_to_the_crop_shortlist(self):
+    def test_crop_limit_never_removes_a_candidate_from_the_board(self):
         board = build_candidate_board(
             self.text,
             self.command,
             _round(),
             max_crops=1,
         )
-        self.assertEqual(("rig_a:person_bending:0",), board.candidate_ids)
+        self.assertEqual(
+            ("rig_a:person_bending:0", "rig_a:person_walking:0"),
+            board.candidate_ids,
+        )
         self.assertEqual(2, len(board.images))  # one annotated camera + one crop
-        self.assertNotIn("rig_a:person_walking:0", board.prompt)
+        self.assertIn("rig_a:person_walking:0", board.prompt)
+        self.assertIn("detail_crop=no", board.prompt)
         self.assertIn("middle token of each CANDIDATE_ID is the detector pose", board.prompt)
+
+    def test_verifier_can_select_a_candidate_outside_the_crop_budget(self):
+        with patch(
+            "marc_agent.perception.sar_selection.configured_max_crops",
+            return_value=1,
+        ):
+            result = select_sar_candidate(
+                self.text,
+                self.command,
+                _round(),
+                verifier=lambda board: "rig_a:person_walking:0|emergency",
+            )
+        self.assertEqual("rig_a:person_walking:0", result.selected.candidate_id)
 
     def test_valid_model_output_selects_only_supplied_id(self):
         with self.assertLogs("marc_agent.sar_selection", level="INFO") as captured:
@@ -92,14 +109,15 @@ class SarSelectionTests(unittest.TestCase):
                 self.text,
                 self.command,
                 _round(),
-                verifier=lambda board: "rig_a:person_bending:0|emergency",
+                verifier=lambda board: "rig_a:person_bending:0",
             )
         self.assertEqual(SelectionStatus.SELECTED, result.status)
         self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
+        self.assertIsNone(result.evidence_situation)
         self.assertEqual("qwen", result.method)
         self.assertEqual("qwen", result.verifier_metrics.backend)
         self.assertEqual(3, result.verifier_metrics.image_count)
-        self.assertIn("output=rig_a:person_bending:0|emergency", "\n".join(captured.output))
+        self.assertIn("output=rig_a:person_bending:0", "\n".join(captured.output))
 
     def test_invalid_model_output_uses_deterministic_fallback(self):
         with self.assertLogs("marc_agent.sar_selection", level="INFO") as captured:
@@ -135,6 +153,14 @@ class SarSelectionTests(unittest.TestCase):
             parse_verifier_output("rig_b:person_walking:0|emergency", ("rig_a:person_walking:0",))
         with self.assertRaisesRegex(ValueError, "exactly"):
             parse_verifier_output("rig_a:person_walking:0|emergency because", ("rig_a:person_walking:0",))
+
+    def test_output_parser_accepts_candidate_id_without_situation(self):
+        candidate_id, situation = parse_verifier_output(
+            "rig_a:person_walking:0",
+            ("rig_a:person_walking:0",),
+        )
+        self.assertEqual("rig_a:person_walking:0", candidate_id)
+        self.assertIsNone(situation)
 
     def test_output_parser_accepts_split_camera_pipe(self):
         board = (
@@ -430,7 +456,7 @@ class SarSelectionTests(unittest.TestCase):
         self.assertTrue(all(item.anchor is None for item in board.evidence))
         self.assertIn("anchor=none", board.prompt)
 
-    def test_camera_gate_drops_people_without_the_named_support(self):
+    def test_camera_evidence_reranks_but_never_drops_people(self):
         from marc_agent.perception.sar_selection import candidate_evidence
 
         text = "Find the person sitting on top of the trash can in the parking lot."
@@ -484,10 +510,57 @@ class SarSelectionTests(unittest.TestCase):
         )
         evidence = candidate_evidence(command, round_, text)
         ids = [item.person.candidate_id for item in evidence]
-        self.assertIn("rig_park:person_sitting:0", ids)
-        self.assertNotIn("rig_other:person_sitting:0", ids)
+        self.assertEqual(
+            ["rig_park:person_sitting:0", "rig_other:person_sitting:0"],
+            ids,
+        )
+        self.assertIn("scene:police_car", evidence[0].camera_evidence)
 
-    def test_accident_in_parking_prefers_prone_over_lying_down(self):
+    def test_round_pipeline_preserves_people_outside_the_soft_camera_match(self):
+        text = "Find the person sitting on top of the trash can in the parking lot."
+        round_ = CctvDetectionRound(
+            objects=[
+                ObjectCandidate(
+                    "rig_a:trash_can:0",
+                    "trash_can",
+                    (200.0, 200.0, 280.0, 400.0),
+                    0.9,
+                    "rig_a",
+                    (640, 480),
+                )
+            ],
+            people=[
+                PersonCandidate(
+                    "rig_a:person_sitting:0",
+                    (210.0, 120.0, 270.0, 220.0),
+                    "person_sitting",
+                    0.8,
+                    "rig_a",
+                    (640, 480),
+                ),
+                PersonCandidate(
+                    "rig_b:person_sitting:0",
+                    (210.0, 120.0, 270.0, 220.0),
+                    "person_sitting",
+                    0.9,
+                    "rig_b",
+                    (640, 480),
+                ),
+            ],
+            camera_ids=["rig_a", "rig_b"],
+        )
+
+        result = run_stage1_candidate_pipeline(
+            object(),
+            text,
+            detector=lambda *_args, **_kwargs: round_,
+            verifier=lambda board: "rig_b:person_sitting:0|abnormal",
+        )
+
+        self.assertEqual(2, len(result.detections.people))
+        self.assertEqual("rig_b:person_sitting:0", result.selected_candidate_id)
+
+    def test_accident_without_vehicle_language_does_not_attach_bicycle(self):
         from marc_agent.perception.sar_selection import candidate_evidence
 
         text = (
@@ -535,7 +608,7 @@ class SarSelectionTests(unittest.TestCase):
         )
         evidence = candidate_evidence(command, round_, text)
         self.assertEqual("rig_a:person_prone:0", evidence[0].person.candidate_id)
-        self.assertEqual("bicycle", evidence[0].anchor.class_name)
+        self.assertIsNone(evidence[0].anchor)
 
 
 if __name__ == "__main__":
