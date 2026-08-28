@@ -1,88 +1,48 @@
-# Stage 1 CCTV detector
+# Stage 1 CCTV detector corrective replacement
 
-This bundle is the selected full-frame detector for MARC 2026 Stage 1 CCTV
-object, landmark, and person/pose candidates.
+This optimizer-stripped 34-class detector was approved for promotion on 2026-08-29.
+The human approver explicitly waived the optional blind-review workflow. No completed
+blind-review JSON was fabricated. The superseded 33-class release remains immutable
+at Hugging Face revision `9227ecd11069d103c7dabdd287c6fc20a83eb6c1`.
 
-## Artifact
+## Lineage
 
-- Format: inference-only Ultralytics YOLO26x PyTorch checkpoint (`model.pt`)
-- Deployment artifact SHA-256:
-  `8c6e69d3f8b9df6e06cba59c904f62489497037e930e9e94727d01bcde96a15a`
-- Selected training checkpoint: `best.pt` from run
-  `stage1-cctv-yolo26x-1920-umbrella-ceccc62`
-- Selected training checkpoint SHA-256:
-  `8c6e69d3f8b9df6e06cba59c904f62489497037e930e9e94727d01bcde96a15a`
-- Ultralytics stripped optimizer, scaler, EMA, and resume state from the
-  selected checkpoint. `model.pt` preserves the selected checkpoint bytes.
-- No adapter or external base checkpoint is required at inference time.
+- Selected run: `/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62`
+- Selected training checkpoint: `last.pt`
+- Full selected training-checkpoint SHA-256: `12712d12e3321dffeb49296285a7d99f8fab12b46aa99a808b5d3cd1da80da22`
+- Stripped deployment SHA-256: `d799aacb8df1dce3372f5ec29495e7bb467898e453fc8d8fa32bdc7ecaff738e`
+- Corrected source dataset revision: `ceccc62d27e7fc186fd186e66632da38aeac6668`
+- Corrected source descriptor SHA-256: `a9277d45dfaeefa3aaec34f6cf82218c4b362dd7b19c06271f8dc6ff417b1f9a`
+- Training commit: `4010e06cce663c0c8c9ff3617731511ffd89b5a4`
+- Superseded published model SHA-256: `06a0abac38a897c0d3c72392154699305a0855bbc12779c6a7bdfff7fe803e2f`
 
-## External archive
+## Permanent archive
 
-This replacement has not yet been mirrored to the private Hugging Face model
-repository. Its previous immutable revision contains the superseded 33-class
-checkpoint and must not be used for this bundle.
+- Private Hugging Face model repository:
+  <https://huggingface.co/roBUst-marc-2026/stage1-cctv-detector>
+- Immutable replacement revision:
+  `cb5a918f5bcd2c6561ef367fd275cbba49cbcf9c`
 
-## Upstream
+## Contract
 
-- Model: COCO-pretrained Ultralytics `yolo26x.pt`
-- Immutable release: `ultralytics/assets` tag `v8.4.0`
-- Source asset:
-  <https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26x.pt>
-- Source checkpoint SHA-256:
-  `9fdd44a31c504547ffb81d2c6d9e6dac3493c8eaa8b0398d3f43bae6c7003e92`
-- Source checkpoint metadata: Ultralytics `8.3.222`, dated 2025-12-30
-- License: AGPL-3.0; the bundled `LICENSE` is copied from the exact installed
-  Ultralytics distribution used for selection.
+- 34 ordered classes including ordinary `umbrella`
+- Excluded exactly `long_umbrella`, `master_chef_can`, and `wood_block`
+- Global all-class candidates, confidence descending, bounded by the recorded cap
+- Native full-frame inference at 1920; original-image pixel `xyxy`
+- No independent test split; the same validation split selected and reports this candidate
+- Human approval on 2026-08-29 explicitly waived blind review and authorized promotion
 
-## Training provenance
+## Reproduction
 
-- Dataset revision: `ceccc62d27e7fc186fd186e66632da38aeac6668`
-- Source dataset descriptor SHA-256:
-  `a9277d45dfaeefa3aaec34f6cf82218c4b362dd7b19c06271f8dc6ff417b1f9a`
-- Training code commit: `4010e06cce663c0c8c9ff3617731511ffd89b5a4`
-- Classes: 34 ordered classes recorded in `runtime_contract.json`, including
-  `umbrella` at class ID 4
-- Excluded classes: `long_umbrella`, `master_chef_can`, and `wood_block`
-- Dataset: 3,085 train images / 122,189 boxes and 343 validation images /
-  13,485 boxes across six CCTV cameras
-- Input geometry: native 1280x720 frames, rectangular letterbox to
-  `imgsz=1920`
-- Training: 100 epochs (18,720.1 seconds), batch 4, seed 0, AMP, `rect=True`,
-  `scale=0.2`, no mosaic/mixup/cutmix
-- Resolved optimizer: AdamW, initial learning rate 0.000263
-- Framework: Python 3.11.15, PyTorch 2.13.0+cu130,
-  `ultralytics-opencv-headless` 8.4.118
-- Peak recorded training memory: 28.4629 GiB
-- Determinism note: Ultralytics warns that `cache=ram` can make otherwise
-  deterministic training non-deterministic.
+Evaluator command: `["/home/marc2026/marc-2026-robust/training/evaluate_cctv_detector.py", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/best.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch0.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch10.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch20.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch30.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch40.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch50.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch60.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch70.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch80.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch90.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/last.pt", "--data", "/home/marc2026/marc-2026-work/datasets/processed/robust-stage1-yolo34-ceccc62/data.yaml", "--output", "/home/marc2026/marc-2026-work/evaluations/stage1-cctv-yolo26x-1920-umbrella-ceccc62/evaluation_report.json", "--training-record", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/training_record.json", "--old-model", "/home/marc2026/marc-2026-robust/models/runtime/stage1-cctv-detector/model.pt", "--imgsz", "1920", "--batch", "4", "--device", "0", "--confidence", "0.01", "0.02", "0.05", "0.1", "0.2", "0.3", "--candidate-limits", "20", "50", "--nms-iou", "0.5", "0.7", "--quantize", "fp16"]`
 
-## Selection and validation
+Stage command: `["/home/marc2026/marc-2026-robust/training/stage1_candidate_bundle.py", "stage", "--evaluation", "/home/marc2026/marc-2026-work/evaluations/stage1-cctv-yolo26x-1920-umbrella-ceccc62/evaluation_report.json", "--training-record", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/training_record.json", "--checkpoint", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/last.pt", "--published-bundle", "/home/marc2026/marc-2026-robust/models/runtime/stage1-cctv-detector", "--output", "/home/marc2026/marc-2026-work/candidates/stage1-cctv-detector-replacement-ceccc62"]`
 
-Ultralytics selected `best.pt` at epoch 92 on the 343-image, six-camera
-validation split. Metrics embedded in the selected checkpoint are:
+The runtime verification command and machine results are stored in
+`runtime_verification.json`. `candidate_output_example.json` is generated through
+the actual Stage 1 interface during that fresh-process verification.
 
-- Precision: 0.96806
-- Recall: 0.95277
-- mAP50: 0.97695
-- mAP50-95: 0.90205
+## License
 
-These are training-time validation metrics, not an independent challenge
-holdout. The runtime retains the previously selected one-to-many/NMS settings:
-confidence 0.3, NMS IoU 0.5, at most 50 candidates, and FP16 inference on CUDA.
-
-## Runtime
-
-Load `model.pt` only through the local path recorded by this bundle. Apply the
-settings and class order in `runtime_contract.json`. The example output records
-the candidate interface expected by the downstream Stage 1 runtime.
-
-The competition runtime is offline. Set `YOLO_OFFLINE=1`, include the exact
-runtime dependencies in the participant image, and do not resolve model names
-through a network-backed cache.
-
-## Licensing note
-
-Ultralytics documents its framework and model weights as AGPL-3.0. A private
-competition repository may not by itself satisfy those terms. Confirm that the
-team can comply with AGPL-3.0 or has an appropriate Ultralytics enterprise
-license before submission.
+The bundled `LICENSE` is the AGPL-3.0 license shipped with the installed Ultralytics
+distribution. Confirm team compliance or an appropriate Ultralytics license before submission.
