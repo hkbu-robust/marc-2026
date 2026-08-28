@@ -17,14 +17,15 @@ import yaml
 from PIL import Image
 
 
-SOURCE_REVISION = "6723cca004d05de4cde72827923941605502fdcc"
-SOURCE_DESCRIPTOR_SHA256 = "28827a048bbe1adc80f790dbd3411f1baacb7a44ebc59dbe9328dfae1edfbfa5"
-EXPECTED_IMAGES = {"train": 2048, "val": 400}
+SOURCE_REPOSITORY = "https://huggingface.co/datasets/roBUst-marc-2026/robust-nearfield-yoloWithUmb"
+SOURCE_REVISION = "e52c3156f004f6b07bdec044465c9d1be59ad4f3"
+SOURCE_DESCRIPTOR_SHA256 = "ee810912b28da56806cdd3b768d2f8cb76373950e7d1784310bdc7d9f456dd6a"
+EXPECTED_IMAGES = {"train": 2266, "val": 454}
 EXCLUDED_CLASSES = frozenset({"master_chef_can", "wood_block"})
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png"})
 CONFIG = Path(__file__).with_name("configs") / "stage2-roboview-yolo26x.yaml"
-STAGE1_SEED_SHA256 = "cf1d3b7975af147b9406c12baf7dbb64333ef1d5af5620e114325af99a90b55f"
-STAGE1_SEED_RUN = "stage1-cctv-yolo26x-1920-20260824"
+SEED_SHA256 = "931e1824a4cf08cb5865f112d9405e83b936d14616d067aace5c98b78488d146"
+SEED_RUN = "stage2-roboview-yolo26x-1920-provisional-20260828/epoch40.pt"
 
 
 def sha256(path: Path) -> str:
@@ -101,8 +102,8 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_source: bool
     retained_ids = [index for index in range(len(source_names)) if index not in excluded_ids]
     id_map = {old: new for new, old in enumerate(retained_ids)}
     names = [source_names[index] for index in retained_ids]
-    if len(names) != 9:
-        raise ValueError(f"expected nine provisional classes, got {names}")
+    if len(names) != 10 or names[-1] != "umbrella":
+        raise ValueError(f"expected ten target classes ending with umbrella, got {names}")
 
     output_root.mkdir(parents=True, exist_ok=True)
     stats: dict[str, object] = {
@@ -202,7 +203,7 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_source: bool
     manifest = {
         "status": "provisional",
         "source": {
-            "repository": "https://huggingface.co/ahmad-rev0/robust-roboView-yolo",
+            "repository": SOURCE_REPOSITORY,
             "revision": SOURCE_REVISION,
             "descriptor_sha256": sha256(source_yaml),
         },
@@ -220,7 +221,6 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_source: bool
         "known_limitations": [
             "No test split exists; validation must not be represented as final readiness evidence.",
             "Train and validation share scenario/background families, so the split is weak.",
-            "Ordinary umbrella is absent; this provisional dataset covers nine of ten scored classes.",
             "Empty-label intent metadata is absent, so intentional negatives cannot be separated from unknown empties.",
         ],
     }
@@ -239,8 +239,8 @@ def train_detector(args: argparse.Namespace) -> None:
     from ultralytics.data.utils import check_det_dataset
 
     data, checkpoint = args.data.resolve(), args.model.resolve()
-    if not checkpoint.is_file() or sha256(checkpoint) != STAGE1_SEED_SHA256:
-        raise ValueError("--model must be the original selected Stage 1 last.pt")
+    if not checkpoint.is_file() or sha256(checkpoint) != SEED_SHA256:
+        raise ValueError("--model must be the selected Stage 2 epoch40.pt")
     manifest_path = data.with_name("dataset_manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     names = manifest["derived"]["ordered_classes"]
@@ -250,8 +250,8 @@ def train_detector(args: argparse.Namespace) -> None:
     model = YOLO(checkpoint)
     seed_names = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
     missing = [name for name in names if name not in seed_names]
-    if missing:
-        raise ValueError(f"Stage 1 seed is missing transferable classes: {missing}")
+    if missing != ["umbrella"]:
+        raise ValueError(f"selected seed must transfer nine classes and add only umbrella: {missing}")
 
     overrides = {
         "model": str(checkpoint),
@@ -273,8 +273,8 @@ def train_detector(args: argparse.Namespace) -> None:
         "completed": False,
         "seed_checkpoint": {
             "path": str(checkpoint),
-            "sha256": STAGE1_SEED_SHA256,
-            "selected_run": STAGE1_SEED_RUN,
+            "sha256": SEED_SHA256,
+            "selected_run": SEED_RUN,
             "ordered_classes": seed_names,
         },
         "dataset": {"path": str(data), **manifest},
@@ -307,7 +307,7 @@ def train_detector(args: argparse.Namespace) -> None:
     def on_train_start(trainer) -> None:
         trained_names = list(trainer.model.names.values())
         if trained_names != names:
-            raise RuntimeError(f"expected remapped nine-class head, got {trained_names}")
+            raise RuntimeError(f"expected remapped ten-class head, got {trained_names}")
         torch.cuda.reset_peak_memory_stats()
         record["resolved_args"] = vars(trainer.args)
         record["trained_class_order"] = trained_names
