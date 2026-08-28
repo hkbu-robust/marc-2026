@@ -52,6 +52,7 @@ from marc_agent.retrieval_state import (
     RetrievalState,
     nearfield_start_reason,
     search_area_approach_goal,
+    snapshot_approach_goal,
 )
 from marc_agent.round_clock import RoundClock
 from mock_agent_vla import MockVLAGrounding
@@ -100,6 +101,7 @@ class DemoParticipant:
         self._nearfield_detector = None
         self._round_clock = RoundClock()
         self._qwen_verifier = get_default_verifier()
+        self._approach_snap = None
         self._register_handlers()
 
     # -- handler registration --
@@ -207,6 +209,7 @@ class DemoParticipant:
                  mission.task_description, mission.time_limit)
         # Store owner_position for the delivery leg (#14); this issue does not drive there.
         self._state.adopt_mission(mission)
+        self._approach_snap = None
         if self._state.owner_xy is not None:
             log.info("[Stage2] owner_position(runtime-provided)=%s", self._state.owner_xy)
         self._round_clock.begin(getattr(mission, "time_limit", None), self.client.now_s())
@@ -288,6 +291,7 @@ class DemoParticipant:
         Delivery to owner_position is #14 — stored, not driven here.
         """
         c = self.client
+        self._approach_snap = None
         # SIM-time deadline (via /clock) -- shared across all legs, robust to real-time factor < 1.
         deadline = c.now_s() + STAGE2_NAV_TIMEOUT_S
         dump = stage2_dir()
@@ -313,7 +317,10 @@ class DemoParticipant:
         else:
             pose = c.get_world_pose()
             pose_xy = (pose[0], pose[1]) if pose is not None else search
-            approach = search_area_approach_goal(search, self._state.hint_radius, pose_xy)
+            self._approach_snap = snapshot_approach_goal(
+                None, search, self._state.hint_radius, pose_xy,
+            )
+            approach = self._approach_snap[2] if self._approach_snap is not None else search
             log.info("[Stage2] leg1 -> search-area approach %s (center=%s r=%.2f)",
                      tuple(round(v, 2) for v in approach),
                      tuple(round(v, 2) for v in search), self._state.hint_radius)
@@ -527,13 +534,18 @@ class DemoParticipant:
         return self._state.search_xy()
 
     def _live_approach_goal(self):
-        """Near-edge search-area goal from current pose; retargets on a late reveal."""
+        """Frozen near-edge search-area goal; refreshes only if the reveal hint jumps."""
         center = self._state.search_xy()
         if center is None:
             return None
         pose = self.client.get_world_pose()
         pose_xy = (pose[0], pose[1]) if pose is not None else center
-        return search_area_approach_goal(center, self._state.hint_radius, pose_xy)
+        self._approach_snap = snapshot_approach_goal(
+            self._approach_snap, center, self._state.hint_radius, pose_xy,
+        )
+        if self._approach_snap is None:
+            return None
+        return self._approach_snap[2]
 
     def _navigate_to(self, goal, deadline, tol=GOAL_TOLERANCE,
                      inflation_m=STAGE2_INFLATION_M, exclude_m=0.6, cruise=False,

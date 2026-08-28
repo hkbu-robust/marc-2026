@@ -123,6 +123,21 @@ class NearfieldDetectorContractTests(unittest.TestCase):
             self.assertEqual(("mug", "tumbler"), config.ordered_classes)
             self.assertEqual("provisional", config.status)
 
+    def test_checked_in_contract_is_provisional_nine_class(self):
+        root = Path(__file__).resolve().parents[1]
+        payload = json.loads(
+            (root / "models/runtime/stage2-nearfield-detector/runtime_contract.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        classes = list(payload["ordered_classes"])
+        self.assertEqual(9, len(classes))
+        self.assertNotIn("umbrella", classes)
+        inference = payload["inference"]
+        self.assertEqual(1920, inference["imgsz"])
+        self.assertEqual(0.3, inference["confidence"])
+        self.assertEqual("provisional", payload["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

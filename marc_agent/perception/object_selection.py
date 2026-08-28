@@ -2,18 +2,26 @@
 
 Selects one lost-item instance (and an optional same-camera landmark) using
 image-space geometry for the eight official relations, then optional world-metre
-rerank. An optional zero-shot verifier may pick among two or more ranked pairs;
-geometry remains the fallback. A one-pair board is not sent to the verifier.
+rerank. Place-only commands (no landmark pair) rank by occupancy and floor
+language instead of YOLO confidence. An optional zero-shot verifier may pick
+among two or more ranked pairs; geometry remains the fallback. A one-pair board
+is not sent to the verifier.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
-from marc_agent.command_parser import ParsedCommand, Relation, implicit_anchor_classes
+from marc_agent.command_parser import (
+    PARKING_SCENES,
+    ParsedCommand,
+    Relation,
+    implicit_anchor_classes,
+)
 from marc_agent.perception.camera_gate import apply_camera_gate
 from marc_agent.perception.cctv_project import pair_alignment_score
 from marc_agent.perception.qwen_runtime import configured_max_crops
@@ -22,8 +30,15 @@ from marc_agent.types import CctvDetectionRound, ObjectCandidate
 log = logging.getLogger("marc_agent.object_selection")
 
 ObjectVerifier = Callable[["ObjectBoard"], str]
+OccupancyAt = Callable[[float, float], Optional[int]]
 
 OBJECT_BOARD_LIMIT = 12
+_FLOOR_SPLIT = 0.15
+_OFF_ROAD_SCENES = frozenset(PARKING_SCENES | {"park"})
+_FLOOR_PLACE_RE = re.compile(
+    r"\b(?:on the (?:floor|ground|pavement)|lot floor)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -191,12 +206,146 @@ def _world_unique_near(
     return scores[0] >= scores[1] * 1.4 + 1e-9
 
 
+def occupancy_lookup(grid) -> Optional[OccupancyAt]:
+    """Sample occupancy at world XY. 0=free road, 100=occupied, -1=unknown."""
+    if grid is None:
+        return None
+    info = getattr(grid, "info", None)
+    data = getattr(grid, "data", None)
+    if info is None or data is None:
+        return None
+    try:
+        width = int(info.width)
+        height = int(info.height)
+        resolution = float(info.resolution)
+        origin = info.origin.position
+        ox = float(origin.x)
+        oy = float(origin.y)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0 or resolution <= 0.0:
+        return None
+
+    def at(x: float, y: float) -> Optional[int]:
+        col = int((float(x) - ox) / resolution)
+        row = int((float(y) - oy) / resolution)
+        if col < 0 or row < 0 or col >= width or row >= height:
+            return None
+        index = row * width + col
+        if index < 0 or index >= len(data):
+            return None
+        return int(data[index])
+
+    return at
+
+
+def _floor_place_request(command_text: str) -> bool:
+    return bool(_FLOOR_PLACE_RE.search(command_text or ""))
+
+
+def _image_floor_frac(target: ObjectCandidate) -> float:
+    height = max(1.0, float(target.image_size[1]))
+    return float(target.bbox_xyxy[3]) / height
+
+
+def _occupancy_place_score(scene_hint: Optional[str], cell: Optional[int]) -> float:
+    if cell is None or not scene_hint:
+        return 0.0
+    if scene_hint in _OFF_ROAD_SCENES:
+        if cell < 0:
+            return 1.0
+        if cell >= 100:
+            return 0.3
+        return 0.0
+    if scene_hint == "road":
+        return 1.0 if cell == 0 else 0.0
+    return 0.0
+
+
+def _target_world_xy(projector, target: ObjectCandidate):
+    if projector is None:
+        return None
+    project = getattr(projector, "project_contact", None)
+    if not callable(project):
+        return None
+    xyz = project(target.camera_id, target.bbox_xyxy)
+    if xyz is None:
+        return None
+    return (float(xyz[0]), float(xyz[1]))
+
+
+def _place_features(
+    item: ObjectSelection,
+    parsed: ParsedCommand,
+    command_text: str,
+    projector,
+    occupancy_at: Optional[OccupancyAt],
+) -> tuple[float, float, Optional[int], Optional[tuple[float, float]]]:
+    floor = (
+        _image_floor_frac(item.target)
+        if _floor_place_request(command_text)
+        else 0.0
+    )
+    world = _target_world_xy(projector, item.target)
+    cell = None
+    if occupancy_at is not None and world is not None:
+        cell = occupancy_at(world[0], world[1])
+    place = _occupancy_place_score(parsed.scene_hint, cell)
+    return place, floor, cell, world
+
+
+def _rank_unanchored(
+    targets: list[ObjectCandidate],
+    parsed: ParsedCommand,
+    command_text: str,
+    projector,
+    occupancy_at: Optional[OccupancyAt],
+) -> tuple[ObjectSelection, ...]:
+    ranked = [
+        ObjectSelection(target=item, anchor=None, score=item.confidence)
+        for item in targets
+    ]
+
+    def key(item: ObjectSelection) -> tuple:
+        place, floor, _, _ = _place_features(
+            item, parsed, command_text, projector, occupancy_at
+        )
+        return (-place, -floor, -item.target.confidence, item.target.candidate_id)
+
+    ranked.sort(key=key)
+    return tuple(ranked)[:OBJECT_BOARD_LIMIT]
+
+
+def _place_unique(
+    ranked: tuple[ObjectSelection, ...],
+    parsed: ParsedCommand,
+    command_text: str,
+    projector,
+    occupancy_at: Optional[OccupancyAt],
+) -> bool:
+    """True when occupancy or floor height clearly splits the top two instances."""
+    if len(ranked) < 2:
+        return False
+    if ranked[0].anchor is not None or ranked[1].anchor is not None:
+        return False
+    place0, floor0, _, _ = _place_features(
+        ranked[0], parsed, command_text, projector, occupancy_at
+    )
+    place1, floor1, _, _ = _place_features(
+        ranked[1], parsed, command_text, projector, occupancy_at
+    )
+    if occupancy_at is not None and place0 > place1 + 1e-9:
+        return True
+    return _floor_place_request(command_text) and (floor0 - floor1) >= _FLOOR_SPLIT
+
+
 def rank_object_candidates(
     parsed: ParsedCommand,
     round_: CctvDetectionRound,
     *,
     projector=None,
     command_text: str = "",
+    occupancy_at: Optional[OccupancyAt] = None,
 ) -> tuple[ObjectSelection, ...]:
     """Rank matching object (and same-camera landmark) pairs across cameras."""
     gated = apply_camera_gate(parsed, round_)
@@ -210,12 +359,9 @@ def rank_object_candidates(
 
     anchor_names = implicit_anchor_classes(parsed, command_text)
     if not anchor_names:
-        ranked = [
-            ObjectSelection(target=item, anchor=None, score=item.confidence)
-            for item in targets
-        ]
-        ranked.sort(key=lambda item: (-item.score, item.target.candidate_id))
-        return tuple(ranked)[:OBJECT_BOARD_LIMIT]
+        return _rank_unanchored(
+            targets, parsed, command_text, projector, occupancy_at
+        )
 
     relation = parsed.relation
     if relation is None and implicit_anchor_classes(parsed, command_text):
@@ -239,12 +385,9 @@ def rank_object_candidates(
     if not selected:
         if parsed.landmark is not None:
             return ()
-        ranked = [
-            ObjectSelection(target=item, anchor=None, score=item.confidence)
-            for item in targets
-        ]
-        ranked.sort(key=lambda item: (-item.score, item.target.candidate_id))
-        return tuple(ranked)[:OBJECT_BOARD_LIMIT]
+        return _rank_unanchored(
+            targets, parsed, command_text, projector, occupancy_at
+        )
     selected.sort(
         key=lambda item: (
             -item.score,
@@ -349,7 +492,10 @@ def format_object_verifier_prompt(
     return (
         "Select the single object candidate that best matches the spatial request. "
         "The request is language to satisfy, not visual ground truth. Use the images and "
-        "detector metadata together. NEAR and BESIDE "
+        "detector metadata together. Do not prefer higher confidence or the first listed "
+        "id. When the request names a place (floor, parking lot, park, road, walkway), "
+        "pick the instance in that place. Occupancy 0 is drivable road; -1 is off-road "
+        "(lot, grass, curb). NEAR and BESIDE "
         "mean beside the landmark, not sitting on top of it. Reply with exactly "
         "TARGET_ID|ANCHOR_ID and nothing else. ANCHOR_ID must be none when the request "
         "has no landmark.\n"
@@ -369,6 +515,8 @@ def build_object_board(
     ranked: tuple[ObjectSelection, ...],
     *,
     max_crops: Optional[int] = None,
+    projector=None,
+    occupancy_at: Optional[OccupancyAt] = None,
 ) -> ObjectBoard:
     """Build bounded visual evidence while keeping every ranked pair in the prompt."""
     crop_limit = configured_max_crops() if max_crops is None else max_crops
@@ -386,19 +534,24 @@ def build_object_board(
     rows = []
     for item in ranked:
         anchor = item.anchor
-        rows.append(
-            " | ".join(
-                (
-                    item.target.candidate_id,
-                    f"camera={item.target.camera_id}",
-                    f"class={item.target.class_name}",
-                    f"confidence={item.target.confidence:.3f}",
-                    f"anchor={anchor.class_name if anchor else 'none'}",
-                    f"anchor_id={anchor.candidate_id if anchor else 'none'}",
-                    f"score={item.score:.4f}",
-                )
-            )
+        fields = [
+            item.target.candidate_id,
+            f"camera={item.target.camera_id}",
+            f"class={item.target.class_name}",
+            f"confidence={item.target.confidence:.3f}",
+            f"anchor={anchor.class_name if anchor else 'none'}",
+            f"anchor_id={anchor.candidate_id if anchor else 'none'}",
+            f"score={item.score:.4f}",
+        ]
+        _, _, cell, world = _place_features(
+            item, parsed, command_text, projector, occupancy_at
         )
+        if world is not None:
+            fields.append(f"world_xy={world[0]:.2f},{world[1]:.2f}")
+        if occupancy_at is not None:
+            occ = "missing" if cell is None else str(int(cell))
+            fields.append(f"occupancy={occ}")
+        rows.append(" | ".join(fields))
     prompt = format_object_verifier_prompt(
         command_text,
         parsed.target_type,
@@ -461,10 +614,15 @@ def select_object_candidate(
     command_text: str = "",
     verifier: Optional[ObjectVerifier] = None,
     projector=None,
+    occupancy_at: Optional[OccupancyAt] = None,
 ) -> Optional[ObjectSelection]:
     """Return the best matching object, optionally verified, or None."""
     ranked = rank_object_candidates(
-        parsed, round_, projector=projector, command_text=command_text
+        parsed,
+        round_,
+        projector=projector,
+        command_text=command_text,
+        occupancy_at=occupancy_at,
     )
     if not ranked:
         return None
@@ -474,17 +632,29 @@ def select_object_candidate(
         ranked, parsed, projector, command_text
     ):
         should_verify = False
+    if should_verify and _place_unique(
+        ranked, parsed, command_text, projector, occupancy_at
+    ):
+        should_verify = False
     log.info(
-        "[object-selection] pairs=%d classes=%s verify=%s geometry=%s",
+        "[object-selection] pairs=%d classes=%s verify=%s geometry=%s occupancy=%s",
         len(ranked),
         ",".join(sorted(_target_classes(parsed))),
         should_verify,
         geometry.target.candidate_id,
+        "ok" if occupancy_at is not None else "missing",
     )
     if not should_verify:
         return geometry
 
-    board = build_object_board(command_text, parsed, round_, ranked)
+    board = build_object_board(
+        command_text,
+        parsed,
+        round_,
+        ranked,
+        projector=projector,
+        occupancy_at=occupancy_at,
+    )
     method = str(getattr(verifier, "method", "qwen"))
     try:
         raw_output = verifier(board)

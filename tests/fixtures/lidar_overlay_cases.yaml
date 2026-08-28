@@ -34,9 +34,19 @@ cases:
     res: 0.25
     origin: [0.0, 0.0]
   - id: drop_ground
-    xyz: [[1.0, 0.0, 0.02]]
+    xyz: [[1.0, 0.0, -0.5]]
     pose: [0.0, 0.0, 0.0]
     expected_n: 0
+  - id: keep_equator
+    xyz: [[1.0, 0.0, 0.0]]
+    pose: [0.0, 0.0, 0.0]
+    expected_n: 1
+    expected_world: [1.0, 0.0]
+  - id: keep_low
+    xyz: [[1.0, 0.0, 0.05]]
+    pose: [0.0, 0.0, 0.0]
+    expected_n: 1
+    expected_world: [1.0, 0.0]
   - id: drop_canopy
     xyz: [[1.5, 0.0, 2.5]]
     pose: [0.0, 0.0, 0.0]
@@ -46,7 +56,7 @@ cases:
     pose: [0.0, 0.0, 0.0]
     expected_n: 0
   - id: drop_too_close
-    xyz: [[0.05, 0.0, 0.4]]
+    xyz: [[0.02, 0.0, 0.4]]
     pose: [0.0, 0.0, 0.0]
     expected_n: 0
   - id: cluster_same_cell

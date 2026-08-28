@@ -12,6 +12,7 @@ import yaml
 from marc_agent.lidar_overlay import (
     LIDAR_CLUSTER_M,
     discs_to_cells,
+    fill_lidar_blobs,
     frontal_hit,
     lidar_xyz_to_obstacles,
     pointcloud2_xyz,
@@ -88,8 +89,18 @@ class LidarOverlayTests(unittest.TestCase):
     def test_frontal_hit_box(self):
         pose = (0.0, 0.0, 0.0)
         self.assertTrue(frontal_hit([(0.8, 0.0, 0.2)], pose))
+        self.assertTrue(frontal_hit([(1.5, 0.0, 0.2)], pose))
         self.assertFalse(frontal_hit([(-2.0, 0.0, 0.2)], pose))
         self.assertFalse(frontal_hit([(0.8, 2.0, 0.1)], pose))
+
+    def test_blob_fill_closes_metre_gap(self):
+        xyz = np.array([[2.0, 0.0, 0.4], [3.0, 0.0, 0.4]], dtype=np.float32)
+        discs = lidar_xyz_to_obstacles(xyz, (0.0, 0.0, 0.0))
+        self.assertGreater(len(discs), 2)
+        xs = [item[0] for item in discs]
+        self.assertTrue(any(abs(x - 2.5) < LIDAR_CLUSTER_M + 1e-6 for x in xs))
+        filled = fill_lidar_blobs([(2.0, 0.0, 0.35), (3.0, 0.0, 0.35)])
+        self.assertGreater(len(filled), 2)
 
 
 if __name__ == "__main__":

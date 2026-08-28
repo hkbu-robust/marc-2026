@@ -37,6 +37,11 @@ from mock_agent_navigation import (  # noqa: E402
 
 log = logging.getLogger("participant_app")
 
+# Stop and paint overlay before GoalSeeking through a live lidar blob.
+START_HOLE_M = 0.20
+BLOCK_HOLD_S = 0.50
+PAINT_DWELL_S = 1.0
+
 
 class NavStatus(str, Enum):
     REACHED = "reached"
@@ -72,12 +77,23 @@ def _pose_on_free_cell(planner, x, y) -> bool:
     return True
 
 
-def _plan_attempts(inflation_m: float):
-    """Configured inflation first, then thinner inflation, then a wider crop."""
+def _overlay_busy(planner, lidar_n: int) -> bool:
+    """True when live lidar discs or a stamped overlay must keep full robot inflation."""
+    if int(lidar_n) > 0:
+        return True
+    overlay = getattr(planner, "_overlay", None)
+    if overlay is None:
+        return False
+    return bool(overlay.any())
+
+
+def _plan_attempts(inflation_m: float, allow_thin: bool = True):
+    """Configured inflation first, then optional thinner inflation, then a wider crop."""
     attempts = [(float(inflation_m), 12.0)]
-    for infl in (0.10, 0.0):
-        if infl < float(inflation_m) - 1e-9:
-            attempts.append((infl, 12.0))
+    if allow_thin:
+        for infl in (0.10, 0.0):
+            if infl < float(inflation_m) - 1e-9:
+                attempts.append((infl, 12.0))
     for margin in (40.0, 80.0):
         attempts.append((float(inflation_m), margin))
     return attempts
@@ -136,9 +152,9 @@ class Stage2Navigator:
             if client.get_lidar() is not None:
                 return
 
-    def _plan_path(self, planner, start_xy, goal_xy):
+    def _plan_path(self, planner, start_xy, goal_xy, allow_thin: bool = True):
         """Plan with inflation then crop-margin fallbacks. First unblocked success wins."""
-        for inflation, margin in _plan_attempts(self.inflation_m):
+        for inflation, margin in _plan_attempts(self.inflation_m, allow_thin=allow_thin):
             path = planner.plan(
                 start_xy,
                 goal_xy,
@@ -192,6 +208,10 @@ class Stage2Navigator:
         last_goal_xy = None
         had_map = False
         had_path = False
+        hold_until = 0.0
+        pending_after_hold = ""
+        did_initial_paint = False
+        did_block_paint = False
 
         while client.is_running and client.now_s() < deadline_s:
             pose = client.get_world_pose()
@@ -236,7 +256,13 @@ class Stage2Navigator:
             hole = max(float(self.exclude_m), cur_tol)
             planner.stamp_overlay(extra + lidar_obs, now_s)
             planner.clear_goal_hole(cur_goal, exclude_m=hole)
-            planner.clear_start_hole((x, y), exclude_m=hole)
+            planner.clear_start_hole((x, y), exclude_m=START_HOLE_M)
+
+            if lidar_obs and not did_initial_paint:
+                did_initial_paint = True
+                hold_until = max(hold_until, now_s + PAINT_DWELL_S)
+                log.info("[Stage2] %s lidar map dwell %.1fs (%d discs)",
+                         leg, PAINT_DWELL_S, last_lidar_n)
 
             hold_linear = frontal_hit(extra + lidar_obs, pose)
             need_replan = follower is None
@@ -250,8 +276,8 @@ class Stage2Navigator:
             if hold_linear:
                 last_reason = ReplanReason.FRONTAL
                 if not prev_frontal:
-                    need_replan = True
-                    replan_reason = ReplanReason.FRONTAL
+                    hold_until = max(hold_until, now_s + BLOCK_HOLD_S)
+                    pending_after_hold = ReplanReason.FRONTAL
                     log.info("[Stage2] %s FRONTAL lidar stop -> cmd zero, replan", leg)
             prev_frontal = hold_linear
 
@@ -266,7 +292,7 @@ class Stage2Navigator:
                     last_progress_t = client.now_s()
             last_xy = (x, y)
 
-            if follower is not None and not need_replan:
+            if follower is not None and not need_replan and now_s >= hold_until:
                 remain = list(follower.path[follower.idx:])
                 if remain and _pose_on_free_cell(planner, x, y):
                     remain = [(x, y)] + remain
@@ -274,9 +300,22 @@ class Stage2Navigator:
                     planner, remain, inflation_m=self._path_inflation
                 ):
                     log.info("[Stage2] %s path blocked -> replan", leg)
-                    need_replan = True
-                    replan_reason = ReplanReason.PATH_BLOCKED
                     last_reason = ReplanReason.PATH_BLOCKED
+                    if not did_block_paint:
+                        did_block_paint = True
+                        hold_until = max(hold_until, now_s + PAINT_DWELL_S)
+                    else:
+                        hold_until = max(hold_until, now_s + BLOCK_HOLD_S)
+                    pending_after_hold = ReplanReason.PATH_BLOCKED
+
+            in_hold = now_s < hold_until
+            if in_hold:
+                hold_linear = True
+                need_replan = False
+            elif pending_after_hold:
+                need_replan = True
+                replan_reason = pending_after_hold
+                pending_after_hold = ""
 
             if need_replan:
                 if not planner.ready:
@@ -307,7 +346,8 @@ class Stage2Navigator:
                             path=self.last_path, last_method=self.last_method,
                         )
                     log.info("[Stage2] %s replan reason=%s count=%d", leg, replan_reason, n_replan)
-                path = self._plan_path(planner, (x, y), cur_goal)
+                allow_thin = not _overlay_busy(planner, last_lidar_n)
+                path = self._plan_path(planner, (x, y), cur_goal, allow_thin=allow_thin)
                 if path:
                     follower = PathFollower(path, passthrough=self.cruise)
                     had_path = True

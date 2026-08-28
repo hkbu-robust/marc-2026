@@ -62,9 +62,7 @@ def eligible_cameras(parsed: ParsedCommand, round_: CctvDetectionRound) -> froze
     scene_cams = _cameras_with(round_.objects, scene_classes(parsed.scene_hint))
     if parsed.landmark:
         cams = set(support_cams)
-        for cue in parsed.place_cues:
-            cue_cams = _cameras_with(round_.objects, frozenset({cue}))
-            cams = _narrow(cams, cue_cams)
+        cams = _narrow_place_cues(cams, parsed, round_)
         cams = _narrow(cams, scene_cams)
         cams = _narrow(cams, target_cams)
         if cams:
@@ -77,11 +75,22 @@ def eligible_cameras(parsed: ParsedCommand, round_: CctvDetectionRound) -> froze
 
     cams = set(target_cams)
     cams = _narrow(cams, scene_cams)
+    if parsed.target_type != "person":
+        cams = _narrow_place_cues(cams, parsed, round_)
     if cams:
         return frozenset(cams)
     if target_cams:
         return frozenset(target_cams)
     return frozenset(scene_cams)
+
+
+def _narrow_place_cues(
+    cams: set[str], parsed: ParsedCommand, round_: CctvDetectionRound
+) -> set[str]:
+    for cue in parsed.place_cues:
+        cue_cams = _cameras_with(round_.objects, frozenset({cue}))
+        cams = _narrow(cams, cue_cams)
+    return cams
 
 
 def apply_camera_gate(

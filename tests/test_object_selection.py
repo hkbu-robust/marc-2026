@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from marc_agent.command_parser import parse_command
+from marc_agent.command_parser import Intent, ParsedCommand, parse_command
 from marc_agent.perception.object_selection import (
+    build_object_board,
+    format_object_verifier_prompt,
     parse_object_verifier_output,
     rank_object_candidates,
     select_object_candidate,
@@ -56,6 +58,34 @@ def _on_table_vs_beside_bench() -> CctvDetectionRound:
             ),
         ],
         camera_ids=["rig_a", "rig_b"],
+    )
+
+
+def _downward_projector(camera_id: str):
+    from marc_agent.perception.cctv_project import (
+        CameraGeometry,
+        CctvProjector,
+        static_lookup,
+    )
+
+    return CctvProjector(
+        static_lookup(
+            {
+                camera_id: CameraGeometry(
+                    fx=500.0,
+                    fy=500.0,
+                    cx=320.0,
+                    cy=240.0,
+                    rotation=(
+                        (1.0, 0.0, 0.0),
+                        (0.0, 1.0, 0.0),
+                        (0.0, 0.0, 1.0),
+                    ),
+                    translation=(0.0, 0.0, -10.0),
+                    ground_height=0.0,
+                )
+            }
+        )
     )
 
 
@@ -585,6 +615,179 @@ class ObjectSelectionTests(unittest.TestCase):
         )
         self.assertIsNotNone(ranked[0].anchor)
         self.assertEqual("police_car", ranked[0].anchor.class_name)
+
+    def test_same_camera_floor_drop_prefers_lower_box(self):
+        text = (
+            "Pick up the tumbler dropped on the parking lot floor "
+            "and bring it to the owner."
+        )
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "cam:tumbler:1",
+                    "tumbler",
+                    (200.0, 40.0, 280.0, 140.0),
+                    "cam",
+                    0.99,
+                ),
+                _object(
+                    "cam:tumbler:0",
+                    "tumbler",
+                    (40.0, 320.0, 90.0, 410.0),
+                    "cam",
+                    0.4,
+                ),
+            ],
+            camera_ids=["cam"],
+        )
+        ranked = rank_object_candidates(parsed, round_, command_text=text)
+        self.assertEqual("cam:tumbler:0", ranked[0].target.candidate_id)
+        self.assertIsNone(ranked[0].anchor)
+        calls = []
+        selected = select_object_candidate(
+            parsed,
+            round_,
+            command_text=text,
+            verifier=lambda board: calls.append(board) or "cam:tumbler:1|none",
+        )
+        self.assertEqual([], calls)
+        self.assertEqual("cam:tumbler:0", selected.target.candidate_id)
+
+    def test_parking_occupancy_prefers_off_road_instance(self):
+        text = "Find the tumbler in the parking lot."
+        parsed = parse_command(text)
+        self.assertEqual("parking", parsed.scene_hint)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "cam:tumbler:1",
+                    "tumbler",
+                    (400.0, 300.0, 460.0, 400.0),
+                    "cam",
+                    0.99,
+                ),
+                _object(
+                    "cam:tumbler:0",
+                    "tumbler",
+                    (40.0, 80.0, 80.0, 140.0),
+                    "cam",
+                    0.4,
+                ),
+            ],
+            camera_ids=["cam"],
+        )
+        projector = _downward_projector("cam")
+        road = projector.project_contact("cam", (400.0, 300.0, 460.0, 400.0))
+        lot = projector.project_contact("cam", (40.0, 80.0, 80.0, 140.0))
+        self.assertIsNotNone(road)
+        self.assertIsNotNone(lot)
+
+        def occupancy_at(x, y):
+            d_road = (x - road[0]) ** 2 + (y - road[1]) ** 2
+            d_lot = (x - lot[0]) ** 2 + (y - lot[1]) ** 2
+            return 0 if d_road <= d_lot else -1
+
+        ranked = rank_object_candidates(
+            parsed,
+            round_,
+            projector=projector,
+            command_text=text,
+            occupancy_at=occupancy_at,
+        )
+        self.assertEqual("cam:tumbler:0", ranked[0].target.candidate_id)
+        self.assertIsNone(ranked[0].anchor)
+
+    def test_place_cues_without_landmark_keep_cue_camera(self):
+        parsed = ParsedCommand(
+            intent=Intent.FIND,
+            target_type="tumbler",
+            place_cues=("taxi",),
+        )
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "cam_a:tumbler:0",
+                    "tumbler",
+                    (40.0, 300.0, 80.0, 380.0),
+                    "cam_a",
+                    0.4,
+                ),
+                _object(
+                    "cam_a:taxi:0",
+                    "taxi",
+                    (90.0, 280.0, 400.0, 420.0),
+                    "cam_a",
+                ),
+                _object(
+                    "cam_b:tumbler:0",
+                    "tumbler",
+                    (200.0, 200.0, 240.0, 280.0),
+                    "cam_b",
+                    0.99,
+                ),
+                _object(
+                    "cam_b:bench:0",
+                    "bench",
+                    (180.0, 300.0, 420.0, 430.0),
+                    "cam_b",
+                ),
+            ],
+            camera_ids=["cam_a", "cam_b"],
+        )
+        ranked = rank_object_candidates(parsed, round_)
+        self.assertEqual("cam_a:tumbler:0", ranked[0].target.candidate_id)
+
+    def test_floor_language_does_not_override_on_table(self):
+        text = "Find the mug dropped on the picnic table."
+        parsed = parse_command(text)
+        selected = select_object_candidate(
+            parsed, _on_table_vs_beside_bench(), command_text=text
+        )
+        self.assertIsNotNone(selected)
+        self.assertEqual("rig_a:mug:0", selected.target.candidate_id)
+        self.assertEqual("picnic_table", selected.anchor.class_name)
+
+    def test_verifier_prompt_matches_place_not_confidence(self):
+        prompt = format_object_verifier_prompt(
+            "Pick up the tumbler dropped on the parking lot floor.",
+            "tumbler",
+            None,
+            None,
+            ["cam:tumbler:0 | camera=cam"],
+            scene_hint="parking",
+        )
+        self.assertIn("Do not prefer higher confidence", prompt)
+        self.assertIn("Occupancy 0 is drivable road", prompt)
+        self.assertIn("first listed id", prompt)
+
+    def test_object_board_includes_world_xy_and_occupancy(self):
+        text = "Find the tumbler in the parking lot."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "cam:tumbler:0",
+                    "tumbler",
+                    (40.0, 80.0, 80.0, 140.0),
+                    "cam",
+                    0.4,
+                ),
+            ],
+            camera_ids=["cam"],
+        )
+        ranked = rank_object_candidates(parsed, round_, command_text=text)
+        board = build_object_board(
+            text,
+            parsed,
+            round_,
+            ranked,
+            max_crops=0,
+            projector=_downward_projector("cam"),
+            occupancy_at=lambda x, y: -1,
+        )
+        self.assertIn("world_xy=", board.prompt)
+        self.assertIn("occupancy=-1", board.prompt)
 
 
 if __name__ == "__main__":

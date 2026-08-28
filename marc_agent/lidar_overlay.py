@@ -13,13 +13,18 @@ from typing import Iterable, Optional, Sequence
 
 import numpy as np
 
-# Drop ground / canopy, cap range, cluster hits to cell-sized discs.
-LIDAR_Z_MIN = 0.15
-LIDAR_Z_MAX = 1.5
+# Drop deep ground / canopy. Keep VLP-16 equatorial rings (z≈0) and slight under-body.
+LIDAR_Z_MIN = -0.15
+LIDAR_Z_MAX = 2.0
 LIDAR_RANGE_M = 20.0
-LIDAR_MIN_RANGE_M = 0.20
+LIDAR_MIN_RANGE_M = 0.05
 LIDAR_HIT_RADIUS = 0.35
 LIDAR_CLUSTER_M = 0.25
+LIDAR_CLOSE_M = 0.8
+LIDAR_FILL_SPAN_M = 30.0
+FRONTAL_X_MAX = 2.0
+FRONTAL_Y_HALF = 0.8
+FRONTAL_X_MIN = 0.15
 
 
 def pointcloud2_xyz(msg) -> Optional[np.ndarray]:
@@ -97,7 +102,71 @@ def lidar_xyz_to_obstacles(
     qj = np.round(wy / cell_m).astype(np.int32)
     uniq = np.unique(np.stack((qi, qj), axis=1), axis=0)
     r = float(radius_m)
-    return [(float(i) * cell_m, float(j) * cell_m, r) for i, j in uniq]
+    discs = [(float(i) * cell_m, float(j) * cell_m, r) for i, j in uniq]
+    return fill_lidar_blobs(discs, cell_m=cell_m, radius_m=r)
+
+
+def _binary_dilate(mask, radius):
+    """Boolean dilation with a disk of ``radius`` cells. Outside the crop is empty."""
+    r = int(radius)
+    if r <= 0:
+        return mask
+    h, w = mask.shape
+    padded = np.pad(mask, r, mode="constant", constant_values=False)
+    out = np.zeros_like(mask, dtype=bool)
+    yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
+    disk = (yy * yy + xx * xx) <= (r * r)
+    dy, dx = np.nonzero(disk)
+    for i, j in zip((dy - r).tolist(), (dx - r).tolist()):
+        out |= padded[r + i:r + i + h, r + j:r + j + w]
+    return out
+
+
+def _binary_close(mask, radius):
+    """Dilate then erode so wheel-gaps smaller than the kernel become solid."""
+    dilated = _binary_dilate(mask, radius)
+    return np.logical_not(_binary_dilate(np.logical_not(dilated), radius))
+
+
+def fill_lidar_blobs(
+    discs,
+    cell_m: float = LIDAR_CLUSTER_M,
+    close_m: float = LIDAR_CLOSE_M,
+    radius_m: float = LIDAR_HIT_RADIUS,
+    span_m: float = LIDAR_FILL_SPAN_M,
+):
+    """Morphological-close clustered discs so a car is one blob, not a tunnel of holes."""
+    if not discs:
+        return []
+    cell_m = float(cell_m)
+    inv = 1.0 / cell_m
+    cells = [(int(round(float(d[0]) * inv)), int(round(float(d[1]) * inv))) for d in discs]
+    rad_c = max(1, int(round(float(close_m) / cell_m)))
+    is_ = [c[0] for c in cells]
+    js_ = [c[1] for c in cells]
+    pad = rad_c + 1
+    i0, i1 = min(is_) - pad, max(is_) + pad
+    j0, j1 = min(js_) - pad, max(js_) + pad
+    max_cells = int(round(float(span_m) / cell_m)) + 2 * pad
+    if (i1 - i0) > max_cells:
+        mid = (i0 + i1) // 2
+        i0, i1 = mid - max_cells // 2, mid + max_cells // 2
+    if (j1 - j0) > max_cells:
+        mid = (j0 + j1) // 2
+        j0, j1 = mid - max_cells // 2, mid + max_cells // 2
+    height, width = i1 - i0 + 1, j1 - j0 + 1
+    mask = np.zeros((height, width), dtype=bool)
+    for i, j in cells:
+        row, col = i - i0, j - j0
+        if 0 <= row < height and 0 <= col < width:
+            mask[row, col] = True
+    closed = _binary_close(mask, rad_c)
+    r = float(radius_m)
+    out = []
+    rows, cols = np.nonzero(closed)
+    for row, col in zip(rows.tolist(), cols.tolist()):
+        out.append(((row + i0) * cell_m, (col + j0) * cell_m, r))
+    return out
 
 
 def lidar_cloud_to_obstacles(msg, pose, radius_m=LIDAR_HIT_RADIUS, cell_m=LIDAR_CLUSTER_M):
@@ -106,7 +175,9 @@ def lidar_cloud_to_obstacles(msg, pose, radius_m=LIDAR_HIT_RADIUS, cell_m=LIDAR_
     return lidar_xyz_to_obstacles(xyz, pose, radius_m=radius_m, cell_m=cell_m)
 
 
-def frontal_hit(obstacles, pose, x_max=1.2, y_half=0.4, x_min=0.15):
+def frontal_hit(
+    obstacles, pose, x_max=FRONTAL_X_MAX, y_half=FRONTAL_Y_HALF, x_min=FRONTAL_X_MIN,
+):
     """True if any disc centre (expanded by its radius) sits in a box ahead of the bumper."""
     if not obstacles:
         return False
