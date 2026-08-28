@@ -21,6 +21,7 @@ class Stage2DatasetTests(unittest.TestCase):
             names = [
                 "tumbler", "cracker_box", "cola_can", "disposable_cup", "juice",
                 "tissue", "mug", "sunblock", "pencilcase", "master_chef_can", "wood_block",
+                "umbrella",
             ]
             for split, suffix, offset in (("train", ".jpg", 0), ("val", ".png", 10)):
                 for index in range(3):
@@ -33,7 +34,7 @@ class Stage2DatasetTests(unittest.TestCase):
                     label.write_text(
                         "" if index == 0 else
                         "9 0.5 0.5 0.1 0.1\n" if index == 1 else
-                        "8 0.5 0.5 0.25 0.5\n",
+                        "8 0.5 0.5 0.25 0.5\n11 0.5 0.5 0.1 0.25\n",
                         encoding="utf-8",
                     )
             source = raw / "data.yaml"
@@ -51,16 +52,20 @@ class Stage2DatasetTests(unittest.TestCase):
             })
             descriptor = yaml.safe_load(output.read_text(encoding="utf-8"))
             self.assertNotIn("path", descriptor)
-            self.assertEqual(names[:9], list(descriptor["names"].values()))
+            expected_names = [*names[:9], "umbrella"]
+            self.assertEqual(expected_names, list(descriptor["names"].values()))
             self.assertEqual({"train": 3, "val": 3}, manifest["statistics"]["images"])
             self.assertEqual({"train": {"jpg": 3}, "val": {"png": 3}}, manifest["statistics"]["image_formats"])
             self.assertEqual({"train": 2, "val": 2}, manifest["statistics"]["empty_labels_after"])
             self.assertEqual({"master_chef_can": 2}, manifest["statistics"]["dropped_class_boxes"])
             self.assertEqual(0, manifest["split_checks"]["image_stem_overlap"])
             self.assertTrue((output.parent / "images/train/00000.jpg").samefile(raw / "images/train/00000.jpg"))
-            self.assertEqual("8 0.5 0.5 0.25 0.5", (output.parent / "labels/train/00002.txt").read_text().strip())
+            self.assertEqual(
+                "8 0.5 0.5 0.25 0.5\n9 0.5 0.5 0.1 0.25",
+                (output.parent / "labels/train/00002.txt").read_text().strip(),
+            )
             names_out, frames = _frames(output)
-            self.assertEqual(names[:9], names_out)
+            self.assertEqual(expected_names, names_out)
             self.assertEqual(3, len(frames))
             self.assertEqual((48, 64), frames[0]["shape"])
 

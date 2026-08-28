@@ -1,15 +1,27 @@
 {
   "checkpoint": "model.pt",
-  "checkpoint_sha256": "06a0abac38a897c0d3c72392154699305a0855bbc12779c6a7bdfff7fe803e2f",
+  "checkpoint_sha256": "8c6e69d3f8b9df6e06cba59c904f62489497037e930e9e94727d01bcde96a15a",
   "selected_training_checkpoint": {
-    "name": "last.pt",
-    "sha256": "cf1d3b7975af147b9406c12baf7dbb64333ef1d5af5620e114325af99a90b55f"
+    "run": "stage1-cctv-yolo26x-1920-umbrella-ceccc62",
+    "name": "best.pt",
+    "sha256": "8c6e69d3f8b9df6e06cba59c904f62489497037e930e9e94727d01bcde96a15a",
+    "epoch": 92,
+    "validation": {
+      "images": 343,
+      "boxes": 13485,
+      "cameras": 6,
+      "precision": 0.96806,
+      "recall": 0.95277,
+      "map50": 0.97695,
+      "map50_95": 0.90205
+    }
   },
   "ordered_classes": [
     "tumbler",
     "cracker_box",
     "cola_can",
     "disposable_cup",
+    "umbrella",
     "juice",
     "tissue",
     "mug",
@@ -43,7 +55,6 @@
   "ignored_classes": [
     "master_chef_can",
     "wood_block",
-    "umbrella",
     "long_umbrella"
   ],
   "preprocessing": {

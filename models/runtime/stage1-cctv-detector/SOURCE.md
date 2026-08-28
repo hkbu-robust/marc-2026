@@ -7,23 +7,20 @@ object, landmark, and person/pose candidates.
 
 - Format: inference-only Ultralytics YOLO26x PyTorch checkpoint (`model.pt`)
 - Deployment artifact SHA-256:
-  `06a0abac38a897c0d3c72392154699305a0855bbc12779c6a7bdfff7fe803e2f`
-- Selected training checkpoint: `last.pt` from run
-  `stage1-cctv-yolo26x-1920-20260824`
+  `8c6e69d3f8b9df6e06cba59c904f62489497037e930e9e94727d01bcde96a15a`
+- Selected training checkpoint: `best.pt` from run
+  `stage1-cctv-yolo26x-1920-umbrella-ceccc62`
 - Selected training checkpoint SHA-256:
-  `cf1d3b7975af147b9406c12baf7dbb64333ef1d5af5620e114325af99a90b55f`
-- Ultralytics had already stripped optimizer, scaler, EMA, and resume state from
-  the run's final `last.pt`. The external checkpoint archive retains its exact
-  selected bytes and also keeps the unselected full-state `epoch70.pt` for a
-  possible training resume.
+  `8c6e69d3f8b9df6e06cba59c904f62489497037e930e9e94727d01bcde96a15a`
+- Ultralytics stripped optimizer, scaler, EMA, and resume state from the
+  selected checkpoint. `model.pt` preserves the selected checkpoint bytes.
 - No adapter or external base checkpoint is required at inference time.
 
-## Permanent archive
+## External archive
 
-- Private Hugging Face model repository:
-  <https://huggingface.co/roBUst-marc-2026/stage1-cctv-detector>
-- Immutable release revision:
-  `9227ecd11069d103c7dabdd287c6fc20a83eb6c1`
+This replacement has not yet been mirrored to the private Hugging Face model
+repository. Its previous immutable revision contains the superseded 33-class
+checkpoint and must not be used for this bundle.
 
 ## Upstream
 
@@ -39,52 +36,39 @@ object, landmark, and person/pose candidates.
 
 ## Training provenance
 
-- Dataset revision: `075767315653d3286fb636e9f278397ae73d84c9`
+- Dataset revision: `ceccc62d27e7fc186fd186e66632da38aeac6668`
 - Source dataset descriptor SHA-256:
-  `88dee1597d7a25d7b1dc23bc7814da3669ee28e750ccf22a42c15499eca1d66c`
-- Training code commit: `b2afe15524c6ff42f7b9db1eb049d83e4424bf43`
-- Classes: 33 ordered classes recorded in `runtime_contract.json`
-- Organizer-excluded on **this** checkpoint: `umbrella` and `long_umbrella`.
-  `master_chef_can` and `wood_block` are also missing from this 33-class head.
-  The next detector train keeps `umbrella` and drops `long_umbrella`,
-  `master_chef_can`, and `wood_block`.
+  `a9277d45dfaeefa3aaec34f6cf82218c4b362dd7b19c06271f8dc6ff417b1f9a`
+- Training code commit: `4010e06cce663c0c8c9ff3617731511ffd89b5a4`
+- Classes: 34 ordered classes recorded in `runtime_contract.json`, including
+  `umbrella` at class ID 4
+- Excluded classes: `long_umbrella`, `master_chef_can`, and `wood_block`
+- Dataset: 3,085 train images / 122,189 boxes and 343 validation images /
+  13,485 boxes across six CCTV cameras
 - Input geometry: native 1280x720 frames, rectangular letterbox to
   `imgsz=1920`
-- Training: 100-epoch maximum, batch 4, seed 0, AMP, `rect=True`,
+- Training: 100 epochs (18,720.1 seconds), batch 4, seed 0, AMP, `rect=True`,
   `scale=0.2`, no mosaic/mixup/cutmix
-- Resolved optimizer: AdamW, initial learning rate 0.00027
+- Resolved optimizer: AdamW, initial learning rate 0.000263
 - Framework: Python 3.11.15, PyTorch 2.13.0+cu130,
   `ultralytics-opencv-headless` 8.4.118
-- Peak recorded training memory: 28.3066 GiB
+- Peak recorded training memory: 28.4629 GiB
+- Determinism note: Ultralytics warns that `cache=ram` can make otherwise
+  deterministic training non-deterministic.
 
 ## Selection and validation
 
-All 12 saved checkpoints were screened on the 415-image, six-camera validation
-split with one one-to-many/NMS IoU 0.7 top-50 inference pass each. Confidence
-and candidate limits were scored from those cached predictions; `last.pt` had
-the highest mean per-class F1. Only that winner received the complete two-head
-and runtime-setting evaluation.
+Ultralytics selected `best.pt` at epoch 92 on the 343-image, six-camera
+validation split. Metrics embedded in the selected checkpoint are:
 
-At equal confidence 0.001 and 20 candidates per image, the one-to-many head had
-0.7679 macro recall versus 0.7489 for the end-to-end head. The selected runtime
-configuration is one-to-many/NMS with confidence 0.3, NMS IoU 0.5, and at most
-50 candidates per image, using FP16 inference on CUDA.
+- Precision: 0.96806
+- Recall: 0.95277
+- mAP50: 0.97695
+- mAP50-95: 0.90205
 
-Selected-head validation:
-
-- mAP50-95: 0.9232
-- AP validation recall: 0.9721
-- Operational recall at selected runtime settings: 0.9764
-- Tiny/small operational recall: 0.9695 / 0.9870
-- Worst-class operational recall: 0.9354
-- Worst-camera operational recall: 0.9682
-- Mean measured inference time: 10.70 ms/image on an NVIDIA RTX PRO 6000
-  Blackwell Max-Q
-- Peak measured inference memory: 2.7637 GiB
-
-The complete per-class, per-camera, size-bucket, checkpoint-screening, latency,
-and candidate-setting results remain in the external run's
-`evaluation_report.json`.
+These are training-time validation metrics, not an independent challenge
+holdout. The runtime retains the previously selected one-to-many/NMS settings:
+confidence 0.3, NMS IoU 0.5, at most 50 candidates, and FP16 inference on CUDA.
 
 ## Runtime
 
