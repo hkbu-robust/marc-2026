@@ -18,9 +18,7 @@ from marc_agent.command_parser import (
     Intent,
     ParsedCommand,
     Relation,
-    implicit_anchor_classes,
     parse_command,
-    uses_vehicle_anchor,
 )
 from marc_agent.perception.cctv_project import (
     CctvProjector,
@@ -61,6 +59,9 @@ Detector = Callable[..., CctvDetectionRound]
 log = logging.getLogger("marc_agent.stage1_pipeline")
 _GroundingResult = None
 _CACHED_VERIFIER: Optional[Verifier] = None
+
+# Far-off non-zero stand-in until ignored classes (umbrella) have a detector.
+IGNORED_CLASS_DUMMY_XYZ = (1.0, 1.0, 0.1)
 
 
 def _grounding_result_cls():
@@ -676,76 +677,49 @@ def _compose_object(
     )
 
 
-def _last_resort_boxes(parsed: ParsedCommand, detections: CctvDetectionRound, command_text: str):
-    if parsed.landmark:
-        items = [
-            item for item in detections.objects if item.class_name == parsed.landmark
-        ]
-    else:
-        names = implicit_anchor_classes(parsed, command_text)
-        items = [item for item in detections.objects if item.class_name in names]
-    items.sort(key=lambda item: (-item.confidence, item.candidate_id))
-    return items
-
-
 def _compose_last_resort(
     candidates: Stage1CandidateResult,
     projector: CctvProjector,
     parsed: ParsedCommand,
 ) -> Optional[Stage1RoundResult]:
-    """Project a landmark box as both target and anchor. Never zeros.
+    """End the round for detector-ignored classes without submitting a landmark as the object.
 
-    Trained detector classes must not fall back to submitting the landmark as
-    the object (a picnic table is not a pencil case). Ignored classes such as
-    umbrella still use this last resort.
+    Trained detector classes must not fall back here (a picnic table is not a pencil case).
+    Ignored classes such as umbrella submit a deterministic dummy coordinate.
     """
+    del projector
     if detector_can_emit(parsed.target_type):
         return None
-    boxes = _last_resort_boxes(parsed, candidates.detections, candidates.command_text)
-    relation = parsed.relation
-    if relation is None and uses_vehicle_anchor(parsed, candidates.command_text):
-        relation = Relation.NEAR
-    for item in boxes:
-        projected = _project_pair(
-            projector,
-            item.camera_id,
-            item.bbox_xyxy,
-            item.bbox_xyxy,
-            relation=relation,
-            support_class=item.class_name,
-        )
-        if projected is None:
-            continue
-        target_xyz, anchor_xyz = projected
-        grounding = _grounding_payload(
-            parsed,
-            item.camera_id,
-            target_xyz,
-            anchor_xyz,
-            fallback_class=item.class_name,
-            relation=relation,
-        )
-        log.info(
-            "[stage1] grounding camera=%s target_id=%s anchor_id=%s method=landmark_fallback "
-            "relation=%s landmark=%s target_xyz=(%.3f, %.3f, %.3f) "
-            "anchor_xyz=(%.3f, %.3f, %.3f)",
-            grounding.camera_id,
-            item.candidate_id,
-            item.candidate_id,
-            grounding.relation,
-            grounding.landmark,
-            *grounding.target_coord,
-            *grounding.anchor_coord,
-        )
-        return Stage1RoundResult(
-            candidates,
-            grounding,
-            "landmark_fallback",
-            None,
-            item.candidate_id,
-            item.candidate_id,
-        )
-    return None
+    detections = candidates.detections
+    camera_id = ""
+    if detections.camera_ids:
+        camera_id = detections.camera_ids[0]
+    elif detections.frames:
+        camera_id = next(iter(detections.frames))
+    xyz = IGNORED_CLASS_DUMMY_XYZ
+    grounding = _grounding_payload(
+        parsed,
+        camera_id,
+        xyz,
+        xyz,
+    )
+    log.info(
+        "[stage1] grounding camera=%s target_id=%s method=ignored_class_dummy "
+        "relation=%s landmark=%s target_xyz=(%.3f, %.3f, %.3f)",
+        grounding.camera_id,
+        parsed.target_type,
+        grounding.relation,
+        grounding.landmark,
+        *grounding.target_coord,
+    )
+    return Stage1RoundResult(
+        candidates,
+        grounding,
+        "ignored_class_dummy",
+        None,
+        None,
+        None,
+    )
 
 
 def compose_stage1_grounding(

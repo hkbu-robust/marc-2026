@@ -712,7 +712,7 @@ class OccupancyGridPlanner:
         return wx, wy
 
     def plan(self, start_xy, goal_xy, inflation_m=0.25, margin_m=12.0,
-             snap_m=1.5, extra_obstacles=None):
+             snap_m=1.5, extra_obstacles=None, snap_goal_m=None):
         """Return a detour path from start_xy -> goal_xy as a list of world waypoints.
 
         Args:
@@ -721,10 +721,13 @@ class OccupancyGridPlanner:
             inflation_m: erode the free area by the robot radius to build a path that
                          stays away from the road boundary (avoids step stalls).
             margin_m: search margin outside the start/goal bounding box (crop for planning speed).
-            snap_m:  maximum radius to correct a start/goal cell to the nearest free
+            snap_m:  maximum radius to correct a start cell to the nearest free
                      cell when it is not traversable.
             extra_obstacles: [(x, y, radius_m), ...] extra discs carved for this
                      call only (tests / yaml). Live lidar should use stamp_overlay.
+            snap_goal_m: maximum radius to snap a blocked goal onto free road.
+                     Defaults to ``snap_m``. Off-road objects (parking) need a
+                     larger value so the path ends at the street, not inside the lot.
 
         Returns:
             [(x, y), ...] path waypoints. If the goal cell is traversable the last one is
@@ -784,8 +787,9 @@ class OccupancyGridPlanner:
         )
         self.last_goal_trav = goal_free
         cell_m = float(self._res) if self._res else 0.05
+        goal_snap = float(snap_m if snap_goal_m is None else snap_goal_m)
         ls = self._snap(trav, ls, snap_m, cell_m)
-        lg = self._snap(trav, lg, snap_m, cell_m)
+        lg = self._snap(trav, lg, goal_snap, cell_m)
         if ls is None or lg is None:
             self._dstar = None
             return None
@@ -915,9 +919,8 @@ class OccupancyGridPlanner:
 
     @staticmethod
     def _traversable(sub):
-        """Free (0) and unknown (-1) are open; occupied cells are blocked."""
-        arr = np.asarray(sub)
-        return (arr == 0) | (arr < 0)
+        """Only free road (0) is open. Occupied (100) and unknown (-1) are blocked."""
+        return np.asarray(sub) == 0
 
     @staticmethod
     def _erode(mask, iters):

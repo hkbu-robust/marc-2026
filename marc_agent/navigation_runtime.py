@@ -64,8 +64,7 @@ def _pose_on_free_cell(planner, x, y) -> bool:
     row, col = planner._w2c(x, y)
     if not planner._in_bounds(row, col):
         return False
-    val = int(planner._grid[row, col])
-    if not ((val == 0) or (val < 0)):
+    if int(planner._grid[row, col]) != 0:
         return False
     overlay = getattr(planner, "_overlay", None)
     if overlay is not None and bool(overlay[row, col]):
@@ -92,6 +91,8 @@ class NavigationResult:
     goal_xy: Optional[tuple] = None
     pose_xy: Optional[tuple] = None
     leg: str = ""
+    path: Optional[tuple] = None
+    last_method: Optional[str] = None
 
     @property
     def reached(self) -> bool:
@@ -121,6 +122,8 @@ class Stage2Navigator:
         self.replan_cap = int(replan_cap)
         self.cruise = bool(cruise)
         self._path_inflation = float(inflation_m)
+        self.last_path = None
+        self.last_method = None
 
     def _warm_lidar(self, deadline_s, ticks: int = 8):
         """Subscribe and wait briefly so the first plan is not empty of discs."""
@@ -141,20 +144,14 @@ class Stage2Navigator:
                 goal_xy,
                 inflation_m=inflation,
                 snap_m=8.0,
+                snap_goal_m=25.0,
                 margin_m=margin,
             )
             if not path:
                 continue
             chord = [start_xy] + list(path)
-            blocked = path_is_blocked(planner, chord, inflation_m=inflation)
-            if blocked:
-                join_dist = math.hypot(
-                    path[0][0] - float(start_xy[0]),
-                    path[0][1] - float(start_xy[1]),
-                )
-                cell_m = float(getattr(planner, "_res", None) or 0.05)
-                if len(path) <= 1 or join_dist < max(1.5 * cell_m, 0.15):
-                    continue
+            if path_is_blocked(planner, chord, inflation_m=inflation):
+                continue
             self._path_inflation = float(inflation)
             if abs(inflation - self.inflation_m) > 1e-9 or abs(margin - 12.0) > 1e-9:
                 log.info(
@@ -218,6 +215,7 @@ class Stage2Navigator:
                 return NavigationResult(
                     NavStatus.REACHED, reason="reached", replan_count=n_replan,
                     goal_xy=cur_goal, pose_xy=(x, y), leg=leg,
+                    path=self.last_path, last_method=self.last_method,
                 )
 
             occ = client.get_occupancy_map()
@@ -306,6 +304,7 @@ class Stage2Navigator:
                         return NavigationResult(
                             NavStatus.ABORTED, reason=ReplanReason.REPLAN_CAP,
                             replan_count=n_replan, goal_xy=cur_goal, pose_xy=(x, y), leg=leg,
+                            path=self.last_path, last_method=self.last_method,
                         )
                     log.info("[Stage2] %s replan reason=%s count=%d", leg, replan_reason, n_replan)
                 path = self._plan_path(planner, (x, y), cur_goal)
@@ -313,6 +312,8 @@ class Stage2Navigator:
                     follower = PathFollower(path, passthrough=self.cruise)
                     had_path = True
                     last_reason = replan_reason or "ok"
+                    self.last_path = tuple(path)
+                    self.last_method = planner.last_method
                     log.info("[Stage2] occupancy %s path %d waypoints (%d lidar discs)",
                              planner.last_method or "dstar", len(path), last_lidar_n)
                 else:
@@ -347,6 +348,7 @@ class Stage2Navigator:
                     return NavigationResult(
                         NavStatus.REACHED, reason="reached", replan_count=n_replan,
                         goal_xy=cur_goal, pose_xy=(x, y), leg=leg,
+                        path=self.last_path, last_method=self.last_method,
                     )
             else:
                 linear, angular = 0.0, 0.0
@@ -390,4 +392,5 @@ class Stage2Navigator:
         return NavigationResult(
             status, reason=reason, replan_count=n_replan,
             goal_xy=last_goal_xy, pose_xy=last_pose, leg=leg,
+            path=self.last_path, last_method=self.last_method,
         )

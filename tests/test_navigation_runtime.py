@@ -211,7 +211,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertIn("expected_intent=Intent.BRING", src)
         self.assertIn("MARC_STAGE2_MOCK_VLA", src)
 
-    def test_unknown_cells_are_traversable(self):
+    def test_unknown_cells_are_not_traversable(self):
         grid = np.full((20, 40), -1, dtype=np.int8)
         occ = _Occ(grid, 0.5, 0.0, 0.0)
         client = FakeClient([1.0, 5.0, 0.0], occ=occ)
@@ -223,8 +223,8 @@ class NavigationRuntimeTests(unittest.TestCase):
             stuck_time_s=30.0,
             replan_cap=5,
         )
-        result = nav.navigate_to((8.0, 5.0), 40.0, leg="search", tol=0.7)
-        self.assertEqual("reached", result.status.value)
+        result = nav.navigate_to((8.0, 5.0), 2.0, leg="search", tol=0.7)
+        self.assertEqual("no_path", result.status.value)
 
     def test_no_path_holds_do_not_burn_replan_cap(self):
         grid = np.zeros((20, 40), dtype=np.int8)
@@ -293,7 +293,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         found = planner.plan(start, goal, inflation_m=0.0, snap_m=2.5, margin_m=12.0)
         self.assertIsNotNone(found)
 
-    def test_off_road_start_joins_road(self):
+    def test_off_road_start_does_not_cut_across_blocked_cells(self):
         from mock_agent_navigation import OccupancyGridPlanner
 
         res = 0.25
@@ -303,6 +303,57 @@ class NavigationRuntimeTests(unittest.TestCase):
         helper = OccupancyGridPlanner()
         helper.update_from_array(grid, res, 0.0, 0.0)
         pose = helper._c2w(8, 20)
+        goal = helper._c2w(20, 60)
+        client = FakeClient([pose[0], pose[1], 0.0], occ=occ)
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.0,
+            exclude_m=0.6,
+            stuck_time_s=30.0,
+            replan_cap=8,
+        )
+        result = nav.navigate_to(goal, 2.0, leg="search", tol=0.7)
+        self.assertEqual("no_path", result.status.value)
+
+    def test_parking_lot_plan_goes_around_on_road(self):
+        from mock_agent_navigation import OccupancyGridPlanner, path_is_blocked
+
+        res = 0.25
+        grid = np.full((40, 50), -1, dtype=np.int8)
+        grid[:, 2] = 0
+        grid[2, :] = 0
+        grid[:, 47] = 0
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, res, 0.0, 0.0)
+        start = planner._c2w(30, 2)
+        goal = planner._c2w(30, 30)
+        nav = Stage2Navigator(
+            FakeClient([start[0], start[1], 0.0]),
+            dt=0.10,
+            inflation_m=0.0,
+            exclude_m=0.6,
+        )
+        path = nav._plan_path(planner, start, goal)
+        self.assertIsNotNone(path)
+        self.assertGreaterEqual(len(path), 2)
+        for wx, wy in path:
+            row, col = planner._w2c(wx, wy)
+            self.assertEqual(0, int(grid[row, col]))
+            if 8 <= row <= 28 and 8 <= col <= 40:
+                self.fail("path entered the parking interior at %s" % ((row, col),))
+        self.assertFalse(path_is_blocked(planner, [start] + list(path), inflation_m=0.0))
+
+    def test_off_road_start_joins_road(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        res = 0.25
+        grid = np.full((40, 80), 100, dtype=np.int8)
+        grid[20, 16:70] = 0
+        occ = _Occ(grid, res, 0.0, 0.0)
+        helper = OccupancyGridPlanner()
+        helper.update_from_array(grid, res, 0.0, 0.0)
+        pose = helper._c2w(20, 20)
         goal = helper._c2w(20, 60)
         client = FakeClient([pose[0], pose[1], 0.0], occ=occ)
         nav = Stage2Navigator(
