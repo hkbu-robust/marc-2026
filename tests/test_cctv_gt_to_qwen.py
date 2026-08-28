@@ -395,10 +395,10 @@ class SarLabelTests(unittest.TestCase):
         walker = _det("person_walking", "object", [100, 100, 200, 300])
         people = [walker, person]
         ids = q.person_candidate_id_list(people, "cam")
-        self.assertEqual(ids[0], "cam:person:0")
-        self.assertTrue(ids[1].startswith("cam:person:"))
+        self.assertEqual(ids[0], "cam:person_prone:0")
+        self.assertEqual(ids[1], "cam:person_walking:0")
         cid = q.person_candidate_ids(people, "cam")[id(person)]
-        self.assertRegex(cid, r"^cam:person:\d+$")
+        self.assertEqual(cid, "cam:person_prone:0")
         row = q._sample(
             "/tmp/fake.png", {}, "cam", "Find the person lying face-down.",
             person, None, "llama-factory", situation="accident",

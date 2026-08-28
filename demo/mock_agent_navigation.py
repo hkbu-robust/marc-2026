@@ -833,7 +833,11 @@ class OccupancyGridPlanner:
         if path:
             if goal_free:
                 path[-1] = (float(goal_xy[0]), float(goal_xy[1]))
-            if len(path) > 1:
+            join = path[0]
+            near_start = math.hypot(
+                join[0] - float(start_xy[0]), join[1] - float(start_xy[1])
+            ) < max(1.5 * cell_m, 0.15)
+            if near_start and len(path) > 1:
                 path = path[1:]
         return path
 

@@ -60,8 +60,18 @@ class CctvProjectTests(unittest.TestCase):
         self.assertAlmostEqual(0.0, xyz[1], places=6)
         self.assertAlmostEqual(0.0, xyz[2], places=6)
 
-    def test_contact_pixel_is_bbox_bottom_center(self):
-        self.assertEqual((320.0, 400.0), contact_pixel((280.0, 100.0, 360.0, 400.0)))
+    def test_contact_pixel_is_lower_half_centroid(self):
+        self.assertEqual((320.0, 325.0), contact_pixel((280.0, 100.0, 360.0, 400.0)))
+
+    def test_prostrate_contact_samples_higher_than_upright(self):
+        box = (100.0, 100.0, 500.0, 400.0)
+        upright = contact_pixel(box, pose_class="person_walking")
+        prone = contact_pixel(box, pose_class="person_prone")
+        self.assertAlmostEqual(300.0, upright[0])
+        self.assertAlmostEqual(325.0, upright[1])
+        self.assertAlmostEqual(300.0, prone[0])
+        self.assertLess(prone[1], upright[1])
+        self.assertAlmostEqual(280.0, prone[1])
 
     def test_ray_behind_camera_is_rejected(self):
         lookup = static_lookup({"cam": _looking_along_z(z=10.0, ground=0.0)})
@@ -72,7 +82,7 @@ class CctvProjectTests(unittest.TestCase):
         projector = CctvProjector(static_lookup({"cam": geometry}))
         xyz = projector.project_contact(
             "cam",
-            (300.0, 200.0, 340.0, 240.0),
+            (300.0, 210.0, 340.0, 250.0),
             relation=Relation.ON,
             support_class="picnic_table",
         )
@@ -121,6 +131,51 @@ class CctvProjectTests(unittest.TestCase):
             "hydrant",
         )
         self.assertGreater(close, far)
+
+    def test_on_submit_snaps_xy_into_support_footprint(self):
+        projector = CctvProjector(static_lookup({"cam": _looking_along_z()}))
+        support = (200.0, 240.0, 440.0, 400.0)
+        outside = (20.0, 200.0, 60.0, 250.0)
+        raw = projector.project_contact(
+            "cam", outside, relation=Relation.ON, support_class="bench"
+        )
+        snapped = projector.project_contact(
+            "cam",
+            outside,
+            relation=Relation.ON,
+            support_class="bench",
+            support_box=support,
+        )
+        self.assertIsNotNone(raw)
+        self.assertIsNotNone(snapped)
+        self.assertNotAlmostEqual(raw[0], snapped[0], places=3)
+        inside = projector.project_contact(
+            "cam",
+            (300.0, 200.0, 340.0, 250.0),
+            relation=Relation.ON,
+            support_class="bench",
+            support_box=support,
+        )
+        xmin = min(inside[0], snapped[0])
+        xmax = max(inside[0], snapped[0])
+        self.assertGreaterEqual(snapped[0], xmin - 1e-6)
+        self.assertLessEqual(snapped[0], xmax + 1e-6)
+
+    def test_near_does_not_snap_into_support(self):
+        projector = CctvProjector(static_lookup({"cam": _looking_along_z()}))
+        support = (200.0, 240.0, 440.0, 400.0)
+        outside = (20.0, 220.0, 60.0, 260.0)
+        raw = projector.project_contact(
+            "cam", outside, relation=Relation.NEAR, support_class="hydrant"
+        )
+        with_box = projector.project_contact(
+            "cam",
+            outside,
+            relation=Relation.NEAR,
+            support_class="hydrant",
+            support_box=support,
+        )
+        self.assertEqual(raw, with_box)
 
     def test_unknown_support_falls_back_to_ground(self):
         self.assertEqual(16.5, raised_plane_z(16.5, "mystery_prop", Relation.ON))

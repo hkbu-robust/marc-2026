@@ -57,8 +57,24 @@ class CctvYoloTests(unittest.TestCase):
         self.assertEqual(1, len(objects))
         self.assertEqual(1, len(people))
         self.assertEqual("mug", objects[0].class_name)
-        self.assertEqual("rig_3_b:person:0", people[0].candidate_id)
+        self.assertEqual("rig_3_b:person_reclining:0", people[0].candidate_id)
         self.assertEqual("person_reclining", people[0].pose_class)
+
+    def test_person_ids_index_per_pose_class(self):
+        detections = [
+            ("person_sitting", 0.9, (10.0, 10.0, 20.0, 40.0)),
+            ("person_sitting", 0.8, (30.0, 10.0, 40.0, 40.0)),
+            ("person_lying_down", 0.85, (50.0, 10.0, 80.0, 30.0)),
+        ]
+        _, people = detections_to_candidates("rig_a", (1280, 720), detections)
+        self.assertEqual(
+            [
+                "rig_a:person_sitting:0",
+                "rig_a:person_sitting:1",
+                "rig_a:person_lying_down:0",
+            ],
+            [item.candidate_id for item in people],
+        )
 
     def test_pose_only_sar_is_an_explicit_adapter(self):
         detections = [
@@ -93,7 +109,7 @@ class CctvYoloTests(unittest.TestCase):
 
         self.assertEqual(2, detector._predict_frame.call_count)
         self.assertEqual("rig_b:mug:0", objects[0].candidate_id)
-        self.assertEqual("rig_a:person:0", people[0].candidate_id)
+        self.assertEqual("rig_a:person_prone:0", people[0].candidate_id)
 
     def test_recorded_bundle_output_preserves_every_candidate(self):
         example_path = (
@@ -119,6 +135,39 @@ class CctvYoloTests(unittest.TestCase):
         self.assertEqual(len(detections), len(objects) + len(people))
         self.assertTrue(people)
         self.assertTrue(all(item.camera_id == "rig_3_b" for item in people))
+
+    def test_landmark_crop_maps_boxes_back_to_the_full_frame(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.model = object()
+        detector.names = {8: "pencilcase"}
+
+        def fake_predict(rgb, *, confidence=None):
+            self.assertLess(confidence, detector.contract.confidence)
+            return [("pencilcase", 0.4, (5.0, 6.0, 15.0, 18.0))]
+
+        detector._predict_frame = fake_predict
+        frame = CctvFrame(
+            "rig_3_b",
+            1280,
+            720,
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        table = detections_to_candidates(
+            "rig_3_b",
+            (1280, 720),
+            [("picnic_table", 0.9, (100.0, 200.0, 400.0, 500.0))],
+        )[0][0]
+        extra = detector.refine_around_landmarks(
+            {"rig_3_b": frame},
+            [table],
+            "pencilcase",
+            frozenset({"picnic_table"}),
+        )
+        self.assertEqual(1, len(extra))
+        self.assertEqual("pencilcase", extra[0].class_name)
+        self.assertEqual("rig_3_b", extra[0].camera_id)
+        self.assertGreaterEqual(extra[0].bbox_xyxy[0], 5.0)
 
 
 if __name__ == "__main__":

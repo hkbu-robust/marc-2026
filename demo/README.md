@@ -124,8 +124,9 @@ docker compose -f demo/docker-compose.yml \
 
 Remote mode sends JPEG data URLs plus the finite candidate prompt. It does not stream raw
 CCTV video, and any connection, authentication, timeout, response, or grammar failure uses
-the same deterministic candidate fallback. This mode is for practice; submission cannot
-depend on a separately started workstation process.
+the same deterministic candidate fallback. The remote compose overlay also sets the image
+build arg so `--build` does not Hub-pull the 17.5 GB local snapshot. This mode is for
+practice; submission cannot depend on a separately started workstation process.
 
 ## Environment variables
 

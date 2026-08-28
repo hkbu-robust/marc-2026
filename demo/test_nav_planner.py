@@ -123,6 +123,28 @@ def test_path_blocked_and_frontal():
     _check(not frontal_hit([(0.8, 2.0, 0.1)], pose), "disc to the side should not be frontal")
 
 
+def test_off_road_snap_keeps_join_waypoint():
+    p, grid = _planner(h=40, w=80, res=0.25)
+    grid[:, :] = 100
+    grid[20, 16:70] = 0
+    _check(p.update_from_array(grid, 0.25, 0.0, 0.0), "reload occupied map")
+    start = _cell_xy(p, 8, 20)
+    goal = _cell_xy(p, 20, 60)
+    path = p.plan(start, goal, inflation_m=0.0, margin_m=20.0, snap_m=8.0)
+    _check(path, "off-road snap: no path")
+    _check(len(path) >= 2, "off-road snap: expected join waypoint, got %d" % len(path))
+    jr, jc = p._w2c(path[0][0], path[0][1])
+    _check(grid[jr, jc] == 0, "join should sit on free road, cell=%s" % ((jr, jc),))
+    _check(
+        math.hypot(path[0][0] - start[0], path[0][1] - start[1]) > 0.3,
+        "join should not be the off-road start",
+    )
+    _check(
+        not path_is_blocked(p, path, inflation_m=0.0),
+        "snapped road path should be clear",
+    )
+
+
 def test_pointcloud2_xyz():
     class _F:
         def __init__(self, name, offset):
@@ -336,6 +358,7 @@ def main():
         test_wall_repair_goes_around,
         test_lidar_xyz_to_world,
         test_path_blocked_and_frontal,
+        test_off_road_snap_keeps_join_waypoint,
         test_pointcloud2_xyz,
         test_overlay_persists_across_occupancy_reload,
         test_overlay_goal_hole,

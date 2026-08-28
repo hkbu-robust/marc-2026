@@ -167,10 +167,55 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
                     },
                     snapshot_download=downloader,
                     hub_download=hub,
+                    bake_qwen=True,
                 )
         self.assertTrue(all(item.startswith("skip ") for item in lines))
         downloader.assert_not_called()
         hub.assert_not_called()
+
+    def test_include_qwen_defaults_to_local(self):
+        self.assertTrue(_FETCH_MOD.include_qwen({}))
+        self.assertTrue(_FETCH_MOD.include_qwen({"MARC_QWEN_BACKEND": "local"}))
+        self.assertFalse(_FETCH_MOD.include_qwen({"MARC_QWEN_BACKEND": "remote"}))
+        self.assertFalse(_FETCH_MOD.include_qwen({"MARC_QWEN_BACKEND": "REMOTE"}))
+
+    def test_fetch_all_skips_qwen_when_backend_is_not_local(self):
+        downloader = Mock(side_effect=AssertionError("must not download"))
+        hub = Mock(side_effect=AssertionError("must not download"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            qwen = root / "qwen"
+            qwen.mkdir()
+            grasp = root / "graspgenx"
+            for name in ("gen", "dis"):
+                folder = grasp / name
+                folder.mkdir(parents=True)
+                (folder / "epoch_1.pth").write_bytes(b"ckpt")
+            grippers = root / "grippers"
+            (grippers / "assets" / "x_grippers").mkdir(parents=True)
+            yolo = root / "yolo11x.pt"
+            yolo.write_bytes(b"x" * 2_000_000)
+            with patch.dict(os.environ, {"MARC_QWEN_BACKEND": "remote"}, clear=False):
+                with patch.object(_FETCH_MOD, "yolo11x_ready", return_value=True):
+                    lines = fetch_all(
+                        paths={
+                            "qwen": qwen,
+                            "graspgenx": grasp,
+                            "grippers": grippers,
+                            "yolo11x": yolo,
+                        },
+                        snapshot_download=downloader,
+                        hub_download=hub,
+                    )
+        self.assertEqual("skip qwen (MARC_QWEN_BACKEND is not local)", lines[0])
+        self.assertTrue(all(item.startswith("skip ") for item in lines))
+        downloader.assert_not_called()
+        hub.assert_not_called()
+
+    def test_remote_compose_passes_backend_as_build_arg(self):
+        text = Path("demo/docker-compose.qwen-remote.yml").read_text(encoding="utf-8")
+        self.assertIn("MARC_QWEN_BACKEND: remote", text)
+        self.assertIn("args:", text)
 
     def test_default_gripper_is_robotiq_2f_140(self):
         with patch.dict(os.environ):
@@ -287,7 +332,9 @@ class AgentDockerfileTests(unittest.TestCase):
             'python3 -c "from graspgenx.grasp_server import GraspGenXSampler',
             fetch_run,
         )
-        self.assertIn("HF_HUB_DISABLE_XET=1 python3 /agent/models/runtime/fetch_runtime_weights.py", text)
+        self.assertIn("ARG MARC_QWEN_BACKEND=local", text)
+        self.assertIn("MARC_QWEN_BACKEND=\"$MARC_QWEN_BACKEND\"", text)
+        self.assertIn("fetch_runtime_weights.py", text)
 
 
 def _http_429(retry_after=None):

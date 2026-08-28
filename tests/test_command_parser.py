@@ -23,6 +23,15 @@ from marc_agent.command_parser import (
 _FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "command_cases.yaml")
 
 
+def _assert_parsed(test, result, expected: dict):
+    got = asdict(result)
+    place_got = got.pop("place_cues")
+    payload = dict(expected)
+    if "place_cues" in payload:
+        test.assertEqual(tuple(payload.pop("place_cues")), place_got)
+    test.assertEqual(payload, got)
+
+
 def _load_cases():
     with open(_FIXTURE, encoding="utf-8") as stream:
         return yaml.safe_load(stream)["cases"]
@@ -57,7 +66,7 @@ class CommandFixtureTests(unittest.TestCase):
                     self.assertEqual(ParseErrorCode(expected_error), caught.exception.code)
                     continue
                 result = parse_command(case["text"], expected_intent=expected_intent)
-                self.assertEqual(case["expected"], asdict(result))
+                _assert_parsed(self, result, case["expected"])
                 if result.target_type == "person":
                     self.assertIsNone(result.relation)
                     self.assertIsNotNone(result.situation)
@@ -103,7 +112,11 @@ class CommandFixtureTests(unittest.TestCase):
             for transform in transforms:
                 mutated = transform(case["text"])
                 with self.subTest(case=case["id"], mutation=transform.__code__.co_firstlineno):
-                    self.assertEqual(expected, asdict(parse_command(mutated, expected_intent=intent)))
+                    _assert_parsed(
+                        self,
+                        parse_command(mutated, expected_intent=intent),
+                        expected,
+                    )
 
     def test_approved_alias_mutations(self):
         substitutions = (
@@ -123,7 +136,7 @@ class CommandFixtureTests(unittest.TestCase):
             mutated = case["text"][:start] + replacement + case["text"][start + len(source):]
             with self.subTest(source=source, replacement=replacement, case=case["id"]):
                 result = parse_command(mutated, expected_intent=Intent(case["expected_intent"]))
-                self.assertEqual(case["expected"], asdict(result))
+                _assert_parsed(self, result, case["expected"])
 
     def test_person_mention_is_not_automatically_sar(self):
         result = parse_command(
@@ -406,6 +419,34 @@ class CommandFixtureTests(unittest.TestCase):
         self.assertIsNone(parsed.landmark)
         self.assertEqual("parking", parsed.scene_hint)
         self.assertTrue(uses_vehicle_anchor(parsed, "I dropped my tumbler as I got out of my car in the parking lot."))
+
+        floor = parse_command(
+            "Pick up the tumbler dropped on the parking lot floor and bring it to the owner.",
+            expected_intent=Intent.BRING,
+        )
+        self.assertIsNone(floor.landmark)
+        self.assertEqual("parking", floor.scene_hint)
+        self.assertFalse(
+            uses_vehicle_anchor(
+                floor,
+                "Pick up the tumbler dropped on the parking lot floor and bring it to the owner.",
+            )
+        )
+
+
+class PlaceCueAndFallenOffTests(unittest.TestCase):
+    def test_taxi_is_a_place_cue_when_bench_is_the_support(self):
+        result = parse_command(
+            "Find the person lying face-down on the bench near the taxi."
+        )
+        self.assertEqual("bench", result.landmark)
+        self.assertEqual(("taxi",), result.place_cues)
+
+    def test_fallen_off_attaches_the_support(self):
+        result = parse_command("Find the person who fell off the bench.")
+        self.assertEqual("person", result.target_type)
+        self.assertEqual("bench", result.landmark)
+        self.assertEqual((), result.place_cues)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,22 @@ class ReplanReason:
     FIRST_PLAN = "first_plan"
 
 
+def _pose_on_free_cell(planner, x, y) -> bool:
+    """True when the chassis cell is occupancy-free (already on the road)."""
+    if planner is None or not planner.ready:
+        return False
+    row, col = planner._w2c(x, y)
+    if not planner._in_bounds(row, col):
+        return False
+    val = int(planner._grid[row, col])
+    if not ((val == 0) or (val < 0)):
+        return False
+    overlay = getattr(planner, "_overlay", None)
+    if overlay is not None and bool(overlay[row, col]):
+        return False
+    return True
+
+
 def _plan_attempts(inflation_m: float):
     """Configured inflation first, then thinner inflation, then a wider crop."""
     attempts = [(float(inflation_m), 12.0)]
@@ -106,8 +122,19 @@ class Stage2Navigator:
         self.cruise = bool(cruise)
         self._path_inflation = float(inflation_m)
 
+    def _warm_lidar(self, deadline_s, ticks: int = 8):
+        """Subscribe and wait briefly so the first plan is not empty of discs."""
+        client = self.client
+        if client.get_lidar() is not None:
+            return
+        until = min(client.now_s() + self.dt * max(0, int(ticks)), float(deadline_s) - self.dt)
+        while client.now_s() < until:
+            client.sleep(self.dt)
+            if client.get_lidar() is not None:
+                return
+
     def _plan_path(self, planner, start_xy, goal_xy):
-        """Plan with inflation then crop-margin fallbacks. First success wins."""
+        """Plan with inflation then crop-margin fallbacks. First unblocked success wins."""
         for inflation, margin in _plan_attempts(self.inflation_m):
             path = planner.plan(
                 start_xy,
@@ -116,16 +143,27 @@ class Stage2Navigator:
                 snap_m=8.0,
                 margin_m=margin,
             )
-            if path:
-                self._path_inflation = float(inflation)
-                if abs(inflation - self.inflation_m) > 1e-9 or abs(margin - 12.0) > 1e-9:
-                    log.info(
-                        "[Stage2] path fallback inflation=%.2f margin=%.1f method=%s",
-                        inflation,
-                        margin,
-                        planner.last_method or "dstar",
-                    )
-                return path
+            if not path:
+                continue
+            chord = [start_xy] + list(path)
+            blocked = path_is_blocked(planner, chord, inflation_m=inflation)
+            if blocked:
+                join_dist = math.hypot(
+                    path[0][0] - float(start_xy[0]),
+                    path[0][1] - float(start_xy[1]),
+                )
+                cell_m = float(getattr(planner, "_res", None) or 0.05)
+                if len(path) <= 1 or join_dist < max(1.5 * cell_m, 0.15):
+                    continue
+            self._path_inflation = float(inflation)
+            if abs(inflation - self.inflation_m) > 1e-9 or abs(margin - 12.0) > 1e-9:
+                log.info(
+                    "[Stage2] path fallback inflation=%.2f margin=%.1f method=%s",
+                    inflation,
+                    margin,
+                    planner.last_method or "dstar",
+                )
+            return path
         return None
 
     def navigate_to(self, goal_xy, deadline_s, *, leg: str = "search",
@@ -138,6 +176,7 @@ class Stage2Navigator:
         """
         client = self.client
         extra = list(extra_obstacles or [])
+        self._warm_lidar(deadline_s)
         planner = OccupancyGridPlanner()
         follower = None
         governor = SpeedGovernor()
@@ -230,8 +269,12 @@ class Stage2Navigator:
             last_xy = (x, y)
 
             if follower is not None and not need_replan:
-                remain = [(x, y)] + follower.path[follower.idx:]
-                if path_is_blocked(planner, remain, inflation_m=self._path_inflation):
+                remain = list(follower.path[follower.idx:])
+                if remain and _pose_on_free_cell(planner, x, y):
+                    remain = [(x, y)] + remain
+                if len(remain) >= 2 and path_is_blocked(
+                    planner, remain, inflation_m=self._path_inflation
+                ):
                     log.info("[Stage2] %s path blocked -> replan", leg)
                     need_replan = True
                     replan_reason = ReplanReason.PATH_BLOCKED

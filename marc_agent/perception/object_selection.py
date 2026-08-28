@@ -13,7 +13,8 @@ import math
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
-from marc_agent.command_parser import ParsedCommand, Relation, implicit_anchor_classes, uses_vehicle_anchor
+from marc_agent.command_parser import ParsedCommand, Relation, implicit_anchor_classes
+from marc_agent.perception.camera_gate import apply_camera_gate
 from marc_agent.perception.cctv_project import pair_alignment_score
 from marc_agent.perception.qwen_runtime import configured_max_crops
 from marc_agent.types import CctvDetectionRound, ObjectCandidate
@@ -94,6 +95,8 @@ def _relation_score(
         elif relation is Relation.NEAR:
             on_contact = max(0.0, 1.0 - abs(contact) * 8.0)
             score -= 0.8 * overlap * (0.5 + 0.5 * on_contact)
+        if anchor.class_name == "police_car":
+            score += 0.5
         return score + conf
 
     if relation in (Relation.ON, Relation.ABOVE):
@@ -130,7 +133,7 @@ def _rerank_by_world(
     command_text: str = "",
 ) -> tuple[ObjectSelection, ...]:
     relation = parsed.relation
-    if relation is None and uses_vehicle_anchor(parsed, command_text):
+    if relation is None and implicit_anchor_classes(parsed, command_text):
         relation = Relation.NEAR
 
     def key(item: ObjectSelection) -> tuple:
@@ -151,6 +154,43 @@ def _rerank_by_world(
     return tuple(sorted(ranked, key=key))
 
 
+def _near_relation(parsed: ParsedCommand, command_text: str) -> Optional[Relation]:
+    relation = parsed.relation
+    if relation is None and implicit_anchor_classes(parsed, command_text):
+        return Relation.NEAR
+    return relation
+
+
+def _world_unique_near(
+    ranked: tuple[ObjectSelection, ...],
+    parsed: ParsedCommand,
+    projector,
+    command_text: str,
+) -> bool:
+    """True when the top NEAR pair is clearly closer in world metres."""
+    if projector is None or len(ranked) < 2:
+        return False
+    relation = _near_relation(parsed, command_text)
+    if relation not in (Relation.NEAR, Relation.BESIDE, None):
+        return False
+    scores = []
+    for item in ranked[:2]:
+        if item.anchor is None:
+            return False
+        world = pair_alignment_score(
+            projector,
+            item.target.camera_id,
+            item.target.bbox_xyxy,
+            item.anchor.bbox_xyxy,
+            relation or Relation.NEAR,
+            item.anchor.class_name,
+        )
+        if world is None:
+            return False
+        scores.append(world)
+    return scores[0] >= scores[1] * 1.4 + 1e-9
+
+
 def rank_object_candidates(
     parsed: ParsedCommand,
     round_: CctvDetectionRound,
@@ -159,9 +199,10 @@ def rank_object_candidates(
     command_text: str = "",
 ) -> tuple[ObjectSelection, ...]:
     """Rank matching object (and same-camera landmark) pairs across cameras."""
+    gated = apply_camera_gate(parsed, round_)
     targets = [
         item
-        for item in round_.objects
+        for item in gated.objects
         if item.class_name in _target_classes(parsed)
     ]
     if not targets:
@@ -177,10 +218,10 @@ def rank_object_candidates(
         return tuple(ranked)[:OBJECT_BOARD_LIMIT]
 
     relation = parsed.relation
-    if relation is None and uses_vehicle_anchor(parsed, command_text):
+    if relation is None and implicit_anchor_classes(parsed, command_text):
         relation = Relation.NEAR
     landmarks = [
-        item for item in round_.objects if item.class_name in anchor_names
+        item for item in gated.objects if item.class_name in anchor_names
     ]
     selected: list[ObjectSelection] = []
     for target in targets:
@@ -302,6 +343,7 @@ def format_object_verifier_prompt(
     relation: Optional[str],
     landmark: Optional[str],
     rows: Iterable[str],
+    scene_hint: Optional[str] = None,
 ) -> str:
     """User text for the object-relation verifier."""
     return (
@@ -315,6 +357,7 @@ def format_object_verifier_prompt(
         f"Parsed target type: {target_type}\n"
         f"Parsed relation: {relation or 'none'}\n"
         f"Parsed landmark: {landmark or 'none'}\n"
+        f"Parsed scene hint: {scene_hint or 'none'}\n"
         "Candidates:\n" + "\n".join(rows)
     )
 
@@ -359,12 +402,10 @@ def build_object_board(
     prompt = format_object_verifier_prompt(
         command_text,
         parsed.target_type,
-        parsed.relation.value
-        if parsed.relation
-        else ("near" if uses_vehicle_anchor(parsed, command_text) else None),
-        parsed.landmark
-        or ("vehicle" if uses_vehicle_anchor(parsed, command_text) else None),
+        parsed.relation.value if parsed.relation else None,
+        parsed.landmark,
         rows,
+        scene_hint=parsed.scene_hint,
     )
     return ObjectBoard(tuple(images), prompt, ranked)
 
@@ -429,6 +470,10 @@ def select_object_candidate(
         return None
     geometry = ranked[0]
     should_verify = verifier is not None and len(ranked) >= 2
+    if should_verify and _world_unique_near(
+        ranked, parsed, projector, command_text
+    ):
+        should_verify = False
     log.info(
         "[object-selection] pairs=%d classes=%s verify=%s geometry=%s",
         len(ranked),

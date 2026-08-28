@@ -6,6 +6,8 @@ services:
       dockerfile: demo/Dockerfile
       target: agent
       network: host
+      args:
+        MARC_QWEN_BACKEND: ${MARC_QWEN_BACKEND:-local}
     image: marc-agent:local
     network_mode: host
     environment:

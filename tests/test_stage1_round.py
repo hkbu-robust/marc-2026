@@ -10,6 +10,7 @@ from marc_agent.perception.cctv_project import (
     static_lookup,
 )
 from marc_agent.perception.stage1_pipeline import run_stage1_round
+from marc_agent.command_parser import Intent
 from marc_agent.types import (
     CctvDetectionRound,
     ObjectCandidate,
@@ -56,7 +57,7 @@ def _person_round() -> CctvDetectionRound:
         ],
         people=[
             PersonCandidate(
-                "rig_a:person:0",
+                "rig_a:person_walking:0",
                 (30.0, 80.0, 130.0, 400.0),
                 "person_walking",
                 0.8,
@@ -64,7 +65,7 @@ def _person_round() -> CctvDetectionRound:
                 (640, 480),
             ),
             PersonCandidate(
-                "rig_a:person:1",
+                "rig_a:person_bending:0",
                 (315.0, 100.0, 405.0, 390.0),
                 "person_bending",
                 0.8,
@@ -141,7 +142,7 @@ class Stage1RoundTests(unittest.TestCase):
             object(),
             "Find the person bent over near the trash can who needs urgent help.",
             detector=detector,
-            verifier=lambda board: "rig_a:person:1|accident",
+            verifier=lambda board: "rig_a:person_bending:0|accident",
             projector=_geometry(),
         )
         self.assertIsNotNone(result.grounding)
@@ -149,7 +150,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("person", result.grounding.target_type)
         self.assertEqual("emergency", result.grounding.situation)
         self.assertEqual("trash_can", result.grounding.landmark)
-        self.assertEqual("rig_a:person:1", result.target_id)
+        self.assertEqual("rig_a:person_bending:0", result.target_id)
         self.assertEqual("rig_a:trash_can:0", result.anchor_id)
         self.assertEqual("qwen", result.method)
         self.assertEqual(3, len(result.grounding.target_coord))
@@ -197,7 +198,7 @@ class Stage1RoundTests(unittest.TestCase):
             object(),
             "Find the person bent over near the trash can who needs urgent help.",
             detector=detector,
-            verifier=lambda board: "rig_a:person:1|emergency",
+            verifier=lambda board: "rig_a:person_bending:0|emergency",
             projector=empty,
         )
     def test_umbrella_without_target_submits_projected_landmark(self):
@@ -245,7 +246,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("bring", result.candidates.parsed.intent.value)
         self.assertEqual("picnic_table", result.grounding.landmark)
 
-    def test_parking_submit_copies_vehicle_class_as_landmark(self):
+    def test_parking_floor_drop_submits_empty_landmark(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
                 objects=[
@@ -271,14 +272,153 @@ class Stage1RoundTests(unittest.TestCase):
 
         result = run_stage1_round(
             object(),
+            "Pick up the tumbler dropped on the parking lot floor and bring it to the owner.",
+            detector=detector,
+            projector=_geometry(),
+            expected_intent=Intent.BRING,
+        )
+        self.assertIsNotNone(result.grounding)
+        self.assertEqual("", result.grounding.landmark)
+        self.assertIsNone(result.grounding.relation)
+        self.assertEqual("tumbler", result.grounding.target_type)
+        self.assertEqual("rig_a:tumbler:0", result.target_id)
+        self.assertEqual(result.grounding.anchor_coord, result.grounding.target_coord)
+
+    def test_sar_without_landmark_does_not_project_nearby_object(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:cracker_box:0",
+                        "cracker_box",
+                        (300.0, 190.0, 430.0, 430.0),
+                        0.9,
+                        "rig_a",
+                        (640, 480),
+                    )
+                ],
+                people=[
+                    PersonCandidate(
+                        "rig_a:person_prone:0",
+                        (30.0, 80.0, 130.0, 400.0),
+                        "person_prone",
+                        0.8,
+                        "rig_a",
+                        (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "Several people are in the parking lot; one is completely face-down and immobile; find the most critical one.",
+            detector=detector,
+            verifier=lambda board: "rig_a:person_prone:0|accident",
+            projector=_geometry(),
+        )
+        self.assertIsNotNone(result.grounding)
+        self.assertEqual("", result.grounding.landmark)
+        self.assertEqual("rig_a:person_prone:0", result.target_id)
+        self.assertIsNone(result.anchor_id)
+        self.assertEqual(result.grounding.anchor_coord, result.grounding.target_coord)
+
+    def test_pencilcase_does_not_submit_the_picnic_table(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:picnic_table:0",
+                        "picnic_table",
+                        (100.0, 200.0, 400.0, 400.0),
+                        0.9,
+                        "rig_a",
+                        (640, 480),
+                    )
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "Find the pencil case near the picnic table.",
+            detector=detector,
+            projector=_geometry(),
+        )
+        self.assertIsNone(result.grounding)
+        self.assertEqual("object_selection:no_match", result.failure_reason)
+
+    def test_empty_parking_space_submits_tumbler_without_car_name(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:tumbler:0",
+                        "tumbler",
+                        (100.0, 200.0, 130.0, 240.0),
+                        0.8,
+                        "rig_a",
+                        (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:police_car:0",
+                        "police_car",
+                        (80.0, 160.0, 400.0, 420.0),
+                        0.9,
+                        "rig_a",
+                        (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
             "Find the tumbler dropped in the empty parking space.",
             detector=detector,
             projector=_geometry(),
         )
         self.assertIsNotNone(result.grounding)
-        self.assertEqual("police_car", result.grounding.landmark)
-        self.assertEqual("near", result.grounding.relation)
+        self.assertEqual("", result.grounding.landmark)
         self.assertEqual("tumbler", result.grounding.target_type)
+        self.assertEqual("rig_a:tumbler:0", result.target_id)
+
+    def test_sitting_on_vending_submits_person_relation_none(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:vending_machine:0",
+                        "vending_machine",
+                        (200.0, 180.0, 400.0, 420.0),
+                        0.9,
+                        "rig_a",
+                        (640, 480),
+                    )
+                ],
+                people=[
+                    PersonCandidate(
+                        "rig_a:person_sitting:0",
+                        (240.0, 100.0, 320.0, 220.0),
+                        "person_sitting",
+                        0.9,
+                        "rig_a",
+                        (640, 480),
+                    )
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "Find the person sitting on top of the vending machine.",
+            detector=detector,
+            projector=_geometry(),
+        )
+        self.assertIsNotNone(result.grounding)
+        self.assertIsNone(result.grounding.relation)
+        self.assertEqual("vending_machine", result.grounding.landmark)
+        self.assertEqual("rig_a:person_sitting:0", result.target_id)
 
 
 if __name__ == "__main__":

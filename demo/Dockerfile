@@ -78,10 +78,14 @@ ENV YOLO_CONFIG_DIR=/agent/demo/weights
 # Optional HF_TOKEN (BuildKit secret) so Hub rate limits can use a logged-in account.
 # Not required: organizers can rebuild anonymously. Never ENV the token into the image.
 # HF_HUB_DISABLE_XET: Hub Xet can abort mid-shard with "error decoding response body".
+# Bake Qwen only when MARC_QWEN_BACKEND=local (submission default). Remote/vLLM
+# practice builds skip that Hub pull so code-only --build stays fast.
+ARG MARC_QWEN_BACKEND=local
 RUN --network=host \
     --mount=type=cache,target=/root/.cache/huggingface \
     --mount=type=secret,id=HF_TOKEN,env=HF_TOKEN,required=false \
-    HF_HUB_DISABLE_XET=1 python3 /agent/models/runtime/fetch_runtime_weights.py
+    MARC_QWEN_BACKEND="$MARC_QWEN_BACKEND" HF_HUB_DISABLE_XET=1 \
+        python3 /agent/models/runtime/fetch_runtime_weights.py
 
 # Offline after weights are in the image. Do not download at scoring runtime.
 ENV YOLO_OFFLINE=1

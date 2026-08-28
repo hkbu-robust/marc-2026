@@ -1,8 +1,10 @@
 # Stage 1 Qwen SAR verifier bundle
 
-The large snapshot is **not** in git. `docker compose up --build` downloads
+The large snapshot is **not** in git. `docker compose up --build` with
+`MARC_QWEN_BACKEND=local` (submission default) downloads
 `Qwen/Qwen3-VL-8B-Instruct` at revision
-`60595ebc30ec8e3b1d3b9e65d4943ca011c0006a` into `model/`.
+`60595ebc30ec8e3b1d3b9e65d4943ca011c0006a` into `model/`. Remote/vLLM practice
+builds skip that pull.
 
 Host fetch (optional):
 

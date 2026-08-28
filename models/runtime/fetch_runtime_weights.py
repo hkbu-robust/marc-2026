@@ -280,37 +280,59 @@ def fetch_yolo11x(
     return f"fetched yolo11x ({dest})"
 
 
+def include_qwen(environ: Optional[dict[str, str]] = None) -> bool:
+    """True when this process should Hub-pull the local Qwen snapshot.
+
+    Submission and ``MARC_QWEN_BACKEND=local`` bake the weights. Remote/vLLM
+    practice builds skip the 17.5 GB pull so ``--build`` after a code change
+    does not wait on Hugging Face.
+    """
+    env = os.environ if environ is None else environ
+    return str(env.get("MARC_QWEN_BACKEND") or "local").strip().lower() == "local"
+
+
 def fetch_all(
     *,
     paths: Optional[dict[str, Path]] = None,
     snapshot_download: Optional[SnapshotFn] = None,
     hub_download=None,
     skip_if_complete: bool = True,
+    bake_qwen: Optional[bool] = None,
 ) -> list[str]:
     _allow_hub()
     dests = paths or _default_paths()
-    return [
-        fetch_qwen(
-            dests["qwen"],
-            snapshot_download=snapshot_download,
-            skip_if_complete=skip_if_complete,
-        ),
-        fetch_graspgenx(
-            dests["graspgenx"],
-            snapshot_download=snapshot_download,
-            skip_if_complete=skip_if_complete,
-        ),
-        fetch_grippers(
-            dests["grippers"],
-            snapshot_download=snapshot_download,
-            skip_if_complete=skip_if_complete,
-        ),
-        fetch_yolo11x(
-            dests["yolo11x"],
-            hub_download=hub_download,
-            skip_if_complete=skip_if_complete,
-        ),
-    ]
+    should_qwen = include_qwen() if bake_qwen is None else bake_qwen
+    lines: list[str] = []
+    if should_qwen:
+        lines.append(
+            fetch_qwen(
+                dests["qwen"],
+                snapshot_download=snapshot_download,
+                skip_if_complete=skip_if_complete,
+            )
+        )
+    else:
+        lines.append("skip qwen (MARC_QWEN_BACKEND is not local)")
+    lines.extend(
+        [
+            fetch_graspgenx(
+                dests["graspgenx"],
+                snapshot_download=snapshot_download,
+                skip_if_complete=skip_if_complete,
+            ),
+            fetch_grippers(
+                dests["grippers"],
+                snapshot_download=snapshot_download,
+                skip_if_complete=skip_if_complete,
+            ),
+            fetch_yolo11x(
+                dests["yolo11x"],
+                hub_download=hub_download,
+                skip_if_complete=skip_if_complete,
+            ),
+        ]
+    )
+    return lines
 
 
 def main() -> None:
