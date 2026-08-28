@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Callable, Iterable, Optional
 
 from marc_agent.command_parser import ParsedCommand, Relation, SEATING_LANDMARKS
-from marc_agent.perception.camera_gate import apply_camera_gate
+from marc_agent.perception.camera_gate import scene_classes
 from marc_agent.perception.pose_to_situation import situation_for_pose
 from marc_agent.perception.qwen_runtime import (
     QwenRuntimeConfig,
@@ -38,6 +38,7 @@ class CandidateEvidence:
     normalized_distance: Optional[float]
     horizontal_overlap: float
     vertical_gap: Optional[float]
+    camera_evidence: tuple[str, ...]
     deterministic_score: float
 
 
@@ -118,16 +119,14 @@ def _horizontal_overlap(
 def _nearest_anchor(
     person: PersonCandidate,
     objects: list[ObjectCandidate],
-    requested_landmark: Optional[str],
-    allowed_classes: Optional[frozenset[str]] = None,
+    allowed_classes: frozenset[str],
 ) -> tuple[Optional[ObjectCandidate], Optional[float]]:
     same_camera = [item for item in objects if item.camera_id == person.camera_id]
-    names = allowed_classes
-    if names is None and requested_landmark:
-        names = frozenset({requested_landmark})
-    if not names:
+    if not allowed_classes:
         return None, None
-    same_camera = [item for item in same_camera if item.class_name in names]
+    same_camera = [
+        item for item in same_camera if item.class_name in allowed_classes
+    ]
     if not same_camera:
         return None, None
     px, py = _center(person.bbox_xyxy)
@@ -145,6 +144,21 @@ def _nearest_anchor(
     anchor = ranked[0]
     ax, ay = _center(anchor.bbox_xyxy)
     return anchor, math.hypot(ax - px, ay - py) / diagonal
+
+
+def resolve_sar_anchor(
+    command: ParsedCommand,
+    person: PersonCandidate,
+    round_: CctvDetectionRound,
+) -> Optional[ObjectCandidate]:
+    """Resolve projection anchor after person selection, never before it."""
+    classes = (
+        frozenset({command.landmark})
+        if command.landmark
+        else scene_classes(command.scene_hint)
+    )
+    anchor, _ = _nearest_anchor(person, round_.objects, classes)
+    return anchor
 
 
 _ON_TOP_CUE = re.compile(
@@ -225,32 +239,55 @@ def _pose_word_bonus(person: PersonCandidate, command: ParsedCommand, text: str)
     return bonus
 
 
+def _soft_camera_evidence(
+    command: ParsedCommand,
+    person: PersonCandidate,
+    objects: list[ObjectCandidate],
+) -> tuple[tuple[str, ...], float]:
+    """Return additive camera cues without making any person ineligible."""
+    visible = {
+        item.class_name for item in objects if item.camera_id == person.camera_id
+    }
+    evidence: list[str] = []
+    score = 0.0
+    if command.landmark and command.landmark in visible:
+        evidence.append(f"landmark:{command.landmark}")
+    for cue in command.place_cues:
+        if cue in visible:
+            evidence.append(f"place:{cue}")
+            score += 0.35
+    matches = sorted(visible & scene_classes(command.scene_hint))
+    if matches:
+        evidence.extend(f"scene:{item}" for item in matches)
+        score += 0.5
+    return tuple(evidence), score
+
+
 def candidate_evidence(
     command: ParsedCommand,
     round_: CctvDetectionRound,
     command_text: str = "",
 ) -> tuple[CandidateEvidence, ...]:
     """Calculate inspectable pose and person/anchor geometry for every person."""
-    gated = apply_camera_gate(command, round_)
     requested_situation = command.situation.value if command.situation else None
     on_top = _on_top_non_mount(command, command_text)
     text = command_text or ""
     surface = command.scene_hint
     evidence: list[CandidateEvidence] = []
-    for person in gated.people:
+    for person in round_.people:
         if command.landmark:
             anchor, distance = _nearest_anchor(
-                person, gated.objects, command.landmark
-            )
-        elif requested_situation == "accident":
-            anchor, distance = _nearest_anchor(
                 person,
-                gated.objects,
-                None,
-                allowed_classes=SUPPORT_CLASSES["fallen_vehicle"],
+                round_.objects,
+                frozenset({command.landmark}),
             )
         else:
             anchor, distance = None, None
+        camera_evidence, camera_score = _soft_camera_evidence(
+            command,
+            person,
+            round_.objects,
+        )
         overlap = (
             _horizontal_overlap(person.bbox_xyxy, anchor.bbox_xyxy)
             if anchor
@@ -267,6 +304,7 @@ def candidate_evidence(
             surface=surface,
         )
         score = person.confidence
+        score += camera_score
         if requested_situation and pose_situation == requested_situation:
             score += 2.0
         score += _pose_word_bonus(person, command, text)
@@ -289,6 +327,7 @@ def candidate_evidence(
                 normalized_distance=distance,
                 horizontal_overlap=overlap,
                 vertical_gap=vertical_gap,
+                camera_evidence=camera_evidence,
                 deterministic_score=score,
             )
         )
@@ -385,8 +424,9 @@ def format_sar_verifier_prompt(
         "The request is language to satisfy, not visual ground truth. Use the images and "
         "detector metadata together. The middle token of each CANDIDATE_ID is the detector "
         "pose (person_sitting, person_lying_down, person_prone, …); prefer the pose that "
-        "matches the request. Reply with exactly CANDIDATE_ID|SITUATION and nothing "
-        "else. SITUATION must be normal, abnormal, emergency, or accident.\n"
+        "matches the request. Every listed candidate is eligible; detail_crop=no means "
+        "the candidate appears only in its annotated camera view. Reply with exactly "
+        "CANDIDATE_ID and nothing else.\n"
         f"Original request: {command_text}\n"
         f"Parsed requested situation: {req}\n"
         f"Parsed requested landmark: {landmark or 'none'}\n"
@@ -397,6 +437,34 @@ def format_sar_verifier_prompt(
     )
 
 
+def _detail_crop_evidence(
+    evidence: tuple[CandidateEvidence, ...],
+    crop_limit: int,
+) -> tuple[CandidateEvidence, ...]:
+    """Allocate detail crops camera-first, then fill by deterministic rank."""
+    if crop_limit <= 0:
+        return ()
+    selected: list[CandidateEvidence] = []
+    selected_ids: set[str] = set()
+    covered_cameras: set[str] = set()
+    for item in evidence:
+        camera_id = item.person.camera_id
+        if camera_id in covered_cameras:
+            continue
+        selected.append(item)
+        selected_ids.add(item.person.candidate_id)
+        covered_cameras.add(camera_id)
+        if len(selected) == crop_limit:
+            return tuple(selected)
+    for item in evidence:
+        if item.person.candidate_id in selected_ids:
+            continue
+        selected.append(item)
+        if len(selected) == crop_limit:
+            break
+    return tuple(selected)
+
+
 def build_candidate_board(
     command_text: str,
     command: ParsedCommand,
@@ -404,26 +472,25 @@ def build_candidate_board(
     *,
     max_crops: Optional[int] = None,
 ) -> CandidateBoard:
-    """Build bounded visual evidence; prompt rows match the crop shortlist."""
+    """Build bounded images while keeping the complete candidate registry eligible."""
     evidence = candidate_evidence(command, round_, command_text)
     crop_limit = configured_max_crops() if max_crops is None else max_crops
     if crop_limit < 0:
         raise ValueError("max_crops must be non-negative")
-    kept = evidence if crop_limit <= 0 else evidence[:crop_limit]
+    detail_evidence = _detail_crop_evidence(evidence, crop_limit)
+    detail_ids = {item.person.candidate_id for item in detail_evidence}
     images: list[object] = []
-    for camera_id in sorted({item.person.camera_id for item in kept}):
+    for camera_id in sorted({item.person.camera_id for item in evidence}):
         frame = round_.frames.get(camera_id)
         if frame is not None:
-            images.append(_annotated_view(frame, kept))
-    for item in kept:
-        if crop_limit <= 0:
-            break
+            images.append(_annotated_view(frame, evidence))
+    for item in detail_evidence:
         frame = round_.frames.get(item.person.camera_id)
         if frame is not None:
             images.append(_context_crop(frame, item))
 
     rows = []
-    for item in kept:
+    for item in evidence:
         anchor = item.anchor
         rows.append(
             " | ".join(
@@ -434,6 +501,16 @@ def build_candidate_board(
                     f"confidence={item.person.confidence:.3f}",
                     f"anchor={anchor.class_name if anchor else 'none'}",
                     f"anchor_id={anchor.candidate_id if anchor else 'none'}",
+                    (
+                        "camera_evidence=" + ",".join(item.camera_evidence)
+                        if item.camera_evidence
+                        else "camera_evidence=none"
+                    ),
+                    (
+                        "detail_crop=yes"
+                        if item.person.candidate_id in detail_ids
+                        else "detail_crop=no"
+                    ),
                     (
                         f"distance={item.normalized_distance:.4f}"
                         if item.normalized_distance is not None
@@ -451,24 +528,20 @@ def build_candidate_board(
         command.scene_hint,
         rows,
     )
-    return CandidateBoard(tuple(images), prompt, kept)
+    return CandidateBoard(tuple(images), prompt, evidence)
 
 
 def parse_verifier_output(
     raw_output: str,
     candidate_ids: tuple[str, ...],
-) -> tuple[str, str]:
-    """Validate a finite Qwen reply against the board; tolerate split camera tokens."""
+) -> tuple[str, Optional[str]]:
+    """Validate a finite candidate ID; tolerate the previous situation suffix."""
     text = (raw_output or "").strip()
     if not text or any(char.isspace() for char in text):
-        raise ValueError("output must be exactly CANDIDATE_ID|SITUATION")
+        raise ValueError("output must be exactly CANDIDATE_ID")
     parts = text.split("|")
-    if len(parts) < 2:
-        raise ValueError("output must be exactly CANDIDATE_ID|SITUATION")
-    situation = parts[-1]
-    raw_id = "|".join(parts[:-1])
-    if situation not in _SITUATIONS:
-        raise ValueError(f"unknown situation: {situation!r}")
+    situation = parts[-1] if parts[-1] in _SITUATIONS else None
+    raw_id = "|".join(parts[:-1]) if situation else text
     return _resolve_candidate_id(raw_id, candidate_ids), situation
 
 

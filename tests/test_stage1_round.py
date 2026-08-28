@@ -325,6 +325,49 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertIsNone(result.anchor_id)
         self.assertEqual(result.grounding.anchor_coord, result.grounding.target_coord)
 
+    def test_sar_scene_anchor_is_resolved_after_person_selection(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:taxi:0",
+                        "taxi",
+                        (300.0, 190.0, 430.0, 430.0),
+                        0.9,
+                        "rig_a",
+                        (640, 480),
+                    )
+                ],
+                people=[
+                    PersonCandidate(
+                        "rig_a:person_prone:0",
+                        (30.0, 80.0, 130.0, 400.0),
+                        "person_prone",
+                        0.8,
+                        "rig_a",
+                        (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "Several people are in the parking lot; one is completely face-down and immobile; find the most critical one.",
+            detector=detector,
+            verifier=lambda board: "rig_a:person_prone:0",
+            projector=_geometry(),
+        )
+
+        self.assertIsNotNone(result.grounding)
+        self.assertEqual("", result.grounding.landmark)
+        self.assertEqual("rig_a:person_prone:0", result.target_id)
+        self.assertEqual("rig_a:taxi:0", result.anchor_id)
+        self.assertNotEqual(
+            result.grounding.anchor_coord,
+            result.grounding.target_coord,
+        )
+
     def test_pencilcase_does_not_submit_the_picnic_table(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(

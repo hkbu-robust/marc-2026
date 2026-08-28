@@ -1,7 +1,9 @@
-"""Keep Stage 1 ranking on cameras YOLO already saw for this request.
+"""Keep object ranking on cameras YOLO already saw for this request.
 
 Cameras are chosen from detected class names, not from practice-scene rig ids.
 An empty gate must not fail closed: callers keep the unfiltered round.
+
+SAR person selection deliberately uses these scene classes only as soft evidence.
 """
 
 from __future__ import annotations

@@ -10,15 +10,22 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
+from marc_agent.command_parser import parse_command
 from marc_agent.perception.bundle_paths import STAGE1_CCTV_CONTRACT, STAGE1_CCTV_WEIGHTS
 from marc_agent.perception.cctv_yolo import (
     CctvYoloDetector,
     RuntimeContract,
     detections_to_candidates,
     person_candidates_to_sar,
+    refine_detection_round,
 )
 from marc_agent.perception.pose_to_situation import situation_for_pose
-from marc_agent.types import CctvFrame
+from marc_agent.types import (
+    CctvDetectionRound,
+    CctvFrame,
+    ObjectCandidate,
+    PersonCandidate,
+)
 
 
 class CctvYoloTests(unittest.TestCase):
@@ -47,6 +54,10 @@ class CctvYoloTests(unittest.TestCase):
         with patch.dict(os.environ, {"MARC_CCTV_YOLO_CONF": "0.15"}):
             contract = RuntimeContract.load()
         self.assertAlmostEqual(0.15, contract.confidence)
+
+    def test_submission_compose_does_not_override_contract_confidence(self):
+        compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+        self.assertNotIn("MARC_CCTV_YOLO_CONF:", compose)
 
     def test_detections_to_candidates_retains_people_by_default(self):
         detections = [
@@ -168,6 +179,129 @@ class CctvYoloTests(unittest.TestCase):
         self.assertEqual("pencilcase", extra[0].class_name)
         self.assertEqual("rig_3_b", extra[0].camera_id)
         self.assertGreaterEqual(extra[0].bbox_xyxy[0], 5.0)
+
+    def test_landmark_crop_recovers_a_missed_person(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.model = object()
+        detector.names = {8: "person_reclining"}
+
+        def fake_predict(rgb, *, confidence=None):
+            self.assertLess(confidence, detector.contract.confidence)
+            return [("person_reclining", 0.4, (5.0, 6.0, 55.0, 66.0))]
+
+        detector._predict_frame = fake_predict
+        frame = CctvFrame(
+            "rig_3_b",
+            1280,
+            720,
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        bench = ObjectCandidate(
+            "rig_3_b:bench:0",
+            "bench",
+            (100.0, 200.0, 400.0, 500.0),
+            0.9,
+            "rig_3_b",
+            (1280, 720),
+        )
+
+        extra = detector.refine_people_around_landmarks(
+            {"rig_3_b": frame},
+            [bench],
+            [],
+            frozenset({"bench"}),
+        )
+
+        self.assertEqual(1, len(extra))
+        self.assertEqual("rig_3_b:person_reclining:0", extra[0].candidate_id)
+        self.assertEqual("person_reclining", extra[0].pose_class)
+        self.assertEqual("rig_3_b", extra[0].camera_id)
+
+    def test_landmark_person_refinement_deduplicates_full_frame_people(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.model = object()
+        detector.names = {8: "person_sitting"}
+        detector._predict_frame = Mock(
+            return_value=[("person_sitting", 0.4, (96.0, 96.0, 196.0, 296.0))]
+        )
+        frame = CctvFrame(
+            "rig_a",
+            640,
+            480,
+            np.zeros((480, 640, 3), dtype=np.uint8),
+        )
+        trash_can = ObjectCandidate(
+            "rig_a:trash_can:0",
+            "trash_can",
+            (300.0, 200.0, 400.0, 400.0),
+            0.9,
+            "rig_a",
+            (640, 480),
+        )
+        existing = PersonCandidate(
+            "rig_a:person_sitting:0",
+            (300.0, 200.0, 400.0, 400.0),
+            "person_sitting",
+            0.8,
+            "rig_a",
+            (640, 480),
+        )
+
+        extra = detector.refine_people_around_landmarks(
+            {"rig_a": frame},
+            [trash_can],
+            [existing],
+            frozenset({"trash_can"}),
+        )
+
+        self.assertEqual([], extra)
+
+    def test_person_round_runs_support_refinement_even_with_other_people(self):
+        parsed = parse_command("Find the person lying on top of the bench.")
+        bench = ObjectCandidate(
+            "rig_a:bench:0",
+            "bench",
+            (100.0, 200.0, 400.0, 400.0),
+            0.9,
+            "rig_a",
+            (640, 480),
+        )
+        distractor = PersonCandidate(
+            "rig_a:person_walking:0",
+            (20.0, 40.0, 80.0, 300.0),
+            "person_walking",
+            0.9,
+            "rig_a",
+            (640, 480),
+        )
+        recovered = PersonCandidate(
+            "rig_a:person_lying_down:0",
+            (120.0, 160.0, 360.0, 260.0),
+            "person_lying_down",
+            0.4,
+            "rig_a",
+            (640, 480),
+        )
+        round_ = CctvDetectionRound(
+            objects=[bench],
+            people=[distractor],
+            camera_ids=["rig_a"],
+        )
+        detector = Mock()
+        detector.refine_people_around_landmarks.return_value = [recovered]
+
+        with patch("marc_agent.perception.cctv_yolo._detector", detector):
+            refined = refine_detection_round(parsed, round_)
+
+        self.assertEqual([distractor, recovered], refined.people)
+        detector.refine_people_around_landmarks.assert_called_once_with(
+            round_.frames,
+            round_.objects,
+            round_.people,
+            frozenset({"bench"}),
+        )
 
 
 if __name__ == "__main__":

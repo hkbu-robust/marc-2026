@@ -33,6 +33,7 @@ log = logging.getLogger("marc_agent.cctv_yolo")
 
 REFINE_CONF = 0.12
 CROP_PAD_FRAC = 0.15
+REFINE_DEDUP_IOU = 0.45
 
 
 def _pad_box(
@@ -49,6 +50,23 @@ def _pad_box(
         min(width, float(x2) + pad),
         min(height, float(y2) + pad),
     )
+
+
+def _box_iou(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    left = max(a[0], b[0])
+    top = max(a[1], b[1])
+    right = min(a[2], b[2])
+    bottom = min(a[3], b[3])
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    if intersection <= 0.0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0.0 else 0.0
 
 
 def _env_str(name: str, default: str) -> str:
@@ -295,48 +313,120 @@ class CctvYoloDetector:
         counts: dict[tuple[str, str], int] = defaultdict(int)
         for item in objects:
             counts[(item.camera_id, item.class_name)] += 1
-        for landmark in objects:
-            if landmark.class_name not in landmark_classes:
+        for camera_id, class_name, confidence, mapped, image_size in (
+            self._predict_around_landmarks(frames, objects, landmark_classes)
+        ):
+            if class_name != target_type:
                 continue
+            key = (camera_id, class_name)
+            idx = counts[key]
+            counts[key] += 1
+            extra.append(
+                ObjectCandidate(
+                    candidate_id=object_candidate_id(camera_id, class_name, idx),
+                    class_name=class_name,
+                    bbox_xyxy=mapped,
+                    confidence=confidence,
+                    camera_id=camera_id,
+                    image_size=image_size,
+                )
+            )
+        return extra
+
+    def _predict_around_landmarks(
+        self,
+        frames: dict[str, CctvFrame],
+        objects: list[ObjectCandidate],
+        landmark_classes: frozenset[str],
+    ) -> list[
+        tuple[
+            str,
+            str,
+            float,
+            tuple[float, float, float, float],
+            tuple[int, int],
+        ]
+    ]:
+        """Map low-threshold crop detections back into their full camera frames."""
+        mapped_detections = []
+        landmarks = sorted(
+            (item for item in objects if item.class_name in landmark_classes),
+            key=lambda item: item.candidate_id,
+        )
+        for landmark in landmarks:
             frame = frames.get(landmark.camera_id)
             rgb = None if frame is None else getattr(frame, "rgb", None)
             if rgb is None:
                 continue
             array = np.asarray(rgb)
             height, width = array.shape[:2]
-            x1, y1, x2, y2 = _pad_box(
-                landmark.bbox_xyxy, (width, height)
-            )
-            ix1, iy1, ix2, iy2 = int(x1), int(y1), int(max(x1 + 1, x2)), int(max(y1 + 1, y2))
+            x1, y1, x2, y2 = _pad_box(landmark.bbox_xyxy, (width, height))
+            ix1, iy1 = int(x1), int(y1)
+            ix2 = int(max(x1 + 1, x2))
+            iy2 = int(max(y1 + 1, y2))
             crop = array[iy1:iy2, ix1:ix2]
             if crop.size == 0:
                 continue
-            detections = self._predict_frame(crop, confidence=REFINE_CONF)
             image_size = (int(frame.width), int(frame.height))
-            for class_name, confidence, bbox in detections:
-                if class_name != target_type:
-                    continue
+            for class_name, confidence, bbox in sorted(
+                self._predict_frame(crop, confidence=REFINE_CONF),
+                key=lambda item: (item[2], item[0], -item[1]),
+            ):
                 mapped = (
                     bbox[0] + ix1,
                     bbox[1] + iy1,
                     bbox[2] + ix1,
                     bbox[3] + iy1,
                 )
-                key = (landmark.camera_id, class_name)
-                idx = counts[key]
-                counts[key] += 1
-                extra.append(
-                    ObjectCandidate(
-                        candidate_id=object_candidate_id(
-                            landmark.camera_id, class_name, idx
-                        ),
-                        class_name=class_name,
-                        bbox_xyxy=mapped,
-                        confidence=confidence,
-                        camera_id=landmark.camera_id,
-                        image_size=image_size,
-                    )
+                mapped_detections.append(
+                    (landmark.camera_id, class_name, confidence, mapped, image_size)
                 )
+        return mapped_detections
+
+    def refine_people_around_landmarks(
+        self,
+        frames: dict[str, CctvFrame],
+        objects: list[ObjectCandidate],
+        people: list[PersonCandidate],
+        landmark_classes: frozenset[str],
+    ) -> list[PersonCandidate]:
+        """Recover missed people from explicit support crops without duplicates."""
+        if not landmark_classes:
+            return []
+        extra: list[PersonCandidate] = []
+        counts: dict[tuple[str, str], int] = defaultdict(int)
+        occupied: dict[str, list[tuple[float, float, float, float]]] = defaultdict(list)
+        for person in people:
+            counts[(person.camera_id, person.pose_class)] += 1
+            occupied[person.camera_id].append(person.bbox_xyxy)
+
+        for camera_id, pose_class, confidence, mapped, image_size in (
+            self._predict_around_landmarks(frames, objects, landmark_classes)
+        ):
+            if not is_person_pose(pose_class):
+                continue
+            if any(
+                _box_iou(mapped, existing) >= REFINE_DEDUP_IOU
+                for existing in occupied[camera_id]
+            ):
+                continue
+            key = (camera_id, pose_class)
+            idx = counts[key]
+            counts[key] += 1
+            candidate = PersonCandidate(
+                candidate_id=person_candidate_id(
+                    camera_id,
+                    pose_class,
+                    idx,
+                ),
+                bbox_xyxy=mapped,
+                pose_class=pose_class,
+                confidence=confidence,
+                camera_id=camera_id,
+                image_size=image_size,
+            )
+            extra.append(candidate)
+            occupied[camera_id].append(mapped)
         return extra
 
     def unload(self) -> None:
@@ -381,12 +471,30 @@ def detector_can_emit(class_name: str) -> bool:
 
 def refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetectionRound:
     """Add missing trained-class boxes from landmark crops. No-op without a live detector."""
-    if parsed is None or parsed.target_type == "person":
-        return round_
-    if any(item.class_name == parsed.target_type for item in round_.objects):
+    if parsed is None:
         return round_
     global _detector
     if _detector is None:
+        return round_
+    if parsed.target_type == "person":
+        names = frozenset({parsed.landmark}) if parsed.landmark else frozenset()
+        extra_people = _detector.refine_people_around_landmarks(
+            round_.frames,
+            round_.objects,
+            round_.people,
+            names,
+        )
+        if not extra_people:
+            return round_
+        return CctvDetectionRound(
+            objects=list(round_.objects),
+            people=list(round_.people) + extra_people,
+            sar=list(round_.sar),
+            frames=round_.frames,
+            camera_ids=list(round_.camera_ids),
+            metrics=round_.metrics,
+        )
+    if any(item.class_name == parsed.target_type for item in round_.objects):
         return round_
     names = set()
     if parsed.landmark:
