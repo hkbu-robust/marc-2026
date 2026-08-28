@@ -1,4 +1,4 @@
-"""Live Stage 2 search-area execution: occupancy + lidar overlay + D* Lite.
+"""Live Stage 2 search-area execution: occupancy D* Lite + local lidar corridor.
 
 Wraps the #24 planner (``OccupancyGridPlanner`` / ``PathFollower``) in a typed
 ``Stage2Navigator``. Production never reads ``mock_demo_data.yaml``.
@@ -14,11 +14,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from marc_agent.lidar_overlay import (
-    frontal_hit,
-    lidar_cloud_to_obstacles,
-    pointcloud2_xyz,
-)
+import numpy as np
+
+from marc_agent.lidar_safety import advise, pointcloud2_xyz
 from marc_agent.retrieval_state import DEFAULT_GOAL_TOLERANCE
 
 _DEMO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo")
@@ -37,18 +35,11 @@ from mock_agent_navigation import (  # noqa: E402
 
 log = logging.getLogger("participant_app")
 
-# Stop and paint overlay before GoalSeeking through a live lidar blob.
-# Bumper box matches the Stage 2 straight-approach stop in participant_app.
-START_HOLE_M = 0.20
-BLOCK_HOLD_S = 0.50
-PAINT_DWELL_S = 1.0
 BACKUP_V = 0.20
 ESCAPE_ANGULAR = 1.2
-BUMPER_X_MAX = 0.8
-BUMPER_Y_HALF = 0.35
-SPAWN_EGRESS_M = 1.0
-SPAWN_EGRESS_S = 4.0
 CREEP_V = 0.20
+YAW_BIAS_GAIN = 0.5
+RESUME_M = 1.20
 
 
 class NavStatus(str, Enum):
@@ -71,7 +62,7 @@ class ReplanReason:
 
 
 def _occupancy_cell_free(planner, x, y) -> bool:
-    """True when the chassis cell is occupancy-free (0), ignoring lidar overlay."""
+    """True when the chassis cell is occupancy-free (0)."""
     if planner is None or not planner.ready:
         return False
     row, col = planner._w2c(x, y)
@@ -111,16 +102,6 @@ def _frontal_escape(planner, pose, follower, bumper_hot, escape_turn):
     return (linear, angular), turn
 
 
-def _overlay_busy(planner, lidar_n: int) -> bool:
-    """True when live lidar discs or a stamped overlay must keep full robot inflation."""
-    if int(lidar_n) > 0:
-        return True
-    overlay = getattr(planner, "_overlay", None)
-    if overlay is None:
-        return False
-    return bool(overlay.any())
-
-
 def _plan_attempts(inflation_m: float, allow_thin: bool = True):
     """Configured inflation first, then optional thinner inflation, then a wider crop."""
     attempts = [(float(inflation_m), 12.0)]
@@ -131,6 +112,29 @@ def _plan_attempts(inflation_m: float, allow_thin: bool = True):
     for margin in (40.0, 80.0):
         attempts.append((float(inflation_m), margin))
     return attempts
+
+
+def _world_discs_to_base(discs, pose):
+    """World ``(x, y, r)`` disc centres -> robot-frame XYZ at body height."""
+    if not discs:
+        return None
+    x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
+    cc, ss = math.cos(yaw), math.sin(yaw)
+    rows = []
+    for item in discs:
+        dx = float(item[0]) - x
+        dy = float(item[1]) - y
+        rows.append([dx * cc + dy * ss, -dx * ss + dy * cc, 0.4])
+    return np.asarray(rows, dtype=np.float32)
+
+
+def _merge_xyz(cloud_xyz, extra_xyz):
+    parts = [a for a in (cloud_xyz, extra_xyz) if a is not None and getattr(a, "size", 0)]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return np.vstack(parts)
 
 
 @dataclass
@@ -177,7 +181,7 @@ class Stage2Navigator:
         self._escape_turn = 0.0
 
     def _warm_lidar(self, deadline_s, ticks: int = 8):
-        """Subscribe and wait briefly so the first plan is not empty of discs."""
+        """Wait briefly so the first tick can see a cloud if one is already publishing."""
         client = self.client
         if client.get_lidar() is not None:
             return
@@ -190,9 +194,8 @@ class Stage2Navigator:
     def _plan_path(self, planner, start_xy, goal_xy, allow_thin: bool = True):
         """Plan with inflation then crop-margin fallbacks.
 
-        Reject a path whose occupancy-only start chord cuts 100 / unknown (no
-        inflation — D* already squeezed past overlay). Keep a detour whose start
-        chord only hits lidar overlay; reverse until the bumper box is clear.
+        Reject a path whose occupancy-only start chord cuts 100 / unknown.
+        Lidar never enters the grid; the live corridor handles close hits.
         """
         for inflation, margin in _plan_attempts(self.inflation_m, allow_thin=allow_thin):
             path = planner.plan(
@@ -226,10 +229,9 @@ class Stage2Navigator:
         """Follow occupancy D* Lite until inside ``tol`` of ``goal_xy``.
 
         ``goal_xy`` and ``tol`` may be callables so a late Stage 2 reveal can retarget.
-        For the first metre (or 4 s) lidar overlay is ignored so a sunken spawn pad
-        cannot trap the chassis; occupancy-only D* or a 0.20 m/s creep on free road.
-        After egress, live lidar overlay and bumper reverse apply. Off-road / unknown
-        start stays fail-closed (zero, no_path).
+        Live lidar only scales or reverses in the chassis corridor. Off-road / unknown
+        start stays fail-closed (zero, no_path). ``extra_obstacles`` is a test hook of
+        world discs fed into that corridor, not a map overlay.
         """
         client = self.client
         extra = list(extra_obstacles or [])
@@ -242,7 +244,6 @@ class Stage2Navigator:
         last_progress_t = client.now_s()
         last_log_t = 0.0
         last_goal = None
-        last_lidar_n = 0
         n_replan = 0
         logged_no_map = False
         prev_frontal = False
@@ -252,14 +253,7 @@ class Stage2Navigator:
         last_goal_xy = None
         had_map = False
         had_path = False
-        hold_until = 0.0
-        pending_after_hold = ""
-        did_initial_paint = False
-        did_block_paint = False
-        egress_origin = None
-        egress_t0 = None
-        logged_egress = False
-        prev_egress = False
+        stop_latched = False
 
         while client.is_running and client.now_s() < deadline_s:
             pose = client.get_world_pose()
@@ -297,44 +291,14 @@ class Stage2Navigator:
                              occ.info.origin.position.x, occ.info.origin.position.y)
 
             cloud = client.get_lidar()
-            lidar_obs = lidar_cloud_to_obstacles(cloud, pose) if cloud is not None else []
-            last_lidar_n = len(lidar_obs)
+            xyz = pointcloud2_xyz(cloud) if cloud is not None else None
+            advice = advise(_merge_xyz(xyz, _world_discs_to_base(extra, pose)))
             now_s = client.now_s()
-            if egress_origin is None:
-                egress_origin = (x, y)
-                egress_t0 = now_s
-            in_egress = (
-                math.hypot(x - egress_origin[0], y - egress_origin[1]) < SPAWN_EGRESS_M
-                and (now_s - egress_t0) < SPAWN_EGRESS_S
-            )
-            if in_egress and not logged_egress:
-                logged_egress = True
-                log.info(
-                    "[Stage2] %s spawn egress %.1fm/%.1fs (ignore lidar overlay)",
-                    leg, SPAWN_EGRESS_M, SPAWN_EGRESS_S,
-                )
-            planner.expire_overlay(now_s)
-            hole = max(float(self.exclude_m), cur_tol)
-            overlay_discs = list(extra)
-            if not in_egress:
-                overlay_discs.extend(lidar_obs)
-            planner.stamp_overlay(overlay_discs, now_s)
-            planner.clear_goal_hole(cur_goal, exclude_m=hole)
-            planner.clear_start_hole((x, y), exclude_m=START_HOLE_M)
-
-            if (not in_egress) and lidar_obs and not did_initial_paint:
-                did_initial_paint = True
-                hold_until = max(hold_until, now_s + PAINT_DWELL_S)
-                log.info("[Stage2] %s lidar map dwell %.1fs (%d discs)",
-                         leg, PAINT_DWELL_S, last_lidar_n)
-
-            frontal_discs = list(extra)
-            if not in_egress:
-                frontal_discs.extend(lidar_obs)
-            hold_linear = frontal_hit(
-                frontal_discs, pose, x_max=BUMPER_X_MAX, y_half=BUMPER_Y_HALF,
-            )
-            bumper_hot = hold_linear
+            if advice.stop:
+                stop_latched = True
+            elif not math.isfinite(advice.ahead_m) or advice.ahead_m >= RESUME_M:
+                stop_latched = False
+            bumper_hot = bool(advice.stop or stop_latched)
             need_replan = follower is None
             replan_reason = ReplanReason.FIRST_PLAN if need_replan else ""
             if last_goal is None or math.hypot(
@@ -342,11 +306,6 @@ class Stage2Navigator:
                 need_replan = True
                 replan_reason = ReplanReason.GOAL_RETARGET
             last_goal = cur_goal
-            if prev_egress and not in_egress:
-                follower = None
-                need_replan = True
-                replan_reason = ReplanReason.FIRST_PLAN
-            prev_egress = in_egress
 
             if bumper_hot:
                 last_reason = ReplanReason.FRONTAL
@@ -365,39 +324,17 @@ class Stage2Navigator:
                     last_progress_t = client.now_s()
             last_xy = (x, y)
 
-            if follower is not None and not need_replan and now_s >= hold_until:
+            if follower is not None and not need_replan:
                 remain = list(follower.path[follower.idx:])
-                overlay_blocked = (
-                    len(remain) >= 2
-                    and path_is_blocked(
-                        planner, remain, inflation_m=self._path_inflation,
-                    )
-                )
-                join_blocked = False
                 if remain and _occupancy_cell_free(planner, x, y):
                     join = [(x, y), remain[0]]
-                    join_blocked = path_is_blocked(
-                        planner, join, inflation_m=0.0,
-                        ignore_overlay=True,
-                    )
-                if overlay_blocked or join_blocked:
-                    log.info("[Stage2] %s path blocked -> replan", leg)
-                    last_reason = ReplanReason.PATH_BLOCKED
-                    if not did_block_paint:
-                        did_block_paint = True
-                        hold_until = max(hold_until, now_s + PAINT_DWELL_S)
-                    else:
-                        hold_until = max(hold_until, now_s + BLOCK_HOLD_S)
-                    pending_after_hold = ReplanReason.PATH_BLOCKED
-
-            in_hold = now_s < hold_until
-            if in_hold:
-                hold_linear = True
-                need_replan = False
-            elif pending_after_hold:
-                need_replan = True
-                replan_reason = pending_after_hold
-                pending_after_hold = ""
+                    if path_is_blocked(
+                        planner, join, inflation_m=0.0, ignore_overlay=True,
+                    ):
+                        log.info("[Stage2] %s path blocked -> replan", leg)
+                        last_reason = ReplanReason.PATH_BLOCKED
+                        need_replan = True
+                        replan_reason = ReplanReason.PATH_BLOCKED
 
             if need_replan:
                 if not planner.ready:
@@ -428,18 +365,15 @@ class Stage2Navigator:
                             path=self.last_path, last_method=self.last_method,
                         )
                     log.info("[Stage2] %s replan reason=%s count=%d", leg, replan_reason, n_replan)
-                allow_thin = not _overlay_busy(
-                    planner, 0 if in_egress else last_lidar_n,
-                )
-                path = self._plan_path(planner, (x, y), cur_goal, allow_thin=allow_thin)
+                path = self._plan_path(planner, (x, y), cur_goal, allow_thin=True)
                 if path:
                     follower = PathFollower(path, passthrough=self.cruise)
                     had_path = True
                     last_reason = replan_reason or "ok"
                     self.last_path = tuple(path)
                     self.last_method = planner.last_method
-                    log.info("[Stage2] occupancy %s path %d waypoints (%d lidar discs)",
-                             planner.last_method or "dstar", len(path), last_lidar_n)
+                    log.info("[Stage2] occupancy %s path %d waypoints (clr=%.2f)",
+                             planner.last_method or "dstar", len(path), advice.clearance_m)
                 else:
                     follower = None
                     last_reason = ReplanReason.NO_PATH
@@ -462,7 +396,7 @@ class Stage2Navigator:
                     )
                     if cmd is not None:
                         client.send_cmd_vel(cmd[0], cmd[1])
-                    elif in_egress and _occupancy_cell_free(planner, x, y):
+                    elif _occupancy_cell_free(planner, x, y):
                         client.send_cmd_vel(CREEP_V, 0.0)
                     else:
                         client.send_cmd_vel(0.0, 0.0)
@@ -485,26 +419,31 @@ class Stage2Navigator:
             else:
                 linear, angular = 0.0, 0.0
 
-            if hold_linear:
-                linear, angular = 0.0, 0.0
             cmd, self._escape_turn = _frontal_escape(
                 planner, (x, y, yaw), follower, bumper_hot, self._escape_turn,
             )
             if cmd is not None:
                 linear, angular = cmd
-            elif linear > 1e-6:
-                xyz = pointcloud2_xyz(cloud) if cloud is not None else None
-                imu = client.get_imu() if hasattr(client, "get_imu") else None
-                linear, angular = governor.limit(
-                    linear, angular, imu=imu, xyz=xyz, dt=self.dt)
+            else:
+                if bumper_hot:
+                    linear, angular = 0.0, 0.0
+                else:
+                    linear *= advice.speed_scale
+                    if (
+                        abs(advice.yaw_bias) > 1e-9
+                        and _occupancy_cell_free(planner, x, y)
+                    ):
+                        angular += YAW_BIAS_GAIN * advice.yaw_bias
+                    if linear > 1e-6:
+                        imu = client.get_imu() if hasattr(client, "get_imu") else None
+                        linear, angular = governor.limit(
+                            linear, angular, imu=imu, dt=self.dt)
 
             client.send_cmd_vel(linear_x=linear, angular_z=angular)
 
             now = client.now_s()
             if now - last_log_t >= 1.0:
-                extra_s = " lidar=%d replan=%d" % (last_lidar_n, n_replan)
-                if in_egress:
-                    extra_s += " EGRESS"
+                extra_s = " clr=%.1f replan=%d" % (advice.clearance_m, n_replan)
                 if bumper_hot:
                     extra_s += " FRONTAL"
                 if cmd is not None and linear < -1e-6:

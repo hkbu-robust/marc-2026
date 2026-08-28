@@ -54,6 +54,14 @@ def _sar_round() -> CctvDetectionRound:
                 (640, 480),
             ),
             PersonCandidate(
+                "rig_a:person_bending:1",
+                (50.0, 100.0, 140.0, 390.0),
+                "person_bending",
+                0.5,
+                "rig_a",
+                (640, 480),
+            ),
+            PersonCandidate(
                 "rig_a:person_bending:0",
                 (315.0, 100.0, 405.0, 390.0),
                 "person_bending",

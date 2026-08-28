@@ -593,6 +593,8 @@ def _parse_object_token(
         target_id, anchor_id = text.split("|", 1)
         resolved_anchor = None if anchor_id in {"", "none"} else anchor_id
         if (target_id, resolved_anchor) not in allowed:
+            if resolved_anchor is None:
+                return _resolve_target_only(target_id, ranked)
             raise ValueError(f"unknown pair: {target_id}|{anchor_id}")
         return target_id, resolved_anchor
     return _resolve_target_only(text, ranked)

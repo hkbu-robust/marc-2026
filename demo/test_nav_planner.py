@@ -15,10 +15,8 @@ import numpy as np
 from mock_agent_navigation import (
     OccupancyGridPlanner,
     SpeedGovernor,
-    LIDAR_CLUSTER_M,
     OVERLAY_TTL_S,
-    frontal_hit,
-    lidar_xyz_to_obstacles,
+    advise,
     path_is_blocked,
     pointcloud2_xyz,
     recovery_cmd,
@@ -84,28 +82,23 @@ def test_wall_repair_goes_around():
     _check(max(rows) >= 28, "post-wall: path did not use the gap (max row=%s)" % max(rows))
 
 
-def test_lidar_xyz_to_world():
-    xyz = np.array([[2.0, 0.0, 0.5]], dtype=np.float32)
-    discs = lidar_xyz_to_obstacles(xyz, (0.0, 0.0, 0.0))
-    _check(len(discs) == 1, "yaw0: expected 1 disc, got %s" % discs)
-    wx, wy, rad = discs[0]
-    _check(abs(wx - 2.0) < LIDAR_CLUSTER_M and abs(wy) < LIDAR_CLUSTER_M,
-           "yaw0: disc at (%s, %s), expected ~(2, 0)" % (wx, wy))
-    _check(rad > 0, "yaw0: radius")
+def test_lidar_corridor():
+    close = advise(np.array([[0.5, 0.0, 0.4]], dtype=np.float32))
+    _check(close.stop, "body-height hit at 0.5 m should stop")
+    _check(close.speed_scale == 0.0, "stop should zero speed_scale")
 
-    discs = lidar_xyz_to_obstacles(xyz, (0.0, 0.0, math.pi / 2))
-    _check(len(discs) == 1, "yaw90: expected 1 disc")
-    wx, wy, _ = discs[0]
-    _check(abs(wx) < LIDAR_CLUSTER_M and abs(wy - 2.0) < LIDAR_CLUSTER_M,
-           "yaw90: disc at (%s, %s), expected ~(0, 2)" % (wx, wy))
+    ground = advise(np.array([[1.0, 0.0, -0.5]], dtype=np.float32))
+    _check(not ground.stop and ground.speed_scale == 1.0, "ground hit should drop")
 
-    ground = np.array([[1.0, 0.0, -0.5]], dtype=np.float32)
-    _check(lidar_xyz_to_obstacles(ground, (0.0, 0.0, 0.0)) == [], "ground hit should drop")
-    equator = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
-    _check(len(lidar_xyz_to_obstacles(equator, (0.0, 0.0, 0.0))) == 1, "z=0 car body should keep")
+    far = advise(np.array([[25.0, 0.0, 0.5]], dtype=np.float32))
+    _check(not far.stop and far.speed_scale == 1.0, "far hit should drop")
 
-    far = np.array([[25.0, 0.0, 0.5]], dtype=np.float32)
-    _check(lidar_xyz_to_obstacles(far, (0.0, 0.0, 0.0)) == [], "far hit should drop")
+    side = advise(np.array([[1.0, 1.2, 0.4]], dtype=np.float32))
+    _check(not side.stop, "side car should not stop")
+
+    mid = advise(np.array([[2.0, 0.0, 0.4]], dtype=np.float32))
+    _check(not mid.stop, "2 m corridor hit should not stop")
+    _check(0.0 < mid.speed_scale < 1.0, "2 m corridor hit should slow, got %s" % mid.speed_scale)
 
 
 def test_path_blocked_and_frontal():
@@ -119,10 +112,12 @@ def test_path_blocked_and_frontal():
     _check(path_is_blocked(p, [a, b], extra_obstacles=discs, inflation_m=0.0),
            "disc on segment should block")
 
-    pose = (0.0, 0.0, 0.0)
-    _check(frontal_hit([(0.8, 0.0, 0.2)], pose), "disc ahead should be a frontal hit")
-    _check(not frontal_hit([(-2.0, 0.0, 0.2)], pose), "disc behind should not be frontal")
-    _check(not frontal_hit([(0.8, 2.0, 0.1)], pose), "disc to the side should not be frontal")
+    _check(advise(np.array([[0.5, 0.0, 0.4]], dtype=np.float32)).stop,
+           "hit ahead should be a frontal stop")
+    _check(not advise(np.array([[-2.0, 0.0, 0.4]], dtype=np.float32)).stop,
+           "hit behind should not stop")
+    _check(not advise(np.array([[0.5, 2.0, 0.4]], dtype=np.float32)).stop,
+           "hit to the side should not stop")
 
 
 def test_parking_lot_path_goes_around_unknown():
@@ -310,15 +305,14 @@ def test_governor_roll_and_ay_slower_than_level():
     _check(lat < level - 0.15, "high a_y should cut vs level (%s vs %s)" % (lat, level))
 
 
-def test_governor_curb_lidar_slower_than_high_z():
+def test_governor_ignores_lidar():
     cruise = 1.0
     curb = np.array([[0.6, 0.0, 0.08], [0.7, 0.05, 0.10], [0.55, -0.04, 0.06]], dtype=np.float32)
     high = np.array([[0.6, 0.0, 0.80], [0.7, 0.05, 0.90], [0.55, -0.04, 1.00]], dtype=np.float32)
     v_curb, _ = SpeedGovernor().limit(cruise, 0.0, imu=_Imu(), xyz=curb, dt=0.1)
     v_high, _ = SpeedGovernor().limit(cruise, 0.0, imu=_Imu(), xyz=high, dt=0.1)
-    _check(abs(v_high - cruise) < 1e-9, "high-Z hits are not curbs, got %s" % v_high)
-    _check(v_curb < v_high - 0.3, "curb-Z look-ahead should slow (%s vs %s)" % (v_curb, v_high))
-    _check(v_curb >= SpeedGovernor.V_FLOOR - 1e-9, "curb floor should still creep, got %s" % v_curb)
+    _check(abs(v_curb - cruise) < 1e-9, "governor must not cap on lidar, got %s" % v_curb)
+    _check(abs(v_high - cruise) < 1e-9, "high-Z lidar must not cap governor, got %s" % v_high)
 
 
 def test_governor_az_spike_latches():
@@ -371,9 +365,8 @@ def test_callable_goal_retarget():
 
 
 def test_recovery_cmd_zeros_on_frontal():
-    pose = (0.0, 0.0, 0.0)
-    hit = [(0.6, 0.0, 0.2)]
-    _check(frontal_hit(hit, pose), "bumper disc should be a frontal hit")
+    _check(advise(np.array([[0.5, 0.0, 0.4]], dtype=np.float32)).stop,
+           "bumper hit should stop")
     lin, ang = recovery_cmd(True)
     _check(lin == 0.0, "recovery must command zero linear, got lin=%s" % lin)
     _check(ang == 0.0, "recovery has no yaw")
@@ -385,7 +378,7 @@ def main():
     tests = [
         test_empty_corridor,
         test_wall_repair_goes_around,
-        test_lidar_xyz_to_world,
+        test_lidar_corridor,
         test_path_blocked_and_frontal,
         test_parking_lot_path_goes_around_unknown,
         test_off_road_snap_keeps_join_waypoint,
@@ -398,7 +391,7 @@ def main():
         test_governor_straight_cruise,
         test_governor_high_yaw_caps_and_ackermann,
         test_governor_roll_and_ay_slower_than_level,
-        test_governor_curb_lidar_slower_than_high_z,
+        test_governor_ignores_lidar,
         test_governor_az_spike_latches,
         test_governor_missing_sensors_never_raises,
         test_search_tol_uses_radius,

@@ -3,11 +3,11 @@
 This module bundles the demo's navigation pieces (participants replace/extend them):
   - GoalSeekController / PathFollower -- P-control that returns ``(linear_x, angular_z)``
     scalars to publish with ``client.send_cmd_vel(...)``.
-  - SpeedGovernor -- IMU + low-Z lidar cap on those scalars (rollover / curb bounce).
-  - run_nav_leg -- live occupancy/D* execution with lidar overlay and backup recovery.
+  - SpeedGovernor -- IMU + Ackermann cap on those scalars (rollover). Lidar speed
+    lives in ``marc_agent.lidar_safety.advise``.
   - OccupancyGridPlanner -- D* Lite over the runtime occupancy grid
     (``MARCClient.get_occupancy_map()``), with A* as a fallback.
-  - lidar overlay helpers re-exported from ``marc_agent.lidar_overlay``.
+  - lidar corridor helpers re-exported from ``marc_agent.lidar_safety``.
   - run_nav_leg -- thin wrapper around ``marc_agent.navigation_runtime.Stage2Navigator``.
   - load_obstacles / obstacles_excluding_goal -- optional yaml discs for debugging
     only; the production navigator in ``participant_app.py`` never reads them.
@@ -28,16 +28,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from marc_agent.lidar_overlay import (  # noqa: E402
-    LIDAR_CLUSTER_M,
-    LIDAR_HIT_RADIUS,
-    LIDAR_MIN_RANGE_M,
-    LIDAR_RANGE_M,
-    LIDAR_Z_MAX,
-    LIDAR_Z_MIN,
-    frontal_hit,
-    lidar_cloud_to_obstacles,
-    lidar_xyz_to_obstacles,
+from marc_agent.lidar_safety import (  # noqa: E402
+    advise,
     pointcloud2_xyz,
 )
 
@@ -81,7 +73,7 @@ class GoalSeekController:
 
     # Speed / turn caps. Large turns are handled in place (see HEADING_TOLERANCE), so forward
     # motion rarely needs a hard swerve; the Ackermann w-limit below guarantees a tight arc.
-    MAX_LINEAR = 1.0           # m/s; SpeedGovernor cuts this on corners / curbs / tilt
+    MAX_LINEAR = 1.0           # m/s; SpeedGovernor cuts this on corners / tilt
     MAX_ANGULAR = 1.2          # rad/s
     K_LINEAR = 0.5
     K_ANGULAR = 0.8
@@ -184,15 +176,9 @@ class PathFollower:
 
 
 # ---------------------------------------------------------------------------
-# Speed governor: IMU dynamics + curb-height lidar look-ahead.
+# Speed governor: IMU dynamics. Lidar slow/stop is lidar_safety.advise.
 # ---------------------------------------------------------------------------
 
-# Curb band sits below LIDAR_Z_MIN so these hits never enter occupancy overlay.
-CURB_Z_MIN = 0.03
-CURB_Z_MAX = 0.18
-CURB_X_MIN = 0.30
-CURB_X_MAX = 2.00
-CURB_Y_HALF = 0.25
 _G = 9.81
 
 
@@ -236,37 +222,13 @@ def _lerp_cap(x, x0, x1, y0, y1):
     return y0 + t * (y1 - y0)
 
 
-def curb_hits_ahead(xyz):
-    """Count curb-height lidar hits in a short bumper box.
-
-    ``xyz`` is robot-frame Nx3 (lidar +X forward). Returns ``(n_hits, min_forward_m)``.
-    No hits -> ``(0, inf)``. Not an occupancy overlay -- curbs stay drivable, just slow.
-    """
-    if xyz is None:
-        return 0, float("inf")
-    pts = np.asarray(xyz, dtype=np.float32)
-    if pts.ndim != 2 or pts.shape[1] < 3 or pts.shape[0] == 0:
-        return 0, float("inf")
-    x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
-    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
-    mask = (
-        finite
-        & (z >= CURB_Z_MIN) & (z <= CURB_Z_MAX)
-        & (x >= CURB_X_MIN) & (x <= CURB_X_MAX)
-        & (np.abs(y) <= CURB_Y_HALF)
-    )
-    hits = pts[mask]
-    if hits.shape[0] == 0:
-        return 0, float("inf")
-    return int(hits.shape[0]), float(np.min(hits[:, 0]))
-
-
 class SpeedGovernor:
-    """Cap PathFollower cmd_vel so straights can cruise and corners / curbs do not flip the chassis.
+    """Cap PathFollower cmd_vel so straights can cruise and corners do not flip the chassis.
 
-    ``limit(linear, angular, imu, xyz)`` never raises ``linear`` above the request. Missing
-    IMU/lidar still caps from commanded yaw rate. After cutting v, recaps w with the same
+    ``limit(linear, angular, imu)`` never raises ``linear`` above the request. Missing
+    IMU still caps from commanded yaw rate. After cutting v, recaps w with the same
     Ackermann rule as ``GoalSeekController`` so the chassis does not stall on ``2v <= w*T``.
+    Lidar slow/stop is ``lidar_safety.advise``, not this governor.
     """
 
     STEERING_TRACK = GoalSeekController.STEERING_TRACK
@@ -282,10 +244,8 @@ class SpeedGovernor:
     V_FLOOR = 0.20            # m/s -- creep over a lip / after a bump
     V_SPIKE = 0.22
     SPIKE_HOLD_S = 0.80
-    CURB_NEAR_M = 0.45        # at this forward range, v -> V_FLOOR
-    CURB_FAR_M = CURB_X_MAX
     TAU_DOWN_S = 0.08
-    TAU_UP_S = 0.40
+    TAU_UP_S = 0.12
 
     def __init__(self):
         self._v_filt = None
@@ -293,7 +253,7 @@ class SpeedGovernor:
         self._spike_v = self.V_SPIKE
 
     def limit(self, linear, angular, imu=None, xyz=None, dt=None):
-        """Return ``(linear_x, angular_z)`` capped for stability and curb bounce."""
+        """Return ``(linear_x, angular_z)`` capped for IMU stability. ``xyz`` is ignored."""
         requested = float(linear)
         ang = float(angular)
         dt = 0.10 if dt is None else max(1e-3, float(dt))
@@ -325,12 +285,6 @@ class SpeedGovernor:
             self._spike_v = self.V_SPIKE
             self._spike_t = self.SPIKE_HOLD_S
 
-        n_curb, x_curb = curb_hits_ahead(xyz)
-        if n_curb > 0:
-            v_curb = _lerp_cap(x_curb, self.CURB_NEAR_M, self.CURB_FAR_M,
-                               self.V_FLOOR, abs(requested))
-            v_cap = min(v_cap, v_curb)
-
         if self._spike_t > 0.0:
             v_cap = min(v_cap, self._spike_v)
             self._spike_t = max(0.0, self._spike_t - dt)
@@ -350,7 +304,7 @@ class SpeedGovernor:
         return out_lin, out_ang
 
 
-# Lidar overlay lives in marc_agent.lidar_overlay; re-exported above.
+# Lidar corridor lives in marc_agent.lidar_safety; re-exported above.
 # Frontal recovery: command zero, then replan (no reverse/open-loop).
 RECOVERY_LINEAR_X = 0.0
 RECOVERY_HOLD_S = 0.50
@@ -730,7 +684,7 @@ class OccupancyGridPlanner:
             snap_m:  maximum radius to correct a start cell to the nearest free
                      cell when it is not traversable.
             extra_obstacles: [(x, y, radius_m), ...] extra discs carved for this
-                     call only (tests / yaml). Live lidar should use stamp_overlay.
+                     call only (tests / yaml). Live lidar does not stamp the grid.
             snap_goal_m: maximum radius to snap a blocked goal onto free road.
                      Defaults to ``snap_m``. Off-road objects (parking) need a
                      larger value so the path ends at the street, not inside the lot.

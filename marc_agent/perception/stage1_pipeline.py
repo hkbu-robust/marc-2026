@@ -398,6 +398,7 @@ def run_stage1_candidate_pipeline(
             parsed,
             detections,
             verifier=selected_verifier,
+            projector=projector,
         )
         if selection.selected is None:
             failure_reason = f"sar_selection:{selection.reason}"

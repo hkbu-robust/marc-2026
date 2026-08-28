@@ -313,6 +313,54 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:mug:0", target_id)
         self.assertEqual("rig_a:picnic_table:0", anchor_id)
 
+    def test_none_anchor_resolves_to_ranked_vehicle_pair(self):
+        text = (
+            "I think I dropped my tumbler on the ground as I got out of my car "
+            "in the parking lot."
+        )
+        parsed = parse_command(text, expected_intent=Intent.FIND)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "rig_7_a:tumbler:2",
+                    "tumbler",
+                    (40.0, 40.0, 80.0, 80.0),
+                    "rig_7_a",
+                    0.99,
+                ),
+                _object(
+                    "rig_7_a:tumbler:3",
+                    "tumbler",
+                    (200.0, 300.0, 240.0, 340.0),
+                    "rig_7_a",
+                    0.4,
+                ),
+                _object(
+                    "rig_7_a:suv:0",
+                    "suv",
+                    (180.0, 280.0, 400.0, 420.0),
+                    "rig_7_a",
+                    0.9,
+                ),
+            ],
+            camera_ids=["rig_7_a"],
+        )
+        ranked = rank_object_candidates(parsed, round_, command_text=text)
+        self.assertTrue(all(item.anchor is not None for item in ranked))
+        target_id, anchor_id = parse_object_verifier_output(
+            "rig_7_a:tumbler:3|none", ranked
+        )
+        self.assertEqual("rig_7_a:tumbler:3", target_id)
+        self.assertEqual("rig_7_a:suv:0", anchor_id)
+        selected = select_object_candidate(
+            parsed,
+            round_,
+            command_text=text,
+            verifier=lambda _board: "rig_7_a:tumbler:3|none",
+        )
+        self.assertEqual("rig_7_a:tumbler:3", selected.target.candidate_id)
+        self.assertEqual("rig_7_a:suv:0", selected.anchor.candidate_id)
+
     def test_verifier_truncated_prefix_resolves_unique_target(self):
         parsed = parse_command("Find the mug on the picnic table.")
         round_ = _on_table_vs_beside_bench()

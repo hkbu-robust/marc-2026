@@ -28,7 +28,7 @@ def _load():
 
 
 def _xyz_cloud(points):
-    """Minimal PointCloud2 with FLOAT32 xyz for lidar_cloud_to_obstacles."""
+    """Minimal PointCloud2 with FLOAT32 xyz for lidar_safety.advise."""
     pts = np.asarray(points, dtype=np.float32)
     if pts.ndim != 2:
         pts = pts.reshape(1, 3)
@@ -95,6 +95,7 @@ class FakeClient:
         lidar_xyz=None,
         lidar_after_s=None,
         lidar_origin_max_m=None,
+        lidar_until_s=None,
     ):
         self._pose = [float(start[0]), float(start[1]), float(start[2])]
         self._t = 0.0
@@ -108,6 +109,8 @@ class FakeClient:
         self._lidar_after_s = lidar_after_s
         self._lidar_origin = (float(start[0]), float(start[1]))
         self._lidar_origin_max_m = lidar_origin_max_m
+        self._lidar_until_s = lidar_until_s
+        self._lidar_left_origin = False
 
     def now_s(self):
         return self._t
@@ -138,12 +141,16 @@ class FakeClient:
             return None
         if self._lidar_after_s is not None and self._t < float(self._lidar_after_s):
             return None
+        if self._lidar_until_s is not None and self._t >= float(self._lidar_until_s):
+            return None
         if self._lidar_origin_max_m is not None:
             away = math.hypot(
                 self._pose[0] - self._lidar_origin[0],
                 self._pose[1] - self._lidar_origin[1],
             )
             if away >= float(self._lidar_origin_max_m):
+                self._lidar_left_origin = True
+            if self._lidar_left_origin:
                 return None
         return _xyz_cloud(self._lidar_xyz)
 
@@ -435,7 +442,7 @@ class NavigationRuntimeTests(unittest.TestCase):
             "off-road spawn must not creep, got %s" % client.cmds[:8],
         )
 
-    def test_path_blocked_zeros_linear_after_motion(self):
+    def test_far_corridor_hit_slows_not_freeze(self):
         grid = np.zeros((20, 40), dtype=np.int8)
         occ = _Occ(grid, 0.5, 0.0, 0.0)
         client = FakeClient(
@@ -452,17 +459,35 @@ class NavigationRuntimeTests(unittest.TestCase):
             stuck_time_s=30.0,
             replan_cap=8,
         )
-        nav.navigate_to((16.0, 5.0), 5.0, leg="search", tol=0.7)
-        moving = [i for i, (v, _w) in enumerate(client.cmds) if v > 1e-6]
-        stopped = [i for i, (v, _w) in enumerate(client.cmds) if v <= 1e-9]
-        self.assertTrue(moving, "expected forward motion before the lidar wall")
-        self.assertTrue(stopped, "path_blocked / dwell must stop forward")
-        self.assertGreater(max(stopped), min(moving))
+        nav.navigate_to((16.0, 5.0), 2.0, leg="search", tol=0.7)
+        after = [v for v, _w in client.cmds[4:] if v > 1e-6]
+        self.assertTrue(after, "2 m corridor hit must keep forward motion, got %s" % client.cmds[:12])
+
+    def test_close_corridor_hit_reverses(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([1.0, 5.0, 0.0], occ=occ, lidar_xyz=[[0.5, 0.0, 0.4]])
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=8,
+        )
+        nav.navigate_to((16.0, 5.0), 3.0, leg="search", tol=0.7)
+        reverse = [v for v, _w in client.cmds if v < -1e-6]
+        self.assertTrue(reverse, "0.5 m corridor hit must reverse, got %s" % client.cmds[:12])
 
     def test_lidar_ahead_reverses_then_goes_around(self):
         grid = np.zeros((20, 40), dtype=np.int8)
         occ = _Occ(grid, 0.5, 0.0, 0.0)
-        client = FakeClient([3.0, 5.0, 0.0], occ=occ)
+        client = FakeClient(
+            [3.0, 5.0, 0.0],
+            occ=occ,
+            lidar_xyz=[[0.5, 0.0, 0.4]],
+            lidar_until_s=0.8,
+        )
         nav = Stage2Navigator(
             client,
             dt=0.10,
@@ -471,14 +496,11 @@ class NavigationRuntimeTests(unittest.TestCase):
             stuck_time_s=30.0,
             replan_cap=20,
         )
-        result = nav.navigate_to(
-            (16.0, 5.0), 40.0, leg="search", tol=0.7,
-            extra_obstacles=[(4.0, 5.0, 0.35)],
-        )
+        result = nav.navigate_to((16.0, 5.0), 40.0, leg="search", tol=0.7)
         self.assertEqual("reached", result.status.value)
         reverse = [i for i, (v, _w) in enumerate(client.cmds) if v < -1e-6]
         forward = [i for i, (v, _w) in enumerate(client.cmds) if v > 1e-6]
-        self.assertTrue(reverse, "expected reverse on free road with a frontal disc")
+        self.assertTrue(reverse, "expected reverse on free road with a frontal hit")
         self.assertTrue(forward, "expected forward after the bumper box cleared")
         self.assertLess(min(reverse), max(forward))
 
@@ -530,7 +552,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual("reached", result.status.value)
         self.assertTrue(any(v > 1e-6 for v, _w in client.cmds))
 
-    def test_overlay_live_skips_thin_inflation(self):
+    def test_side_lidar_does_not_block_narrow_corridor(self):
         res = 0.1
         h, w = 30, 80
         grid = np.full((h, w), 100, dtype=np.int8)
@@ -549,8 +571,9 @@ class NavigationRuntimeTests(unittest.TestCase):
             stuck_time_s=30.0,
             replan_cap=5,
         )
-        result = nav.navigate_to((7.0, 1.55), 5.0, leg="search", tol=0.7)
-        self.assertEqual("no_path", result.status.value)
+        result = nav.navigate_to((7.0, 1.55), 40.0, leg="search", tol=0.7)
+        self.assertEqual("reached", result.status.value)
+        self.assertTrue(any(v > 1e-6 for v, _w in client.cmds))
 
     def test_start_hole_leaves_disc_ahead_blocked(self):
         from mock_agent_navigation import OccupancyGridPlanner

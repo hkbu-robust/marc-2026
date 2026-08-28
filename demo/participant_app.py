@@ -56,7 +56,7 @@ from marc_agent.retrieval_state import (
 )
 from marc_agent.round_clock import RoundClock
 from mock_agent_vla import MockVLAGrounding
-from mock_agent_navigation import lidar_cloud_to_obstacles, frontal_hit
+from marc_agent.lidar_safety import advise, pointcloud2_xyz
 from nearfield import NearFieldAcquire, make_detector
 
 log = logging.getLogger("participant_app")
@@ -504,8 +504,8 @@ class DemoParticipant:
             pose = c.get_world_pose()
             if pose is not None:
                 cloud = c.get_lidar()
-                obs = lidar_cloud_to_obstacles(cloud, pose) if cloud is not None else []
-                if frontal_hit(obs, pose, x_max=0.8, y_half=0.35):
+                xyz = pointcloud2_xyz(cloud) if cloud is not None else None
+                if advise(xyz).stop:
                     c.send_cmd_vel(0.0, 0.0)
                     log.info("[Stage2] straight approach stopped -- frontal lidar hit")
                     break
