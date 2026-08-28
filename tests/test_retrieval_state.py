@@ -14,6 +14,7 @@ from marc_agent.retrieval_state import (
     close_enough_to_search,
     nearfield_start_reason,
     search_area_approach_goal,
+    snapshot_approach_goal,
 )
 
 
@@ -105,6 +106,16 @@ class RetrievalStateTests(unittest.TestCase):
             "close_enough",
             nearfield_start_reason(False, (3.5, 0.0), (0.0, 0.0), 3.0, 0.7),
         )
+
+    def test_snapshot_approach_does_not_slide_with_pose(self):
+        center = (-44.38, 121.12)
+        radius = 2.0
+        first = snapshot_approach_goal(None, center, radius, (-64.7, 123.7))
+        self.assertIsNotNone(first)
+        moved = snapshot_approach_goal(first, center, radius, (-59.0, 129.5))
+        self.assertEqual(first[2], moved[2])
+        jumped = snapshot_approach_goal(first, (-10.0, 0.0), radius, (-59.0, 129.5))
+        self.assertNotEqual(first[2], jumped[2])
 
 
 if __name__ == "__main__":

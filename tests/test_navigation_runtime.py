@@ -208,6 +208,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertNotIn("_DELIVERY_COORD", src)
         self.assertIn("Stage2Navigator", src)
         self.assertIn("search_area_approach_goal", src)
+        self.assertIn("snapshot_approach_goal", src)
         self.assertIn("expected_intent=Intent.BRING", src)
         self.assertIn("MARC_STAGE2_MOCK_VLA", src)
 
@@ -366,6 +367,66 @@ class NavigationRuntimeTests(unittest.TestCase):
         )
         result = nav.navigate_to(goal, 25.0, leg="search", tol=0.7)
         self.assertEqual("reached", result.status.value)
+
+    def test_path_blocked_zeros_linear_after_motion(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient(
+            [1.0, 5.0, 0.0],
+            occ=occ,
+            lidar_xyz=[[2.0, 0.0, 0.4]],
+            lidar_after_s=0.3,
+        )
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=8,
+        )
+        nav.navigate_to((16.0, 5.0), 5.0, leg="search", tol=0.7)
+        moving = [i for i, (v, _w) in enumerate(client.cmds) if abs(v) > 1e-6]
+        stopped = [i for i, (v, _w) in enumerate(client.cmds) if abs(v) < 1e-9]
+        self.assertTrue(moving, "expected forward motion before the lidar wall")
+        self.assertTrue(stopped, "path_blocked / dwell must command zero linear")
+        self.assertGreater(max(stopped), min(moving))
+
+    def test_overlay_live_skips_thin_inflation(self):
+        res = 0.1
+        h, w = 30, 80
+        grid = np.full((h, w), 100, dtype=np.int8)
+        grid[15, :] = 0
+        occ = _Occ(grid, res, 0.0, 0.0)
+        client = FakeClient(
+            [0.5, 1.55, 0.0],
+            occ=occ,
+            lidar_xyz=[[0.4, 1.2, 0.4]],
+        )
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=5,
+        )
+        result = nav.navigate_to((7.0, 1.55), 5.0, leg="search", tol=0.7)
+        self.assertEqual("no_path", result.status.value)
+
+    def test_start_hole_leaves_disc_ahead_blocked(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        res = 0.05
+        grid = np.zeros((80, 160), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, res, 0.0, 0.0)
+        start = (2.0, 2.0)
+        ahead = (2.4, 2.0)
+        planner.stamp_overlay([(ahead[0], ahead[1], 0.15)], now_s=1.0)
+        planner.clear_start_hole(start, exclude_m=0.20)
+        row, col = planner._w2c(ahead[0], ahead[1])
+        self.assertTrue(bool(planner._overlay[row, col]))
 
 
 if __name__ == "__main__":

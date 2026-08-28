@@ -99,8 +99,10 @@ def test_lidar_xyz_to_world():
     _check(abs(wx) < LIDAR_CLUSTER_M and abs(wy - 2.0) < LIDAR_CLUSTER_M,
            "yaw90: disc at (%s, %s), expected ~(0, 2)" % (wx, wy))
 
-    ground = np.array([[1.0, 0.0, 0.02]], dtype=np.float32)
+    ground = np.array([[1.0, 0.0, -0.5]], dtype=np.float32)
     _check(lidar_xyz_to_obstacles(ground, (0.0, 0.0, 0.0)) == [], "ground hit should drop")
+    equator = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+    _check(len(lidar_xyz_to_obstacles(equator, (0.0, 0.0, 0.0))) == 1, "z=0 car body should keep")
 
     far = np.array([[25.0, 0.0, 0.5]], dtype=np.float32)
     _check(lidar_xyz_to_obstacles(far, (0.0, 0.0, 0.0)) == [], "far hit should drop")

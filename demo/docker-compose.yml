@@ -51,6 +51,7 @@ services:
       GRASPGENX_CHECKPOINT_DIR: "/agent/models/runtime/graspgenx"
       GRASPGENX_GRIPPER_CFG_DIR: "/agent/models/runtime/graspgenx/grippers"
       MARC_GRASPGENX_GRIPPER: "${MARC_GRASPGENX_GRIPPER:-robotiq_2f_140}"
+      MARC_YOLO_WEIGHTS: "/agent/models/runtime/stage2-nearfield-detector/model.pt"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       YOLO_OFFLINE: "1"

@@ -47,7 +47,7 @@ SQRT2 = math.sqrt(2.0)
 _INF = 1e18
 
 # Overlay cells not restamped for this long become free (moving people/ghosts).
-OVERLAY_TTL_S = 2.0
+OVERLAY_TTL_S = 30.0
 
 
 def _wrap_pi(a: float) -> float:
@@ -893,9 +893,10 @@ class OccupancyGridPlanner:
         r0, r1, c0, c1, disc = sl
         self._overlay[r0:r1, c0:c1][disc] = False
 
-    def clear_start_hole(self, start_xy, exclude_m=0.6):
-        """Keep the robot cell traversable: drop overlay around the current pose."""
-        self.clear_goal_hole(start_xy, exclude_m=exclude_m)
+    def clear_start_hole(self, start_xy, exclude_m=0.20):
+        """Free only the chassis cell so D* can start; do not punch a bumper-sized hole."""
+        cell = float(self._res) if self._res else 0.05
+        self.clear_goal_hole(start_xy, exclude_m=max(float(exclude_m), cell * 0.51))
 
     def _block_obstacles(self, trav, obstacles, rmin, cmin):
         """Mark each (x, y, radius) disc from extra_obstacles as not traversable in trav."""

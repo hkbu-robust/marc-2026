@@ -45,6 +45,38 @@ def search_area_approach_goal(hint_center_xy, hint_radius_m, pose_xy) -> tuple:
     return (px + dx * scale, py + dy * scale)
 
 
+HINT_JUMP_M = 0.50
+
+
+def snapshot_approach_goal(
+    prev,
+    hint_center_xy,
+    hint_radius_m,
+    pose_xy,
+    jump_m: float = HINT_JUMP_M,
+):
+    """Keep the first approach XY until the reveal hint jumps, not when the robot moves.
+
+    ``prev`` is ``(center_xy, radius, goal_xy)`` or None. Returns the same triple,
+    or None when the hint is missing.
+    """
+    center = _xy(hint_center_xy)
+    if center is None:
+        return None
+    radius = float(hint_radius_m or 0.0)
+    if prev is not None:
+        prev_center, prev_radius, _prev_goal = prev
+        jumped = math.hypot(
+            center[0] - float(prev_center[0]),
+            center[1] - float(prev_center[1]),
+        ) > float(jump_m)
+        radius_changed = abs(radius - float(prev_radius)) > 0.05
+        if not jumped and not radius_changed:
+            return prev
+    goal = search_area_approach_goal(center, radius, pose_xy)
+    return (center, radius, goal)
+
+
 @dataclass
 class RetrievalState:
     owner_xy: Optional[tuple] = None

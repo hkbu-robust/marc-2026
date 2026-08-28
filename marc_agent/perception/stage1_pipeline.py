@@ -27,6 +27,7 @@ from marc_agent.perception.cctv_yolo import detector_can_emit, refine_detection_
 from marc_agent.perception.camera_gate import apply_camera_gate
 from marc_agent.perception.object_selection import (
     ObjectSelection,
+    occupancy_lookup,
     rank_object_candidates,
     select_object_candidate,
 )
@@ -262,6 +263,16 @@ def _now_s(client) -> float:
     return time.monotonic()
 
 
+def _client_occupancy(client):
+    getter = getattr(client, "get_occupancy_map", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter()
+    except Exception:
+        return None
+
+
 def _default_timeout_s(verifier) -> Optional[float]:
     config = getattr(verifier, "config", None)
     timeout = getattr(config, "timeout_s", None)
@@ -411,6 +422,7 @@ def run_stage1_candidate_pipeline(
             command_text=command_text,
             verifier=selected_verifier,
             projector=projector,
+            occupancy_at=occupancy_lookup(_client_occupancy(client)),
         )
         if object_selection is None:
             failure_reason = "object_selection:no_match"
