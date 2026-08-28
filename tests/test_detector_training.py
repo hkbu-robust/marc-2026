@@ -105,6 +105,10 @@ class DetectorDatasetTests(unittest.TestCase):
                 "4 0.5 0.5 0.1 0.1",
                 next((root / "processed" / "labels" / "train").glob("*.txt")).read_text().strip(),
             )
+            self.assertEqual(
+                {f"rig_{camera_id}_a": 1 for camera_id in range(1, 7)},
+                stats["class_cameras"]["train"]["umbrella"],
+            )
 
     def test_refuses_to_write_inside_raw_dataset(self):
         with tempfile.TemporaryDirectory() as temp:
