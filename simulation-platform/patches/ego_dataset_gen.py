@@ -19,11 +19,13 @@
 #   EGO_BEARING_DEG     object azimuth half-FOV deg (default 50)
 #   EGO_ROBOT_XY        robot wander radius around start_point m (default 4)
 #   EGO_YAW_SPAN        robot yaw randomisation deg (default 360 = full turn)
-#   EGO_SKIP_CLASSES    comma names to drop (default long_umbrella)
-#   EGO_EMPTY_FRAC      fraction of empty (negative) scenes (default 0.05)
+#   EGO_SKIP_CLASSES    spawn drop list (default long_umbrella,master_chef_can,wood_block)
+#   EGO_FORCE_CLASSES   spawn-bias classes (default umbrella); does not change label ids
+#   EGO_FORCE_FRAC      fraction of extra slots that stay forced (default 0.85)
+#   EGO_EMPTY_FRAC      empty scenes (default 0 when force is set, else 0.05)
 #   EGO_VAL_FRAC        validation fraction (default 0.2)
-#   EGO_OUT             output root (default trainer_output/ego_yolo)
-#   MARC_MANIP_OBJECT   lock to one class (optional; bypasses skip list)
+#   EGO_OUT             output root (default trainer_output/ego_yolo; not marc2026_*)
+#   MARC_MANIP_OBJECT   extra force-class alias (spawn only; never replaces data.yaml)
 #   HEADLESS            default true for this service
 #
 import os
@@ -34,7 +36,25 @@ import logging
 import traceback
 import re
 
+_PATCH_DIR = os.path.dirname(os.path.abspath(__file__))
+if _PATCH_DIR not in sys.path:
+    sys.path.insert(0, _PATCH_DIR)
 sys.path.insert(0, "/metacom2026/simulation_app/marc2026")
+
+from ego_dataset_plan import (
+    assert_ego_out,
+    empty_frac as plan_empty_frac,
+    force_classes,
+    force_frac,
+    label_names,
+    plan_scene_classes,
+    resolve_out_dir,
+    skip_classes,
+    spawn_types,
+)
+
+# Fail before Isaac if someone pointed EGO_OUT at a CCTV scenario dump.
+assert_ego_out(resolve_out_dir())
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -132,16 +152,11 @@ class EgoScene:
         self._fdir_cache = None
         self._link_cache = None
         self._art = None
-        skip = _skip_classes()
-        all_types = [
+        catalog = [
             t for t in cfg.get_supported_object_types()
-            if not cfg.is_person_type(t) and not _is_skipped(t, skip)
+            if not cfg.is_person_type(t)
         ]
-        fixed = os.environ.get("MARC_MANIP_OBJECT")
-        if fixed:
-            self.object_types = [fixed]
-        else:
-            self.object_types = all_types
+        self.object_types = spawn_types(catalog)
         if not self.object_types:
             raise RuntimeError("no graspable object types in config")
 
@@ -300,34 +315,11 @@ log.setLevel(logging.INFO)
 log.addHandler(_log_handler)
 log.propagate = False
 
-# Keep class ids stable and aligned with the CCTV / approach object list.
-# Long umbrellas are skipped: thin silhouettes dominate the frame. Ordinary
-# umbrella, master_chef_can, and wood_block are kept. Override via EGO_SKIP_CLASSES.
-CANONICAL_NAMES = [
-    "tumbler", "cracker_box", "cola_can", "disposable_cup",
-    "juice", "tissue", "mug", "sunblock", "pencilcase",
-    "master_chef_can", "wood_block", "umbrella",
-]
-DEFAULT_SKIP = ("long_umbrella",)
-
 CAM_W, CAM_H = 640, 480
 MIN_BOX_PX = 8
 # Object azimuth bins as a fraction of EGO_BEARING_DEG, so boxes land left /
 # center / right of the image instead of clustering on the optical axis.
 _BEARING_BINS = (-0.9, -0.55, -0.25, 0.0, 0.25, 0.55, 0.9)
-
-
-def _skip_classes():
-    raw = os.environ.get("EGO_SKIP_CLASSES")
-    names = raw.split(",") if raw else list(DEFAULT_SKIP)
-    skip = {n.strip().lower() for n in names if n.strip()}
-    if "long_umbrella" in skip or "closedlongumbrella" in skip:
-        skip.update(("long_umbrella", "closedlongumbrella"))
-    return skip
-
-
-def _is_skipped(name, skip):
-    return str(name or "").lower() in skip
 
 
 def _env_int(name, default):
@@ -342,67 +334,6 @@ def _env_float(name, default):
         return float(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
-
-
-def _build_names(object_types):
-    names = []
-    for n in CANONICAL_NAMES:
-        if n in object_types and n not in names:
-            names.append(n)
-    for n in object_types:
-        if n not in names:
-            names.append(n)
-    return names
-
-
-def _plan_scene_classes(rng, names, n_scenes, obj_min, obj_max, empty_frac):
-    """Per-scene class lists: every name appears at least once; extras are shuffled.
-
-    Empty (negative) scenes are kept only if remaining content scenes can
-    still cover the catalogue. obj_max may be exceeded if that is the only
-    way to fit every class.
-    """
-    n_cls = len(names)
-    n_empty = int(round(n_scenes * empty_frac)) if names else int(round(n_scenes * empty_frac))
-    if n_cls:
-        n_empty = min(n_empty, max(0, n_scenes - math.ceil(n_cls / max(1, obj_max))))
-    empty_idx = set(rng.sample(range(n_scenes), n_empty)) if n_empty else set()
-    content = [i for i in range(n_scenes) if i not in empty_idx]
-    if not content:
-        return [[] for _ in range(n_scenes)]
-    cap = max(1, obj_max)
-    counts = [max(0, obj_min)] * len(content)
-    need = max(0, n_cls - sum(counts))
-    for i in range(len(content)):
-        while need > 0 and counts[i] < cap:
-            counts[i] += 1
-            need -= 1
-    i = 0
-    while need > 0:
-        counts[i % len(content)] += 1
-        need -= 1
-        i += 1
-    for i in range(len(content)):
-        room = cap - counts[i]
-        if room > 0:
-            counts[i] += rng.randint(0, room)
-    n_slots = sum(counts)
-    bag = []
-    if names:
-        must = list(names)
-        rng.shuffle(must)
-        bag.extend(must)
-        while len(bag) < n_slots:
-            extra = list(names)
-            rng.shuffle(extra)
-            bag.extend(extra)
-        bag = bag[:n_slots]
-        rng.shuffle(bag)
-    plan = [[] for _ in range(n_scenes)]
-    it = iter(bag)
-    for scene_i, n_obj in zip(content, counts):
-        plan[scene_i] = [next(it) for _ in range(n_obj)]
-    return plan
 
 
 def _sample_yaw(rng, base_yaw, span):
@@ -614,13 +545,15 @@ def main():
     bearing_deg = max(5.0, _env_float("EGO_BEARING_DEG", 50.0))
     robot_xy_r = max(0.0, _env_float("EGO_ROBOT_XY", 4.0))
     yaw_span = max(0.0, _env_float("EGO_YAW_SPAN", 360.0))
-    empty_frac = min(1.0, max(0.0, _env_float("EGO_EMPTY_FRAC", 0.05)))
+    empty_frac = plan_empty_frac()
     val_frac = min(0.5, max(0.05, _env_float("EGO_VAL_FRAC", 0.2)))
-    out_dir = os.environ.get(
-        "EGO_OUT",
-        os.path.join(os.environ.get("MARC_TRAINER_DIR") or "/metacom2026/trainer_output",
-                     "ego_yolo"),
-    )
+    out_dir = resolve_out_dir()
+    try:
+        assert_ego_out(out_dir)
+    except SystemExit as e:
+        print(e, flush=True)
+        simulation_app.close()
+        return 1
     start_idx = _next_image_index(out_dir)
     rng = random.Random(seed + start_idx)
     val_period = max(2, int(round(1.0 / val_frac)))
@@ -687,13 +620,19 @@ def main():
         return 1
     log.info(f"GT camera: {cam_path}")
 
-    names = _build_names(env.object_types)
+    names = label_names()
+    spawn_names = list(env.object_types)
     os.makedirs(out_dir, exist_ok=True)
     yaml_path = _write_data_yaml(out_dir, names)
     log.info(f"classes ({len(names)}): {', '.join(names)}")
-    log.info(f"skip: {sorted(_skip_classes())}")
-    scene_classes = _plan_scene_classes(
-        rng, names, n_scenes, obj_min, obj_max, empty_frac)
+    log.info(f"spawn: {', '.join(spawn_names)}")
+    log.info(f"skip: {sorted(skip_classes())}")
+    log.info(f"force: {force_classes()}  frac={force_frac():.2f}  "
+             f"empty_frac={empty_frac:.2f}")
+    scene_classes = plan_scene_classes(
+        rng, spawn_names, n_scenes, obj_min, obj_max, empty_frac,
+        force=force_classes(), frac=force_frac(),
+    )
 
     missions = [{"id": "base_left", "_camera_prim_path": cam_path}]
     gt = GroundTruthGenerator(missions, out_dir, resolution=(CAM_W, CAM_H))
@@ -705,7 +644,7 @@ def main():
     n_ok = 0
     n_empty_ok = 0
     n_skip = 0
-    spawned_counts = {n: 0 for n in names}
+    spawned_counts = {n: 0 for n in spawn_names}
     labeled_counts = {n: 0 for n in names}
     idx = start_idx
     for i in range(n_scenes):
@@ -797,14 +736,20 @@ def main():
                  f"xy=({xy[0]:.2f},{xy[1]:.2f}) yaw={yaw:.0f}")
         idx += 1
 
-    missing_spawn = [n for n in names if spawned_counts[n] == 0]
-    missing_label = [n for n in names if labeled_counts[n] == 0]
-    spawn_s = " ".join(f"{n}={spawned_counts[n]}" for n in names)
+    spawn_s = " ".join(f"{n}={spawned_counts.get(n, 0)}" for n in spawn_names)
     label_s = " ".join(f"{n}={labeled_counts[n]}" for n in names)
     log.info(f"spawned: {spawn_s}")
     log.info(f"labeled: {label_s}")
-    if missing_spawn:
-        log.error(f"classes never spawned: {missing_spawn}")
+    forced = [n for n in force_classes() if n in spawn_names]
+    if forced:
+        missing_force = [n for n in forced if spawned_counts.get(n, 0) == 0]
+        if missing_force:
+            log.error(f"forced classes never spawned: {missing_force}")
+    else:
+        missing_spawn = [n for n in spawn_names if spawned_counts.get(n, 0) == 0]
+        if missing_spawn:
+            log.error(f"classes never spawned: {missing_spawn}")
+    missing_label = [n for n in spawn_names if labeled_counts.get(n, 0) == 0]
     if missing_label:
         log.warning(f"classes never labeled (spawned but no box?): {missing_label}")
     print(f"[ego-gen] done  kept={n_ok}/{n_scenes}  empty={n_empty_ok}  "

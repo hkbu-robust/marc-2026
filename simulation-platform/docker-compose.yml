@@ -240,9 +240,12 @@ services:
       EGO_BEARING_DEG: "${EGO_BEARING_DEG:-50}"
       EGO_ROBOT_XY: "${EGO_ROBOT_XY:-4}"
       EGO_YAW_SPAN: "${EGO_YAW_SPAN:-360}"
-      EGO_SKIP_CLASSES: "${EGO_SKIP_CLASSES:-long_umbrella}"
-      EGO_EMPTY_FRAC: "${EGO_EMPTY_FRAC:-0.05}"
+      EGO_SKIP_CLASSES: "${EGO_SKIP_CLASSES:-long_umbrella,master_chef_can,wood_block}"
+      EGO_FORCE_CLASSES: "${EGO_FORCE_CLASSES:-umbrella}"
+      EGO_FORCE_FRAC: "${EGO_FORCE_FRAC:-0.85}"
+      EGO_EMPTY_FRAC: "${EGO_EMPTY_FRAC:-0}"
       EGO_VAL_FRAC: "${EGO_VAL_FRAC:-0.2}"
+      # Always ego_yolo. The generator refuses trainer_output/marc2026_* CCTV dumps.
       EGO_OUT: "${EGO_OUT:-/metacom2026/trainer_output/ego_yolo}"
       EGO_SAVE_OVERLAY: "${EGO_SAVE_OVERLAY:-1}"
     command: ["/marc-patches/boot.py", "/marc-patches/ego_dataset_gen.py"]
