@@ -41,16 +41,16 @@ class CctvYoloTests(unittest.TestCase):
         payload = json.loads(STAGE1_CCTV_CONTRACT.read_text(encoding="utf-8"))
         self.assertEqual(1920, contract.imgsz)
         self.assertAlmostEqual(0.3, contract.confidence)
-        self.assertEqual(33, len(contract.ordered_classes))
+        self.assertEqual(34, len(contract.ordered_classes))
         self.assertIn("mug", contract.ordered_classes)
         self.assertIn("person_reclining", contract.ordered_classes)
         self.assertEqual(
-            ["master_chef_can", "wood_block", "umbrella", "long_umbrella"],
+            ["long_umbrella", "master_chef_can", "wood_block"],
             payload["ignored_classes"],
         )
         self.assertNotIn("master_chef_can", contract.ordered_classes)
         self.assertNotIn("wood_block", contract.ordered_classes)
-        self.assertNotIn("umbrella", contract.ordered_classes)
+        self.assertIn("umbrella", contract.ordered_classes)
 
     def test_runtime_contract_reads_confidence_from_env(self):
         with patch.dict(os.environ, {"MARC_CCTV_YOLO_CONF": "0.15"}):
@@ -135,7 +135,7 @@ class CctvYoloTests(unittest.TestCase):
                 item["confidence"],
                 tuple(item["xyxy"]),
             )
-            for item in payload["candidates"]
+            for item in payload["raw_global_candidates"]
         ]
         height, width = payload["image_shape"]
 
@@ -147,7 +147,7 @@ class CctvYoloTests(unittest.TestCase):
 
         self.assertEqual(len(detections), len(objects) + len(people))
         self.assertTrue(people)
-        self.assertTrue(all(item.camera_id == "rig_3_b" for item in people))
+        self.assertTrue(all(item.camera_id == payload["camera"] for item in people))
 
     def test_landmark_crop_maps_boxes_back_to_the_full_frame(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)

@@ -10,17 +10,18 @@ import os
 import re
 import subprocess
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import yaml
 
 
 CONFIG = Path(__file__).with_name("configs") / "stage1-cctv-yolo26x.yaml"
-SOURCE_DATA_SHA256 = "88dee1597d7a25d7b1dc23bc7814da3669ee28e750ccf22a42c15499eca1d66c"
+SOURCE_DATA_SHA256 = "a9277d45dfaeefa3aaec34f6cf82218c4b362dd7b19c06271f8dc6ff417b1f9a"
 SOURCE_MODEL_SHA256 = "9fdd44a31c504547ffb81d2c6d9e6dac3493c8eaa8b0398d3f43bae6c7003e92"
-SOURCE_DATA_REVISION = "075767315653d3286fb636e9f278397ae73d84c9"
-EXPECTED_COUNTS = {"images": {"train": 3733, "val": 415}, "boxes": {"train": 139505, "val": 15311}}
+SOURCE_DATA_REVISION = "ceccc62d27e7fc186fd186e66632da38aeac6668"
+EXPECTED_COUNTS = {"images": {"train": 3085, "val": 343}, "boxes": {"train": 122189, "val": 13485}}
+EXPECTED_IGNORED_CLASSES = ["long_umbrella", "master_chef_can", "wood_block"]
 ORGANIZER_EXCLUDED_CLASSES = frozenset({
     "long_umbrella", "closedlongumbrella",
     "master_chef_can", "wood_block",
@@ -121,7 +122,10 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_hash: bool =
         raise ValueError("derived class map must contain unique names")
 
     output_root.mkdir(parents=True, exist_ok=True)
-    stats = {"images": {}, "boxes": {}, "cameras": {}, "class_boxes": Counter()}
+    stats = {
+        "images": {}, "boxes": {}, "cameras": {}, "class_boxes": Counter(),
+        "class_cameras": {split: defaultdict(Counter) for split in ("train", "val")},
+    }
     scene_ids = {}
     for split in ("train", "val"):
         pairs = _pairs(source_root, split)
@@ -144,11 +148,14 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_hash: bool =
         label_dir.mkdir(parents=True, exist_ok=True)
         cameras, split_scenes, boxes = Counter(), set(), 0
         for image, label in pairs:
-            cameras[_camera(image.stem)] += 1
+            camera = _camera(image.stem)
+            cameras[camera] += 1
             split_scenes.add(image.stem.split("_rig_", 1)[0])
             count, class_counts = _remap_label(label, label_dir / label.name, id_map, len(names))
             boxes += count
             stats["class_boxes"].update(class_counts)
+            for class_id, class_count in class_counts.items():
+                stats["class_cameras"][split][class_id][camera] += class_count
         _pairs(output_root, split)
         stats["images"][split] = len(pairs)
         stats["boxes"][split] = boxes
@@ -158,8 +165,18 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_hash: bool =
         raise ValueError("train and validation scenes overlap")
     if set(stats["cameras"]["train"]) != set(stats["cameras"]["val"]) or len(stats["cameras"]["train"]) != 6:
         raise ValueError("all six cameras must occur in both splits")
-    if verify_hash and {key: stats[key] for key in ("images", "boxes")} != EXPECTED_COUNTS:
-        raise ValueError("source dataset counts do not match the pinned revision")
+    if verify_hash:
+        if {key: stats[key] for key in ("images", "boxes")} != EXPECTED_COUNTS:
+            raise ValueError("source dataset counts do not match the pinned revision")
+        if ignored != EXPECTED_IGNORED_CLASSES:
+            raise ValueError(f"unexpected organizer-excluded classes: {ignored}")
+        if "umbrella" not in names:
+            raise ValueError("ordinary umbrella is missing from the training map")
+        umbrella_id = names.index("umbrella")
+        for split in ("train", "val"):
+            coverage = stats["class_cameras"][split][umbrella_id]
+            if set(coverage) != set(stats["cameras"][split]) or not all(coverage.values()):
+                raise ValueError(f"ordinary umbrella does not cover all six {split} cameras")
 
     descriptor = {
         "train": "images/train",
@@ -171,6 +188,13 @@ def prepare_dataset(source_yaml: Path, output_yaml: Path, *, verify_hash: bool =
     }
     output_yaml.write_text(yaml.safe_dump(descriptor, sort_keys=False), encoding="utf-8")
     stats["class_boxes"] = {names[key]: stats["class_boxes"][key] for key in range(len(names))}
+    stats["class_cameras"] = {
+        split: {
+            names[key]: dict(sorted(stats["class_cameras"][split][key].items()))
+            for key in range(len(names))
+        }
+        for split in ("train", "val")
+    }
     stats["names"] = names
     stats["ignored_classes"] = ignored
     (output_root / "dataset_summary.json").write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")

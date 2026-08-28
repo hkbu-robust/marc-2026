@@ -1,20 +1,15 @@
 {
   "checkpoint": "model.pt",
-  "checkpoint_sha256": "8c6e69d3f8b9df6e06cba59c904f62489497037e930e9e94727d01bcde96a15a",
+  "checkpoint_sha256": "d799aacb8df1dce3372f5ec29495e7bb467898e453fc8d8fa32bdc7ecaff738e",
   "selected_training_checkpoint": {
-    "run": "stage1-cctv-yolo26x-1920-umbrella-ceccc62",
-    "name": "best.pt",
-    "sha256": "8c6e69d3f8b9df6e06cba59c904f62489497037e930e9e94727d01bcde96a15a",
-    "epoch": 92,
-    "validation": {
-      "images": 343,
-      "boxes": 13485,
-      "cameras": 6,
-      "precision": 0.96806,
-      "recall": 0.95277,
-      "map50": 0.97695,
-      "map50_95": 0.90205
-    }
+    "name": "last.pt",
+    "sha256": "12712d12e3321dffeb49296285a7d99f8fab12b46aa99a808b5d3cd1da80da22"
+  },
+  "dataset": {
+    "path": "/home/marc2026/marc-2026-work/datasets/processed/robust-stage1-yolo34-ceccc62/data.yaml",
+    "sha256": "957cd863ac5ecb9d991b434021e2182329c67c55924ae4851d5272bcee9f8e74",
+    "source_revision": "ceccc62d27e7fc186fd186e66632da38aeac6668",
+    "source_data_yaml_sha256": "a9277d45dfaeefa3aaec34f6cf82218c4b362dd7b19c06271f8dc6ff417b1f9a"
   },
   "ordered_classes": [
     "tumbler",
@@ -53,14 +48,14 @@
     "person_lying_down"
   ],
   "ignored_classes": [
+    "long_umbrella",
     "master_chef_can",
-    "wood_block",
-    "long_umbrella"
+    "wood_block"
   ],
   "preprocessing": {
-    "input": "full-frame PIL.Image RGB (NumPy callers must provide OpenCV BGR uint8 HWC)",
+    "input": "full-frame PIL.Image RGB or NumPy uint8 HWC RGB",
     "resize": "Ultralytics letterbox to imgsz=1920",
-    "internal": "BGR to RGB, HWC to CHW, FP16/FP32, divide by 255"
+    "coordinates": "pixel xyxy in the original image"
   },
   "inference": {
     "full_frame": true,
@@ -71,21 +66,15 @@
     "candidate_limit": 50,
     "quantize": "fp16"
   },
-  "local_checkpoint_load_verified": true,
-  "offline_bundle_load_verified": true,
-  "framework": {
-    "loader": "ultralytics.YOLO",
-    "ultralytics_distribution": "ultralytics-opencv-headless==8.4.118",
-    "torch": "2.13.0+cu130"
-  },
   "output": {
-    "type": "detections",
+    "type": "global detections",
     "fields": [
       "class_id",
       "class_name",
       "confidence",
       "xyxy"
-    ],
-    "coordinates": "pixel xyxy in the original image"
-  }
+    ]
+  },
+  "local_checkpoint_load_verified": true,
+  "offline_bundle_load_verified": true
 }

@@ -131,8 +131,9 @@ class RuntimeContract:
     weights: Path
     imgsz: int
     confidence: float
-    nms_iou: float
+    nms_iou: Optional[float]
     candidate_limit: int
+    end2end: bool
     use_fp16: bool
     ordered_classes: tuple[str, ...]
     ignored_classes: tuple[str, ...]
@@ -148,8 +149,12 @@ class RuntimeContract:
                 "MARC_CCTV_YOLO_CONF",
                 float(inference.get("confidence", 0.3)),
             ),
-            nms_iou=float(inference.get("nms_iou", 0.5)),
+            nms_iou=(
+                None if inference.get("nms_iou") is None
+                else float(inference.get("nms_iou", 0.5))
+            ),
             candidate_limit=int(inference.get("candidate_limit", 50)),
+            end2end=bool(inference.get("end2end", False)),
             use_fp16=str(inference.get("quantize", "")).lower() == "fp16",
             ordered_classes=tuple(payload.get("ordered_classes") or ()),
             ignored_classes=tuple(payload.get("ignored_classes") or ()),
@@ -245,7 +250,7 @@ class CctvYoloDetector:
             self.device,
             self.contract.imgsz,
             self.contract.confidence,
-            self.contract.nms_iou,
+            self.contract.nms_iou or 0.0,
             self.contract.candidate_limit,
         )
         logging.getLogger("matplotlib").setLevel(logging.WARNING)
@@ -253,6 +258,10 @@ class CctvYoloDetector:
         self.model = YOLO(str(self.contract.weights))
         raw_names = getattr(self.model, "names", None) or {}
         self.names = {int(k): str(v) for k, v in dict(raw_names).items()}
+        loaded_order = tuple(self.names[index] for index in sorted(self.names))
+        if loaded_order != self.contract.ordered_classes:
+            self.unload()
+            raise ValueError("CCTV checkpoint class order differs from runtime contract")
 
     def _predict_frame(
         self,
@@ -281,11 +290,13 @@ class CctvYoloDetector:
         predict_kwargs = {
             "verbose": False,
             "conf": float(self.contract.confidence if confidence is None else confidence),
-            "iou": self.contract.nms_iou,
             "imgsz": letterbox,
             "max_det": self.contract.candidate_limit,
             "device": self.device,
+            "end2end": self.contract.end2end,
         }
+        if self.contract.nms_iou is not None:
+            predict_kwargs["iou"] = self.contract.nms_iou
         if use_fp16:
             predict_kwargs["quantize"] = "fp16"
         results = self.model.predict(src, **predict_kwargs)
@@ -306,6 +317,7 @@ class CctvYoloDetector:
             cls_id = int(clss[i])
             class_name = self.names.get(cls_id, str(cls_id))
             out.append((class_name, float(confs[i]), (x1, y1, x2, y2)))
+        out.sort(key=lambda item: item[1], reverse=True)
         return out
 
     def detect(
