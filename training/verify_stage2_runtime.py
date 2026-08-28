@@ -60,7 +60,7 @@ def main() -> None:
             raise ValueError(f"candidate ranks are invalid for {target}")
         statuses[target] = {"status": result["status"], "candidates": len(candidates)}
 
-    unsupported = adapter.detect_candidates(rgb, "umbrella")
+    unsupported = adapter.detect_candidates(rgb, "long_umbrella")
     blank = adapter.detect_candidates(np.zeros_like(rgb), args.target)
     if unsupported["status"] != "unsupported_target" or unsupported["candidates"]:
         raise ValueError("unsupported target did not fail closed")

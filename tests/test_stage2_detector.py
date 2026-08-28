@@ -9,10 +9,10 @@ from pathlib import Path
 import yaml
 from PIL import Image
 
-from training.evaluate_cctv_detector import (
+from training.evaluate_stage2_detector import (
     _best_available,
     _frames,
-    _score_targeted,
+    _score,
     _select,
     _training_record,
 )
@@ -121,7 +121,7 @@ class Stage2DatasetTests(unittest.TestCase):
             for index in range(20)
         ]
         target = {"class_id": 0, "conf": 0.1, "xyxy": [24, 18, 40, 30]}
-        score = _score_targeted([frame], {"frame.png": [*distractors, target]}, ["target", "other"], 0.01, 1)
+        score = _score([frame], {"frame.png": [*distractors, target]}, ["target", "other"], 0.01, 1)
         self.assertEqual(1.0, score["classes"]["target"]["recall"])
         self.assertEqual("after exact-target filtering", score["candidate_limit_applied"])
 
@@ -131,8 +131,9 @@ class Stage2DatasetTests(unittest.TestCase):
             "labels": [(0, 0.5, 0.5, 40 / 640, 8 / 480)],
         }
         prediction = {"class_id": 0, "conf": 0.9, "xyxy": [300, 236, 340, 244]}
-        score = _score_targeted([frame], {"frame.png": [prediction]}, ["target"], 0.01, 20)
+        score = _score([frame], {"frame.png": [prediction]}, ["target"], 0.01, 20)
         self.assertEqual(1, score["sizes"]["tiny"]["gt"])
+        self.assertEqual(1, score["classes"]["target"]["by_size"]["tiny"]["gt"])
         self.assertNotIn("small", score["sizes"])
 
     def test_smoke_record_cannot_be_promoted(self):

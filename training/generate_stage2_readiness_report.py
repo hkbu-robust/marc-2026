@@ -8,13 +8,14 @@ import hashlib
 import html
 import json
 import shutil
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from training.evaluate_cctv_detector import _frames, _iou
+from training.evaluate_stage2_detector import _frames, _iou
 
 
 COLORS = {"match": "#27c47d", "false_candidate": "#ff5964", "miss": "#ffbd59"}
@@ -26,22 +27,26 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def _collect(checkpoint: Path, names: list[str], frames: list[dict], settings: dict) -> dict:
+def _collect(checkpoint: Path, names: list[str], frames: list[dict], settings: dict, *, allow_missing: bool = False) -> dict:
     from ultralytics import YOLO
 
     model = YOLO(checkpoint)
     model_names = dict(model.names)
     class_ids = {str(name): int(class_id) for class_id, name in model_names.items()}
     missing = [name for name in names if name not in class_ids]
-    if missing:
+    if missing and not allow_missing:
         raise ValueError(f"checkpoint lacks report classes: {missing}")
     output = {frame["image"].name: {} for frame in frames}
     paths = [str(frame["image"]) for frame in frames]
     for target in names:
+        if target not in class_ids:
+            for frame in frames:
+                output[frame["image"].name][target] = None
+            continue
         for offset in range(0, len(paths), 4):
             results = model.predict(
                 paths[offset:offset + 4], batch=4, device="0", imgsz=settings["imgsz"],
-                conf=0.001, iou=settings["nms_iou"], max_det=20,
+                conf=0.001, iou=settings["nms_iou"] or 0.7, max_det=20,
                 end2end=settings["end2end"], classes=[class_ids[target]],
                 quantize=settings["quantize"], verbose=False,
             )
@@ -71,7 +76,12 @@ def _gt(frame: dict, class_id: int) -> list[list[float]]:
     ]
 
 
-def _view(candidates: list[dict], gt: list[list[float]], confidence: float, limit: int) -> dict:
+def _view(candidates: list[dict] | None, gt: list[list[float]], confidence: float, limit: int) -> dict:
+    if candidates is None:
+        return {
+            "unsupported": True, "candidates": [], "matched": None,
+            "matched_gt": [], "false_candidates": None, "missed_gt": [],
+        }
     selected = sorted(
         (item for item in candidates if item["confidence"] >= confidence),
         key=lambda item: item["confidence"], reverse=True,
@@ -86,6 +96,7 @@ def _view(candidates: list[dict], gt: list[list[float]], confidence: float, limi
             unmatched.remove(index)
         rendered.append({**candidate, "rank": rank, "status": status, "iou": overlap})
     return {
+        "unsupported": False,
         "candidates": rendered,
         "matched": len(gt) - len(unmatched),
         "matched_gt": [gt[index] for index in range(len(gt)) if index not in unmatched],
@@ -94,7 +105,7 @@ def _view(candidates: list[dict], gt: list[list[float]], confidence: float, limi
     }
 
 
-def _records(names: list[str], frames: list[dict], stage1: dict, stage2: dict, settings: dict) -> list[dict]:
+def _records(names: list[str], frames: list[dict], baseline_stage2: dict, stage2: dict, settings: dict) -> list[dict]:
     records = []
     for frame in frames:
         for class_id, target in enumerate(names):
@@ -104,7 +115,7 @@ def _records(names: list[str], frames: list[dict], stage1: dict, stage2: dict, s
                 "target": target,
                 "class_id": class_id,
                 "gt": gt,
-                "stage1": _view(stage1[frame["image"].name][target], gt, settings["confidence"], settings["candidate_limit"]),
+                "baseline_stage2": _view(baseline_stage2[frame["image"].name][target], gt, settings["confidence"], settings["candidate_limit"]),
                 "stage2": _view(stage2[frame["image"].name][target], gt, settings["confidence"], settings["candidate_limit"]),
                 "stage2_low": _view(stage2[frame["image"].name][target], gt, LOW_CONFIDENCE, settings["candidate_limit"]),
             })
@@ -133,6 +144,13 @@ def _pick(records: list[dict], names: list[str]) -> tuple[list[dict], dict]:
             lambda item: (-item["stage2"]["false_candidates"], item["stage2"]["matched"],
                           max((box["confidence"] for box in item["stage2"]["candidates"]), default=0)),
         )
+    add("ordinary umbrella highlight", [
+        item for item in records if item["target"] == "umbrella" and item["gt"]
+    ], lambda item: (
+        any(_short_side(box) < 16 for box in item["gt"]),
+        bool(item["stage2"]["missed_gt"]) or bool(item["stage2"]["false_candidates"]),
+        -min(_short_side(box) for box in item["gt"]),
+    ))
     add("crowded tiny-object success", [
         item for item in records
         if any(_short_side(box) < 16 for box in item["stage2"]["matched_gt"])
@@ -159,25 +177,28 @@ def _pick(records: list[dict], names: list[str]) -> tuple[list[dict], dict]:
     add("clean success", [
         item for item in records if item["stage2"]["matched"] and not item["stage2"]["false_candidates"]
     ], lambda item: item["stage2"]["matched"])
-    add("Stage 2 improvement over Stage 1 seed", [
-        item for item in records if item["stage2"]["matched"] > item["stage1"]["matched"]
-    ], lambda item: item["stage2"]["matched"] - item["stage1"]["matched"])
-    add("Stage 2 regression versus Stage 1 seed", [
-        item for item in records if item["stage1"]["matched"] > item["stage2"]["matched"]
-    ], lambda item: item["stage1"]["matched"] - item["stage2"]["matched"])
+    add("improvement over previous Stage 2", [
+        item for item in records if not item["baseline_stage2"]["unsupported"]
+        and item["stage2"]["matched"] > item["baseline_stage2"]["matched"]
+    ], lambda item: item["stage2"]["matched"] - item["baseline_stage2"]["matched"])
+    add("regression versus previous Stage 2", [
+        item for item in records if not item["baseline_stage2"]["unsupported"]
+        and item["baseline_stage2"]["matched"] > item["stage2"]["matched"]
+    ], lambda item: item["baseline_stage2"]["matched"] - item["stage2"]["matched"])
     return list(selected.values()), rules
 
 
 def _pick_blind(records: list[dict], names: list[str], excluded_images: set[str]) -> tuple[list[dict], dict]:
     """Pick a disjoint per-class set, mixing risk-heavy and clean examples."""
-    samples, rules = [], {}
+    samples, rules, used_images = [], {}, set(excluded_images)
+    risk_count = len(names) // 2
     for index, name in enumerate(names):
         candidates = [
             item for item in records
             if item["target"] == name
-            and item["frame"]["image"].name not in excluded_images
+            and item["frame"]["image"].name not in used_images
         ]
-        if index < 5:
+        if index < risk_count:
             choice = max(candidates, key=lambda item: (
                 item["stage2"]["false_candidates"] + len(item["stage2"]["missed_gt"]),
                 len(item["gt"]),
@@ -189,6 +210,7 @@ def _pick_blind(records: list[dict], names: list[str], excluded_images: set[str]
             rule = "disjoint per-class clean-control card"
         choice = {**choice, "reasons": [f"{rule}: {name}"]}
         samples.append(choice)
+        used_images.add(choice["frame"]["image"].name)
         rules[name] = {"image": choice["frame"]["image"].name, "rule": rule}
     return samples, rules
 
@@ -214,6 +236,12 @@ def _truth(image: Image.Image, gt: list[list[float]]) -> Image.Image:
     return output
 
 
+def _unsupported(image: Image.Image) -> Image.Image:
+    output = image.copy()
+    ImageDraw.Draw(output).text((12, 12), "unsupported by previous nine-class Stage 2", fill=COLORS["miss"])
+    return output
+
+
 def _strip(panels: list[tuple[str, Image.Image]]) -> Image.Image:
     width, height = panels[0][1].size
     canvas = Image.new("RGB", (width * len(panels), height + 28), "#0c1424")
@@ -231,7 +259,11 @@ def _render_samples(samples: list[dict], assets: Path, settings: dict) -> list[d
         evidence_name = f"evidence-{index:02d}.jpg"
         _strip([
             ("Raw RGB", raw),
-            (f"Stage 1 seed @ {settings['confidence']:.2f}", _draw_boxes(raw, sample["stage1"]["candidates"])),
+            (
+                f"Previous Stage 2 @ {settings['confidence']:.2f}",
+                _unsupported(raw) if sample["baseline_stage2"]["unsupported"]
+                else _draw_boxes(raw, sample["baseline_stage2"]["candidates"]),
+            ),
             (f"Stage 2 selected @ {settings['confidence']:.2f}", _draw_boxes(raw, sample["stage2"]["candidates"])),
             (f"Stage 2 lower view @ {LOW_CONFIDENCE:.2f}", _draw_boxes(raw, sample["stage2_low"]["candidates"])),
             ("Processed ground truth", _truth(raw, sample["gt"])),
@@ -250,7 +282,10 @@ def _render_samples(samples: list[dict], assets: Path, settings: dict) -> list[d
             "target": sample["target"],
             "reasons": sample["reasons"],
             "ground_truth_xyxy": sample["gt"],
-            "stage1_candidates": sample["stage1"]["candidates"],
+            "baseline_stage2": {
+                "status": "unsupported" if sample["baseline_stage2"]["unsupported"] else "supported",
+                "candidates": sample["baseline_stage2"]["candidates"],
+            },
             "stage2_candidates": sample["stage2"]["candidates"],
             "stage2_low_candidates": sample["stage2_low"]["candidates"],
             "assets": {"evidence": evidence_name, "zoom": zoom_name},
@@ -301,9 +336,24 @@ def _html(report: dict, runtime: dict, manifest: list[dict], blind_manifest: lis
     operational = next(item for item in report["runtime_size_comparisons"] if item["imgsz"] == settings["imgsz"])
     selected_ap = next(item for item in report["ap"] if item["end2end"] == settings["end2end"])
     worst_name, worst = min(operational["classes"].items(), key=lambda item: item[1]["recall"])
-    screening_rows = [[Path(item["checkpoint"]).name, _metric(item["macro_f1"]), _metric(min(v["recall"] for v in item["classes"].values())), _metric(item["sizes"]["tiny"]["recall"]), "selected" if item["checkpoint"] == report["selection"]["checkpoint"] else ""] for item in report["screening"]]
+    screening_rows = [[
+        Path(item["checkpoint"]).name, _metric(item["macro_f1"]),
+        _metric(min(v["recall"] for v in item["classes"].values())),
+        _metric(item["sizes"]["tiny"]["recall"]),
+        "selected" if item["checkpoint"] == report["selection"]["checkpoint"]
+        else "; ".join(item.get("rejection_reasons", [])),
+    ] for item in report["screening"]]
     ap_by_name = {item["Class"]: item for item in selected_ap["classes"]}
     class_rows = [[name, _metric(values["precision"]), _metric(values["recall"]), _metric(values["f1"]), _metric(ap_by_name[name]["mAP50"]), _metric(ap_by_name[name]["mAP50-95"])] for name, values in operational["classes"].items()]
+    umbrella = report["umbrella_highlight"]
+    umbrella_sample = next(item for item in manifest if item["target"] == "umbrella" and "ordinary umbrella highlight" in item["reasons"])
+    umbrella_sizes = [[name, values["gt"], values["matched"], _metric(values["recall"])] for name, values in umbrella["by_size"].items()]
+    regressions = report["baseline_comparison"]
+    regression_rows = [[
+        name, _metric(values["baseline"]["recall"]), _metric(values["candidate"]["recall"]),
+        f"{100 * values['recall_delta']:+.2f} pp", "material" if values["material_regression"] else "no",
+    ] for name, values in regressions["per_class"].items()]
+    regression_rows.append(["umbrella", "unsupported", _metric(umbrella["recall"]), "n/a", "n/a"])
     size_rows = [[name, values["gt"], values["matched"], _metric(values["recall"]), operational["size_bucket_definitions"][name]] for name, values in operational["sizes"].items()]
     heads = []
     for end2end in (True, False):
@@ -319,13 +369,15 @@ def _html(report: dict, runtime: dict, manifest: list[dict], blind_manifest: lis
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Stage 2 provisional robot-view readiness</title><style>
 :root{{--bg:#09111f;--panel:#111d30;--ink:#e8f0fa;--muted:#9fb1c8;--cyan:#48cae4;--amber:#ffbd59;--green:#27c47d;--red:#ff5964}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,sans-serif}}main{{max-width:1240px;margin:auto;padding:28px}}h1,h2,h3{{line-height:1.15}}h2{{margin-top:48px;border-bottom:1px solid #29405e;padding-bottom:8px}}.banner{{border:2px solid var(--amber);background:#2a210e;padding:14px;border-radius:10px;font-weight:800}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}}.metric,.sample,.blind-card,.flow{{background:var(--panel);border:1px solid #263a55;border-radius:12px;padding:16px}}.metric b{{display:block;font-size:24px;color:var(--cyan)}}.flow{{font-size:18px;text-align:center;color:var(--cyan)}}img{{display:block;width:100%;height:auto;border-radius:8px}}.zoom{{max-width:384px}}.table-wrap{{overflow:auto}}table{{border-collapse:collapse;width:100%;background:var(--panel)}}th,td{{padding:8px 10px;border-bottom:1px solid #263a55;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}.sample,.blind-card{{margin:14px 0}}.review-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin:12px 0}}label{{display:grid;gap:4px;color:var(--muted)}}select,textarea,button{{background:#0a1424;color:var(--ink);border:1px solid #3a5578;border-radius:6px;padding:8px}}textarea{{min-height:70px}}button{{cursor:pointer;margin-right:8px}}.warning{{color:var(--amber)}}.pending{{color:var(--red);font-weight:800}}code{{color:var(--cyan)}}details{{margin-top:10px}}@media(max-width:700px){{main{{padding:14px}}}}
 </style></head><body><main>
-<div class='banner'>PROVISIONAL ROBOT-VIEW READINESS · nine classes only · human review pending</div>
+<div class='banner'>PROVISIONAL TEN-CLASS REPLACEMENT · ordinary umbrella supported and measured · human review pending</div>
 <h1>Stage 2 near-field detector readiness</h1><p>Selected <code>{html.escape(selected_name)}</code>, {head_name}, confidence {settings['confidence']:.2f}, NMS IoU {nms_text}, top {settings['candidate_limit']}, {settings['imgsz']} px, {str(settings['quantize']).upper()}. The same validation split selected and reports this model.</p>
 <div class='cards'><div class='metric'><span>Macro F1</span><b>{_metric(operational['macro_f1'])}</b></div><div class='metric'><span>Worst recall · {html.escape(worst_name)}</span><b>{_metric(worst['recall'])}</b></div><div class='metric'><span>Tiny recall</span><b>{_metric(operational['sizes']['tiny']['recall'])}</b></div><div class='metric'><span>Overall recall</span><b>{_metric(operational['recall'])}</b></div><div class='metric'><span>Warm batch-1 mean</span><b>{runtime['benchmark']['mean_ms']:.2f} ms</b></div><div class='metric'><span>Peak CUDA allocated</span><b>{runtime['benchmark']['peak_allocated_gib']:.3f} GiB</b></div></div>
 <h2>Runtime path</h2><div class='flow'>chassis RGB → exact requested class → confidence-descending candidates → reveal-disc localization → depth/approach candidate</div><p>Errors and unsupported targets fail immediately; only <code>not_detected</code> may continue scanning.</p>
 <h2>Training and selected-head diagnostics</h2><div class='cards'><img src='{assets_rel}/training-results.png' alt='Training curves'><img src='{assets_rel}/BoxPR_curve.png' alt='Selected checkpoint PR curve'><img src='{assets_rel}/BoxF1_curve.png' alt='Selected checkpoint F1 curve'></div>
 <h2>Saved-checkpoint ranking</h2>{_table(['checkpoint','macro F1','worst recall','tiny recall','decision'],screening_rows)}
 <h2>Per-class result</h2>{_table(['class','precision','recall','F1','AP50','AP50–95'],class_rows)}
+<h2>Ordinary umbrella</h2><div class='cards'><div class='metric'><span>Validation GT</span><b>{umbrella['gt']}</b></div><div class='metric'><span>Precision</span><b>{_metric(umbrella['precision'])}</b></div><div class='metric'><span>Recall</span><b>{_metric(umbrella['recall'])}</b></div><div class='metric'><span>F1</span><b>{_metric(umbrella['f1'])}</b></div><div class='metric'><span>AP50 / AP50–95</span><b>{_metric(umbrella['ap50'])} / {_metric(umbrella['ap50_95'])}</b></div><div class='metric'><span>Misses / false candidates</span><b>{umbrella['misses']} / {umbrella['false_candidates']}</b></div></div>{_table(['size','GT','matched','recall'],umbrella_sizes)}<article class='sample'><h3>Rule-selected umbrella evidence</h3><p><b>umbrella</b> · {html.escape(umbrella_sample['image'])}</p><img src='{assets_rel}/{umbrella_sample['assets']['evidence']}' alt='Ordinary umbrella comparison'>{f'''<details><summary>Enlarged native-pixel target crop</summary><img class='zoom' src='{assets_rel}/{umbrella_sample['assets']['zoom']}' alt='Enlarged umbrella crop'></details>''' if umbrella_sample['assets']['zoom'] else ''}</article>
+<h2>Previous Stage 2 regression guard</h2><p>The previous nine-class checkpoint is compared on the same revised validation frames and fixed selected settings. A material flag means recall or F1 fell by more than {100 * regressions['material_regression_threshold']:.0f} percentage points. Ordinary umbrella was unsupported by the baseline and is not counted as a miss.</p>{_table(['class','previous recall','new recall','delta','material regression'],regression_rows)}
 <h2>Selected-checkpoint confusion matrices</h2><div class='cards'><img src='{assets_rel}/confusion_matrix.png' alt='Raw confusion matrix'><img src='{assets_rel}/confusion_matrix_normalized.png' alt='Normalized confusion matrix'></div><p>These plots were regenerated from the selected <code>{html.escape(selected_name)}</code> {head_name} head, not reused from the trainer-final checkpoint.</p>
 <h2>Native-pixel size recall</h2>{_table(['bucket','GT','matched','recall','definition'],size_rows)}
 <h2>Equal-budget head comparison</h2>{_table(['head','NMS IoU','macro F1','overall recall','false candidates'],heads)}
@@ -334,11 +386,11 @@ def _html(report: dict, runtime: dict, manifest: list[dict], blind_manifest: lis
 <h2>Exact-target recall by candidate budget</h2>{_table(['budget','overall recall','macro F1','false candidates'],recall_rows)}
 <h2>Absent-target and empty-label evidence</h2><p>{operational['target_requests']['absent']:,} exact-target requests had that target absent from processed labels; {operational['target_requests']['absent_with_candidates']} returned candidates ({operational['target_requests']['false_candidates_when_absent']} unmatched under IoU≥0.5). Across {operational['empty_label_frames']['frames']} empty processed-label frames, the selected run produced {operational['empty_label_frames']['false_candidates']} unmatched candidates. This does not establish physical absence or intentional-negative status.</p>
 <h2>Exact before/after and failure evidence</h2><p>Every strip uses the same frame, requested class, {settings['imgsz']} px, NMS IoU {nms_text} and top-{settings['candidate_limit']} budget. Green is IoU≥0.5 match, red is unmatched candidate, amber is processed ground truth. The {LOW_CONFIDENCE:.2f} panel is explanatory only; {settings['confidence']:.2f} remains selected.</p>{evidence}
-<h2>Blind target-conditioned review</h2><p class='pending' id='progress'>Human review pending: 0 / {len(blind_manifest)}</p><p>This disjoint set is not shown in the evidence section: five class cards are risk-oriented and four are clean controls. Prediction cards do not expose ground truth until opened. Review cannot change the numeric checkpoint selection, but may veto readiness.</p>{blind}<p><button id='export'>Export review JSON</button><button id='clear'>Clear local review</button></p>
+<h2>Blind target-conditioned review</h2><p class='pending' id='progress'>Human review pending: 0 / {len(blind_manifest)}</p><p>This frame-disjoint set is not shown in the evidence section: {len(blind_manifest) // 2} class cards are risk-oriented and {len(blind_manifest) - len(blind_manifest) // 2} are clean controls. Prediction cards do not expose ground truth until opened. Review cannot change the numeric checkpoint selection, but may veto readiness.</p>{blind}<p><button id='export'>Export review JSON</button><button id='clear'>Clear local review</button></p>
 <h2>Traceability</h2><p>Selected training SHA-256: <code>{selected_sha}</code>. Deployment SHA-256: <code>{runtime['weights_sha256']}</code>. Evaluator SHA-256: <code>{report['evaluator']['sha256']}</code>. Numeric inputs: <code>readiness_metrics.json</code>; sample decisions and boxes: <code>sample_manifest.json</code>. Report selection rules: <code>{html.escape(json.dumps(rules, sort_keys=True))}</code>.</p>
-<h2>Final verdict</h2><p><b>Numeric gate: provisional pass.</b> Checkpoint selection and real-interface runtime verification completed. <span class='pending'>Human blind review is still pending, so integration approval is not complete.</span></p><ul>{limitations}</ul><p class='warning'>Do not commit, publish, merge, or claim final challenge readiness until Luka completes the blind review and approves the provisional bundle.</p>
+<h2>Final verdict</h2><p><b>Numeric gate: provisional pass.</b> Ordinary umbrella is supported and measured; checkpoint selection and real-interface runtime verification completed. <span class='pending'>Human blind review is still pending.</span></p><ul>{limitations}</ul><p class='warning'>This validation-only report does not close issue #16 or establish final challenge readiness.</p>
 <script>
-const key='marc-stage2-readiness-review-v1', cards=[...document.querySelectorAll('.blind-card')];
+const key='marc-stage2-readiness-review-v2', cards=[...document.querySelectorAll('.blind-card')];
 function data(){{const out={{}};for(const card of cards){{out[card.dataset.card]={{}};for(const field of card.querySelectorAll('[name]'))out[card.dataset.card][field.name]=field.value;}}return out}}
 function save(){{localStorage.setItem(key,JSON.stringify(data()));const done=cards.filter(c=>c.querySelector('[name=overall]').value).length;document.querySelector('#progress').textContent=`Human review ${{done===cards.length?'complete':'pending'}}: ${{done}} / ${{cards.length}}`;}}
 const stored=JSON.parse(localStorage.getItem(key)||'{{}}');for(const card of cards)for(const field of card.querySelectorAll('[name]'))field.value=stored[card.dataset.card]?.[field.name]||'';document.addEventListener('input',save);document.addEventListener('change',save);save();
@@ -352,7 +404,7 @@ def main() -> None:
     parser.add_argument("--evaluation", required=True, type=Path)
     parser.add_argument("--runtime-verification", required=True, type=Path)
     parser.add_argument("--data", required=True, type=Path)
-    parser.add_argument("--stage1", required=True, type=Path)
+    parser.add_argument("--baseline-stage2", required=True, type=Path)
     parser.add_argument("--stage2", required=True, type=Path)
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -362,15 +414,17 @@ def main() -> None:
     runtime = json.loads(args.runtime_verification.read_text(encoding="utf-8"))
     names, frames = _frames(args.data)
     settings = report["selection"]["runtime"]
-    stage1 = _collect(args.stage1, names, frames, settings)
+    baseline_stage2 = _collect(args.baseline_stage2, names, frames, settings, allow_missing=True)
     stage2 = _collect(args.stage2, names, frames, settings)
-    records = _records(names, frames, stage1, stage2, settings)
+    records = _records(names, frames, baseline_stage2, stage2, settings)
     samples, rules = _pick(records, names)
     excluded_images = {item["frame"]["image"].name for item in samples}
     blind_samples, blind_rules = _pick_blind(records, names, excluded_images)
 
     assets = args.output_dir / "assets" / "stage2-nearfield-detector-readiness"
     assets.mkdir(parents=True, exist_ok=True)
+    evaluator_path = Path(report["evaluator"]["path"])
+    shutil.copy2(evaluator_path, assets / f"evaluator-{report['evaluator']['sha256'][:12]}.py")
     for pattern in ("evidence-*.jpg", "blind-*.jpg"):
         for stale in assets.glob(pattern):
             stale.unlink()
@@ -389,7 +443,7 @@ def main() -> None:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "evidence_selection_rules": rules,
         "blind_selection_rules": blind_rules,
-        "stage1": {"path": str(args.stage1.resolve()), "sha256": _sha256(args.stage1)},
+        "baseline_stage2": {"path": str(args.baseline_stage2.resolve()), "sha256": _sha256(args.baseline_stage2)},
         "stage2": {"path": str(args.stage2.resolve()), "sha256": _sha256(args.stage2)},
         "settings": settings,
         "iou_match_threshold": 0.5,
@@ -406,9 +460,13 @@ def main() -> None:
         "comparisons": report["comparisons"],
         "runtime_size_comparisons": report["runtime_size_comparisons"],
         "target_conditioned_recall_at": report["target_conditioned_recall_at"],
+        "umbrella_highlight": report["umbrella_highlight"],
+        "baseline_comparison": report["baseline_comparison"],
         "runtime_verification": runtime,
         "evaluator": report["evaluator"],
-        "report_generator": {"path": str(Path(__file__).resolve()), "sha256": _sha256(Path(__file__))},
+        "report_generator": {
+            "path": str(Path(__file__).resolve()), "sha256": _sha256(Path(__file__)), "argv": sys.argv,
+        },
         "sample_manifest": "sample_manifest.json",
         "human_review": {"status": "pending", "artifact": None, "instructions": "Complete the browser review and export JSON."},
         "known_limitations": report["known_limitations"],

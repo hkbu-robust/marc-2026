@@ -1,9 +1,9 @@
 {
   "verified": true,
   "offline": true,
-  "weights": "/home/marc2026/marc-2026-robust/models/runtime/stage2-nearfield-detector/model.pt",
-  "weights_sha256": "3092b0c64f5d543f20a8dd6fa0bc9ce645298be9b36722dc39f7878e4ee58232",
-  "image": "/home/marc2026/marc-2026-work/datasets/processed/robust-roboview-yolo9-provisional-6723cca/images/val/00450.png",
+  "weights": "/home/marc2026/marc-2026-work/candidates/stage2-nearfield-detector-umbrella-e52c3156/model.pt",
+  "weights_sha256": "ff8e156b65ee556e2eae31a5fee94f8a3056d9dc92c771c1be48762cea7f6cc7",
+  "image": "/home/marc2026/ahmad-marc-robust/datasets/processed/robust-nearfield-yolo10-e52c3156/images/val/00450.png",
   "target": "tumbler",
   "runtime_path": "YoloDetector -> YoloTracker.detect_candidates -> NearFieldAcquire candidate/radius selection",
   "ordered_classes": [
@@ -15,11 +15,12 @@
     "tissue",
     "mug",
     "sunblock",
-    "pencilcase"
+    "pencilcase",
+    "umbrella"
   ],
   "settings": {
     "imgsz": 1920,
-    "confidence": 0.3,
+    "confidence": 0.2,
     "nms_iou": 0.5,
     "end2end": false,
     "candidate_limit": 10,
@@ -72,6 +73,10 @@
       "pencilcase": {
         "status": "not_detected",
         "candidates": 0
+      },
+      "umbrella": {
+        "status": "not_detected",
+        "candidates": 0
       }
     }
   },
@@ -86,11 +91,11 @@
       {
         "xyxy": [
           629.3333740234375,
-          152.0,
+          152.1666717529297,
           640.0,
-          160.33334350585938
+          160.1666717529297
         ],
-        "confidence": 0.73388671875,
+        "confidence": 0.25830078125,
         "class_id": 0,
         "class_name": "tumbler",
         "rank": 1
@@ -100,10 +105,10 @@
   "benchmark": {
     "warmup_iterations": 5,
     "timed_iterations": 30,
-    "mean_ms": 19.496014869461458,
-    "median_ms": 19.48991371318698,
-    "p95_ms": 19.711334258317947,
-    "peak_allocated_gib": 0.5912961959838867,
+    "mean_ms": 19.165412500418217,
+    "median_ms": 19.163237000611844,
+    "p95_ms": 19.23789700231282,
+    "peak_allocated_gib": 0.5912990570068359,
     "peak_reserved_gib": 1.125
   },
   "machine": {

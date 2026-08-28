@@ -1,10 +1,10 @@
 {
   "status": "provisional",
   "checkpoint": "model.pt",
-  "checkpoint_sha256": "3092b0c64f5d543f20a8dd6fa0bc9ce645298be9b36722dc39f7878e4ee58232",
+  "checkpoint_sha256": "ff8e156b65ee556e2eae31a5fee94f8a3056d9dc92c771c1be48762cea7f6cc7",
   "selected_training_checkpoint": {
-    "name": "epoch40.pt",
-    "sha256": "931e1824a4cf08cb5865f112d9405e83b936d14616d067aace5c98b78488d146"
+    "name": "best.pt",
+    "sha256": "1f8fe71bd25b1132cd1285e27998411741e725764502ed50b63adef0c3120d78"
   },
   "ordered_classes": [
     "tumbler",
@@ -15,7 +15,8 @@
     "tissue",
     "mug",
     "sunblock",
-    "pencilcase"
+    "pencilcase",
+    "umbrella"
   ],
   "preprocessing": {
     "input": "full-frame PIL.Image RGB or NumPy uint8 HWC RGB",
@@ -27,7 +28,7 @@
     "imgsz": 1920,
     "end2end": false,
     "nms_iou": 0.5,
-    "confidence": 0.3,
+    "confidence": 0.2,
     "candidate_limit": 10,
     "quantize": "fp16"
   },
@@ -39,10 +40,10 @@
     "batch": 1,
     "warmup_iterations": 5,
     "timed_iterations": 30,
-    "mean_ms": 19.496014869461458,
-    "median_ms": 19.48991371318698,
-    "p95_ms": 19.711334258317947,
-    "peak_allocated_gib": 0.5912961959838867,
+    "mean_ms": 19.165412500418217,
+    "median_ms": 19.163237000611844,
+    "p95_ms": 19.23789700231282,
+    "peak_allocated_gib": 0.5912990570068359,
     "peak_reserved_gib": 1.125
   },
   "output": {
@@ -53,11 +54,11 @@
     "maximum_candidates": 10
   },
   "known_limitations": [
-    "Ordinary umbrella is absent; this provisional dataset covers nine of ten scored classes.",
-    "No independent test split exists.",
-    "No reliable scenario, range, or bearing manifest exists.",
+    "No test split exists; validation must not be represented as final readiness evidence.",
+    "Train and validation share scenario/background families, so the split is weak.",
+    "Empty-label intent metadata is absent, so intentional negatives cannot be separated from unknown empties.",
     "The same validation split is used for model selection and readiness reporting.",
-    "This is a provisional nine-class integration model, not final challenge-readiness evidence.",
-    "Empty-label intent metadata is absent; empty-label frames are not known intentional negatives."
+    "Human blind review is pending.",
+    "This ten-class replacement candidate does not close issue #16 or establish final challenge readiness."
   ]
 }
