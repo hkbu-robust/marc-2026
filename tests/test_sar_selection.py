@@ -48,8 +48,8 @@ def _round() -> CctvDetectionRound:
             )
         ],
         people=[
-            _person("rig_a:person:0", "person_walking", (30.0, 80.0, 130.0, 400.0)),
-            _person("rig_a:person:1", "person_bending", (315.0, 100.0, 405.0, 390.0)),
+            _person("rig_a:person_walking:0", "person_walking", (30.0, 80.0, 130.0, 400.0)),
+            _person("rig_a:person_bending:0", "person_bending", (315.0, 100.0, 405.0, 390.0)),
         ],
         frames={
             "rig_a": CctvFrame("rig_a", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8))
@@ -69,21 +69,22 @@ class SarSelectionTests(unittest.TestCase):
 
     def test_board_keeps_every_person_and_requested_anchor(self):
         board = build_candidate_board(self.text, self.command, _round())
-        self.assertEqual(("rig_a:person:1", "rig_a:person:0"), board.candidate_ids)
+        self.assertEqual(("rig_a:person_bending:0", "rig_a:person_walking:0"), board.candidate_ids)
         self.assertEqual(3, len(board.images))
         self.assertIn("rig_a:trash_can:0", board.prompt)
         self.assertIn(self.text, board.prompt)
 
-    def test_board_limits_crops_but_keeps_every_candidate(self):
+    def test_board_limits_prompt_to_the_crop_shortlist(self):
         board = build_candidate_board(
             self.text,
             self.command,
             _round(),
             max_crops=1,
         )
-        self.assertEqual(("rig_a:person:1", "rig_a:person:0"), board.candidate_ids)
+        self.assertEqual(("rig_a:person_bending:0",), board.candidate_ids)
         self.assertEqual(2, len(board.images))  # one annotated camera + one crop
-        self.assertIn("rig_a:person:0", board.prompt)
+        self.assertNotIn("rig_a:person_walking:0", board.prompt)
+        self.assertIn("middle token of each CANDIDATE_ID is the detector pose", board.prompt)
 
     def test_valid_model_output_selects_only_supplied_id(self):
         with self.assertLogs("marc_agent.sar_selection", level="INFO") as captured:
@@ -91,14 +92,14 @@ class SarSelectionTests(unittest.TestCase):
                 self.text,
                 self.command,
                 _round(),
-                verifier=lambda board: "rig_a:person:1|emergency",
+                verifier=lambda board: "rig_a:person_bending:0|emergency",
             )
         self.assertEqual(SelectionStatus.SELECTED, result.status)
-        self.assertEqual("rig_a:person:1", result.selected.candidate_id)
+        self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
         self.assertEqual("qwen", result.method)
         self.assertEqual("qwen", result.verifier_metrics.backend)
         self.assertEqual(3, result.verifier_metrics.image_count)
-        self.assertIn("output=rig_a:person:1|emergency", "\n".join(captured.output))
+        self.assertIn("output=rig_a:person_bending:0|emergency", "\n".join(captured.output))
 
     def test_invalid_model_output_uses_deterministic_fallback(self):
         with self.assertLogs("marc_agent.sar_selection", level="INFO") as captured:
@@ -106,19 +107,19 @@ class SarSelectionTests(unittest.TestCase):
                 self.text,
                 self.command,
                 _round(),
-                verifier=lambda board: "I choose rig_a:person:0",
+                verifier=lambda board: "I choose rig_a:person_walking:0",
             )
-        self.assertEqual("rig_a:person:1", result.selected.candidate_id)
+        self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
         self.assertEqual("deterministic_fallback", result.method)
         self.assertEqual("verifier_failed:ValueError", result.reason)
-        self.assertIn("output=I choose rig_a:person:0", "\n".join(captured.output))
+        self.assertIn("output=I choose rig_a:person_walking:0", "\n".join(captured.output))
 
     def test_remote_adapter_method_is_recorded(self):
         class RemoteStub:
             method = "qwen_remote"
 
             def __call__(self, _board):
-                return "rig_a:person:1|emergency"
+                return "rig_a:person_bending:0|emergency"
 
         result = select_sar_candidate(
             self.text,
@@ -131,9 +132,23 @@ class SarSelectionTests(unittest.TestCase):
 
     def test_output_parser_rejects_unknown_candidates_and_extra_text(self):
         with self.assertRaisesRegex(ValueError, "unknown candidate"):
-            parse_verifier_output("rig_b:person:0|emergency", ("rig_a:person:0",))
+            parse_verifier_output("rig_b:person_walking:0|emergency", ("rig_a:person_walking:0",))
         with self.assertRaisesRegex(ValueError, "exactly"):
-            parse_verifier_output("rig_a:person:0|emergency because", ("rig_a:person:0",))
+            parse_verifier_output("rig_a:person_walking:0|emergency because", ("rig_a:person_walking:0",))
+
+    def test_output_parser_accepts_split_camera_pipe(self):
+        board = (
+            "rig_7_a:person_sitting:3",
+            "rig_2_b:person_sitting:2",
+        )
+        candidate_id, situation = parse_verifier_output(
+            "rig_7_a|person_sitting:3|abnormal",
+            board,
+        )
+        self.assertEqual("rig_7_a:person_sitting:3", candidate_id)
+        self.assertEqual("abnormal", situation)
+        legacy, _ = parse_verifier_output("rig_7_a|person:3|abnormal", board)
+        self.assertEqual("rig_7_a:person_sitting:3", legacy)
 
     def test_no_people_is_explicit_no_match(self):
         result = select_sar_candidate(
@@ -147,7 +162,7 @@ class SarSelectionTests(unittest.TestCase):
     def test_fallback_selects_across_cameras_instead_of_first_person(self):
         round_ = _round()
         round_.people[0] = PersonCandidate(
-            "rig_b:person:0",
+            "rig_b:person_walking:0",
             (30.0, 80.0, 130.0, 400.0),
             "person_walking",
             0.99,
@@ -164,7 +179,7 @@ class SarSelectionTests(unittest.TestCase):
 
         result = select_sar_candidate(self.text, self.command, round_)
 
-        self.assertEqual("rig_a:person:1", result.selected.candidate_id)
+        self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
         self.assertEqual("deterministic_fallback", result.method)
 
     def test_sitting_on_trash_can_beats_closer_standing_person(self):
@@ -191,7 +206,7 @@ class SarSelectionTests(unittest.TestCase):
             ],
             people=[
                 PersonCandidate(
-                    "rig_a:person:0",
+                    "rig_a:person_sitting:0",
                     (310.0, 80.0, 410.0, 210.0),
                     "person_sitting",
                     0.55,
@@ -199,7 +214,7 @@ class SarSelectionTests(unittest.TestCase):
                     (640, 480),
                 ),
                 PersonCandidate(
-                    "rig_b:person:0",
+                    "rig_b:person_walking:0",
                     (205.0, 210.0, 310.0, 395.0),
                     "person_walking",
                     0.99,
@@ -210,7 +225,7 @@ class SarSelectionTests(unittest.TestCase):
             camera_ids=["rig_a", "rig_b"],
         )
         result = select_sar_candidate(text, command, round_)
-        self.assertEqual("rig_a:person:0", result.selected.candidate_id)
+        self.assertEqual("rig_a:person_sitting:0", result.selected.candidate_id)
         self.assertEqual("abnormal", result.requested_situation)
         self.assertEqual("deterministic_fallback", result.method)
 
@@ -222,17 +237,17 @@ class SarSelectionTests(unittest.TestCase):
             object(),
             self.text,
             detector=detector,
-            verifier=lambda board: "rig_a:person:1|emergency",
+            verifier=lambda board: "rig_a:person_bending:0|emergency",
         )
-        self.assertEqual("rig_a:person:1", result.selected_candidate_id)
+        self.assertEqual("rig_a:person_bending:0", result.selected_candidate_id)
         self.assertFalse(hasattr(result, "target_coord"))
-        record = result.record(expected_candidate_id="rig_a:person:1")
+        record = result.record(expected_candidate_id="rig_a:person_bending:0")
         self.assertEqual(1.0, record["candidate_recall"])
         self.assertEqual("qwen", record["verifier_metrics"]["backend"])
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rounds.jsonl"
-            append_stage1_record(result, path, expected_candidate_id="rig_a:person:1")
+            append_stage1_record(result, path, expected_candidate_id="rig_a:person_bending:0")
             self.assertIn('"candidate_recall": 1.0', path.read_text(encoding="utf-8"))
 
     def test_collection_failure_is_explicit(self):
@@ -260,7 +275,7 @@ class SarSelectionTests(unittest.TestCase):
                 self.text,
                 detector=detector,
             )
-        self.assertEqual("rig_a:person:1", result.selected_candidate_id)
+        self.assertEqual("rig_a:person_bending:0", result.selected_candidate_id)
         self.assertEqual("deterministic_fallback", result.sar_selection.method)
         self.assertEqual(
             "verifier_failed:QwenModelUnavailable",
@@ -283,7 +298,7 @@ class SarSelectionTests(unittest.TestCase):
                 self.text,
                 detector=detector,
             )
-        self.assertEqual("rig_a:person:1", result.selected_candidate_id)
+        self.assertEqual("rig_a:person_bending:0", result.selected_candidate_id)
         self.assertEqual("deterministic_fallback", result.sar_selection.method)
         self.assertEqual(
             "verifier_failed:QwenConfigurationError",
@@ -404,6 +419,123 @@ class SarSelectionTests(unittest.TestCase):
         )
         self.assertFalse(called)
         self.assertTrue(result.failure_reason.startswith("command_parse:"))
+
+    def test_no_landmark_does_not_attach_nearest_object(self):
+        text = (
+            "Find the person who is completely face-down and immobile in the parking lot."
+        )
+        command = parse_command(text)
+        round_ = _round()
+        board = build_candidate_board(text, command, round_)
+        self.assertTrue(all(item.anchor is None for item in board.evidence))
+        self.assertIn("anchor=none", board.prompt)
+
+    def test_camera_gate_drops_people_without_the_named_support(self):
+        from marc_agent.perception.sar_selection import candidate_evidence
+
+        text = "Find the person sitting on top of the trash can in the parking lot."
+        command = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                ObjectCandidate(
+                    "rig_park:police_car:0",
+                    "police_car",
+                    (10.0, 10.0, 80.0, 80.0),
+                    0.9,
+                    "rig_park",
+                    (640, 480),
+                ),
+                ObjectCandidate(
+                    "rig_park:trash_can:0",
+                    "trash_can",
+                    (200.0, 200.0, 280.0, 400.0),
+                    0.9,
+                    "rig_park",
+                    (640, 480),
+                ),
+                ObjectCandidate(
+                    "rig_other:trash_can:0",
+                    "trash_can",
+                    (200.0, 200.0, 280.0, 400.0),
+                    0.9,
+                    "rig_other",
+                    (640, 480),
+                ),
+            ],
+            people=[
+                PersonCandidate(
+                    "rig_park:person_sitting:0",
+                    (210.0, 120.0, 270.0, 220.0),
+                    "person_sitting",
+                    0.8,
+                    "rig_park",
+                    (640, 480),
+                ),
+                PersonCandidate(
+                    "rig_other:person_sitting:0",
+                    (210.0, 120.0, 270.0, 220.0),
+                    "person_sitting",
+                    0.99,
+                    "rig_other",
+                    (640, 480),
+                ),
+            ],
+            camera_ids=["rig_park", "rig_other"],
+        )
+        evidence = candidate_evidence(command, round_, text)
+        ids = [item.person.candidate_id for item in evidence]
+        self.assertIn("rig_park:person_sitting:0", ids)
+        self.assertNotIn("rig_other:person_sitting:0", ids)
+
+    def test_accident_in_parking_prefers_prone_over_lying_down(self):
+        from marc_agent.perception.sar_selection import candidate_evidence
+
+        text = (
+            "Find the person lying face-down and motionless in the parking lot."
+        )
+        command = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                ObjectCandidate(
+                    "rig_a:police_car:0",
+                    "police_car",
+                    (10.0, 10.0, 80.0, 80.0),
+                    0.9,
+                    "rig_a",
+                    (640, 480),
+                ),
+                ObjectCandidate(
+                    "rig_a:bicycle:0",
+                    "bicycle",
+                    (300.0, 200.0, 400.0, 280.0),
+                    0.9,
+                    "rig_a",
+                    (640, 480),
+                ),
+            ],
+            people=[
+                PersonCandidate(
+                    "rig_a:person_lying_down:0",
+                    (30.0, 80.0, 130.0, 200.0),
+                    "person_lying_down",
+                    0.99,
+                    "rig_a",
+                    (640, 480),
+                ),
+                PersonCandidate(
+                    "rig_a:person_prone:0",
+                    (280.0, 160.0, 380.0, 260.0),
+                    "person_prone",
+                    0.7,
+                    "rig_a",
+                    (640, 480),
+                ),
+            ],
+            camera_ids=["rig_a"],
+        )
+        evidence = candidate_evidence(command, round_, text)
+        self.assertEqual("rig_a:person_prone:0", evidence[0].person.candidate_id)
+        self.assertEqual("bicycle", evidence[0].anchor.class_name)
 
 
 if __name__ == "__main__":

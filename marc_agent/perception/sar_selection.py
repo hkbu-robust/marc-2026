@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Iterable, Optional
 
-from marc_agent.command_parser import ParsedCommand
+from marc_agent.command_parser import ParsedCommand, Relation, SEATING_LANDMARKS
+from marc_agent.perception.camera_gate import apply_camera_gate
 from marc_agent.perception.pose_to_situation import situation_for_pose
 from marc_agent.perception.qwen_runtime import (
     QwenRuntimeConfig,
@@ -118,15 +119,17 @@ def _nearest_anchor(
     person: PersonCandidate,
     objects: list[ObjectCandidate],
     requested_landmark: Optional[str],
+    allowed_classes: Optional[frozenset[str]] = None,
 ) -> tuple[Optional[ObjectCandidate], Optional[float]]:
     same_camera = [item for item in objects if item.camera_id == person.camera_id]
-    if requested_landmark:
-        same_camera = [
-            item for item in same_camera if item.class_name == requested_landmark
-        ]
+    names = allowed_classes
+    if names is None and requested_landmark:
+        names = frozenset({requested_landmark})
+    if not names:
+        return None, None
+    same_camera = [item for item in same_camera if item.class_name in names]
     if not same_camera:
         return None, None
-
     px, py = _center(person.bbox_xyxy)
     diagonal = max(1.0, math.hypot(*person.image_size))
     ranked = sorted(
@@ -174,17 +177,80 @@ def _on_top_bonus(
     return bonus
 
 
+_POSE_WORD_BENDING = re.compile(r"\b(?:bent|bending)\b")
+_POSE_WORD_PRONE = re.compile(r"\b(?:face[\s-]*down|prone)\b")
+_ON_SUPPORT_CUE = re.compile(
+    r"\b(?:on\s+top\s+of|sitting|sat|climbed|climbing|lying|lie)\b"
+)
+
+
+def projection_relation(
+    command: ParsedCommand, command_text: str = ""
+) -> Optional[Relation]:
+    """Internal ON for projecting a person onto a support. Not submitted."""
+    if command.relation is not None:
+        return command.relation
+    if command.target_type != "person":
+        return None
+    if _on_top_non_mount(command, command_text):
+        return Relation.ON
+    if command.landmark in SEATING_LANDMARKS and _ON_SUPPORT_CUE.search(
+        command_text or ""
+    ):
+        return Relation.ON
+    return None
+
+
+def _pose_word_bonus(person: PersonCandidate, command: ParsedCommand, text: str) -> float:
+    requested = command.situation.value if command.situation else None
+    seating = command.landmark in SEATING_LANDMARKS
+    bonus = 0.0
+    if _POSE_WORD_BENDING.search(text) and person.pose_class == "person_bending":
+        bonus += 1.5
+    face_down = bool(_POSE_WORD_PRONE.search(text))
+    if face_down and seating:
+        if person.pose_class == "person_prone":
+            bonus -= 1.0
+        elif person.pose_class in {
+            "person_bending",
+            "person_lying_down",
+            "person_reclining",
+        }:
+            bonus += 0.8
+    elif face_down or requested == "accident":
+        if person.pose_class == "person_prone":
+            bonus += 2.0
+        elif person.pose_class == "person_lying_down":
+            bonus -= 0.5
+    return bonus
+
+
 def candidate_evidence(
     command: ParsedCommand,
     round_: CctvDetectionRound,
     command_text: str = "",
 ) -> tuple[CandidateEvidence, ...]:
     """Calculate inspectable pose and person/anchor geometry for every person."""
+    gated = apply_camera_gate(command, round_)
     requested_situation = command.situation.value if command.situation else None
     on_top = _on_top_non_mount(command, command_text)
+    text = command_text or ""
+    surface = command.scene_hint
     evidence: list[CandidateEvidence] = []
-    for person in round_.people:
-        anchor, distance = _nearest_anchor(person, round_.objects, command.landmark)
+    for person in gated.people:
+        if command.landmark:
+            anchor, distance = _nearest_anchor(
+                person, gated.objects, command.landmark
+            )
+        elif requested_situation == "accident":
+            anchor, distance = _nearest_anchor(
+                person,
+                gated.objects,
+                None,
+                allowed_classes=SUPPORT_CLASSES["fallen_vehicle"],
+            )
+        else:
+            anchor, distance = None, None
         overlap = (
             _horizontal_overlap(person.bbox_xyxy, anchor.bbox_xyxy)
             if anchor
@@ -198,10 +264,12 @@ def candidate_evidence(
         pose_situation = situation_for_pose(
             person.pose_class,
             support=anchor.class_name if anchor else None,
+            surface=surface,
         )
         score = person.confidence
         if requested_situation and pose_situation == requested_situation:
             score += 2.0
+        score += _pose_word_bonus(person, command, text)
         if command.landmark:
             if anchor is None:
                 score -= 1.0
@@ -212,6 +280,8 @@ def candidate_evidence(
                     score += 0.35
                 if on_top:
                     score += _on_top_bonus(person, anchor, overlap)
+        elif anchor is not None and distance is not None:
+            score += max(0.0, 0.6 - 2.0 * float(distance))
         evidence.append(
             CandidateEvidence(
                 person=person,
@@ -313,12 +383,16 @@ def format_sar_verifier_prompt(
     return (
         "Select the single numbered person candidate that best matches the request. "
         "The request is language to satisfy, not visual ground truth. Use the images and "
-        "detector metadata together. Reply with exactly CANDIDATE_ID|SITUATION and nothing "
+        "detector metadata together. The middle token of each CANDIDATE_ID is the detector "
+        "pose (person_sitting, person_lying_down, person_prone, …); prefer the pose that "
+        "matches the request. Reply with exactly CANDIDATE_ID|SITUATION and nothing "
         "else. SITUATION must be normal, abnormal, emergency, or accident.\n"
         f"Original request: {command_text}\n"
         f"Parsed requested situation: {req}\n"
         f"Parsed requested landmark: {landmark or 'none'}\n"
         f"Parsed scene hint: {scene_hint or 'none'}\n"
+        "Prefer candidates whose camera contains the parsed landmark and any "
+        "place cues named in the request.\n"
         "Candidates:\n" + "\n".join(rows)
     )
 
@@ -330,23 +404,26 @@ def build_candidate_board(
     *,
     max_crops: Optional[int] = None,
 ) -> CandidateBoard:
-    """Build bounded visual evidence while keeping every candidate in the prompt."""
+    """Build bounded visual evidence; prompt rows match the crop shortlist."""
     evidence = candidate_evidence(command, round_, command_text)
     crop_limit = configured_max_crops() if max_crops is None else max_crops
     if crop_limit < 0:
         raise ValueError("max_crops must be non-negative")
+    kept = evidence if crop_limit <= 0 else evidence[:crop_limit]
     images: list[object] = []
-    for camera_id in sorted({item.person.camera_id for item in evidence}):
+    for camera_id in sorted({item.person.camera_id for item in kept}):
         frame = round_.frames.get(camera_id)
         if frame is not None:
-            images.append(_annotated_view(frame, evidence))
-    for item in evidence[:crop_limit]:
+            images.append(_annotated_view(frame, kept))
+    for item in kept:
+        if crop_limit <= 0:
+            break
         frame = round_.frames.get(item.person.camera_id)
         if frame is not None:
             images.append(_context_crop(frame, item))
 
     rows = []
-    for item in evidence:
+    for item in kept:
         anchor = item.anchor
         rows.append(
             " | ".join(
@@ -374,23 +451,48 @@ def build_candidate_board(
         command.scene_hint,
         rows,
     )
-    return CandidateBoard(tuple(images), prompt, evidence)
+    return CandidateBoard(tuple(images), prompt, kept)
 
 
 def parse_verifier_output(
     raw_output: str,
     candidate_ids: tuple[str, ...],
 ) -> tuple[str, str]:
-    """Validate the complete finite Qwen response; no free-form output is accepted."""
+    """Validate a finite Qwen reply against the board; tolerate split camera tokens."""
     text = (raw_output or "").strip()
-    if text.count("|") != 1 or any(char.isspace() for char in text):
+    if not text or any(char.isspace() for char in text):
         raise ValueError("output must be exactly CANDIDATE_ID|SITUATION")
-    candidate_id, situation = text.split("|", 1)
-    if candidate_id not in candidate_ids:
-        raise ValueError(f"unknown candidate ID: {candidate_id!r}")
+    parts = text.split("|")
+    if len(parts) < 2:
+        raise ValueError("output must be exactly CANDIDATE_ID|SITUATION")
+    situation = parts[-1]
+    raw_id = "|".join(parts[:-1])
     if situation not in _SITUATIONS:
         raise ValueError(f"unknown situation: {situation!r}")
-    return candidate_id, situation
+    return _resolve_candidate_id(raw_id, candidate_ids), situation
+
+
+def _resolve_candidate_id(raw_id: str, candidate_ids: tuple[str, ...]) -> str:
+    if raw_id in candidate_ids:
+        return raw_id
+    joined = raw_id.replace("|", ":")
+    if joined in candidate_ids:
+        return joined
+    prefixed = [item for item in candidate_ids if item.startswith(raw_id)]
+    unique = set(prefixed)
+    if len(unique) == 1:
+        return next(iter(unique))
+    parts = joined.split(":")
+    if len(parts) >= 3:
+        camera, index = parts[0], parts[-1]
+        matches = [
+            item
+            for item in candidate_ids
+            if item.startswith(camera + ":") and item.endswith(":" + index)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    raise ValueError(f"unknown candidate ID: {raw_id!r}")
 
 
 class QwenSarVerifier:

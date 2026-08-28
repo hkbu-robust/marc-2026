@@ -383,9 +383,9 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:tumbler:1", ranked[0].target.candidate_id)
 
 
-    def test_parking_scene_pairs_target_with_vehicle(self):
+    def test_parking_floor_drop_does_not_pair_with_vehicle(self):
         parsed = parse_command(
-            "Find the tumbler dropped in the empty parking space.",
+            "Pick up the tumbler dropped on the parking lot floor and bring it to the owner.",
         )
         round_ = CctvDetectionRound(
             objects=[
@@ -421,8 +421,9 @@ class ObjectSelectionTests(unittest.TestCase):
         )
         ranked = rank_object_candidates(parsed, round_)
         self.assertTrue(ranked)
+        self.assertIsNone(ranked[0].anchor)
+        self.assertTrue(all(item.anchor is None for item in ranked))
         self.assertEqual("rig_a:tumbler:0", ranked[0].target.candidate_id)
-        self.assertEqual("police_car", ranked[0].anchor.class_name)
 
     def test_world_on_prefers_contact_inside_bench_footprint(self):
         from marc_agent.perception.cctv_project import (
@@ -486,6 +487,104 @@ class ObjectSelectionTests(unittest.TestCase):
         )
         world_ranked = rank_object_candidates(parsed, round_, projector=projector)
         self.assertEqual("rig_a:tumbler:1", world_ranked[0].target.candidate_id)
+
+    def test_world_near_prefers_closer_tumbler_to_hydrant(self):
+        from marc_agent.perception.cctv_project import (
+            CameraGeometry,
+            CctvProjector,
+            static_lookup,
+        )
+
+        parsed = parse_command("Find the tumbler near the fire hydrant in the parking lot.")
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "rig_a:tumbler:2",
+                    "tumbler",
+                    (20.0, 200.0, 50.0, 240.0),
+                    "rig_a",
+                    0.99,
+                ),
+                _object(
+                    "rig_a:tumbler:1",
+                    "tumbler",
+                    (300.0, 250.0, 330.0, 280.0),
+                    "rig_a",
+                    0.4,
+                ),
+                _object(
+                    "rig_a:hydrant:0",
+                    "hydrant",
+                    (280.0, 240.0, 360.0, 400.0),
+                    "rig_a",
+                ),
+            ],
+            camera_ids=["rig_a"],
+        )
+        projector = CctvProjector(
+            static_lookup(
+                {
+                    "rig_a": CameraGeometry(
+                        fx=500.0,
+                        fy=500.0,
+                        cx=320.0,
+                        cy=240.0,
+                        rotation=(
+                            (1.0, 0.0, 0.0),
+                            (0.0, 1.0, 0.0),
+                            (0.0, 0.0, 1.0),
+                        ),
+                        translation=(0.0, 0.0, -10.0),
+                        ground_height=0.0,
+                    )
+                }
+            )
+        )
+        ranked = rank_object_candidates(
+            parsed,
+            round_,
+            projector=projector,
+            command_text="Find the tumbler near the fire hydrant in the parking lot.",
+        )
+        self.assertEqual("rig_a:tumbler:1", ranked[0].target.candidate_id)
+        self.assertEqual("hydrant", ranked[0].anchor.class_name)
+
+    def test_empty_parking_space_ranks_against_vehicles(self):
+        parsed = parse_command("Find the tumbler dropped in the empty parking space.")
+        self.assertIsNone(parsed.landmark)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "rig_a:tumbler:0",
+                    "tumbler",
+                    (100.0, 200.0, 130.0, 240.0),
+                    "rig_a",
+                    0.5,
+                ),
+                _object(
+                    "rig_a:police_car:0",
+                    "police_car",
+                    (90.0, 180.0, 400.0, 420.0),
+                    "rig_a",
+                    0.9,
+                ),
+                _object(
+                    "rig_a:normal_car_1:0",
+                    "normal_car_1",
+                    (10.0, 10.0, 80.0, 80.0),
+                    "rig_a",
+                    0.99,
+                ),
+            ],
+            camera_ids=["rig_a"],
+        )
+        ranked = rank_object_candidates(
+            parsed,
+            round_,
+            command_text="Find the tumbler dropped in the empty parking space.",
+        )
+        self.assertIsNotNone(ranked[0].anchor)
+        self.assertEqual("police_car", ranked[0].anchor.class_name)
 
 
 if __name__ == "__main__":

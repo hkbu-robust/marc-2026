@@ -22,7 +22,7 @@ POSE_GROUPS = {
 
 SUPPORT_CLASSES = {
     "seating": frozenset({"bench", "picnic_table", "chair"}),
-    "grass_lawn": frozenset({"grass", "lawn"}),
+    "grass_lawn": frozenset({"grass", "lawn", "park"}),
     "road_parking": frozenset({
         "walkway", "sidewalk", "road", "parking", "parking_space",
     }),

@@ -27,7 +27,7 @@
   ],
   "sar": [
     {
-      "candidate_id": "rig_3_b:person:0",
+      "candidate_id": "rig_3_b:person_prone:0",
       "bbox_xyxy": [700, 220, 860, 760],
       "situation": "accident",
       "confidence": 0.84,

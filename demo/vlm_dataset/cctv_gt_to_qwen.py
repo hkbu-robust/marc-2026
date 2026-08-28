@@ -6,7 +6,7 @@ and writes LLaMA-Factory JSONL (``train_sar.jsonl`` / ``val_sar.jsonl`` and
 ``train_obj.jsonl`` / ``val_obj.jsonl`` — two grammars, two files).
 
 SAR rows use the R03 pose×support matrix (marc_agent.perception.situation_rules)
-and the runtime grammar ``{camera_id}:person:{n}|{situation}`` with no coordinates.
+and the runtime grammar ``{camera_id}:{pose_class}:{n}|{situation}`` with no coordinates.
 The SAR user turn matches ``format_sar_verifier_prompt`` in
 ``marc_agent.perception.sar_selection``. Object rows keep eight-relation
 referring expressions without grounding xyz.
@@ -27,7 +27,7 @@ import os
 import random
 import re
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Dict, Iterable, List, Optional, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +35,7 @@ _ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from marc_agent.perception.candidate_ids import person_candidate_id  # noqa: E402
 from marc_agent.perception.pose_to_situation import situation_for_pose  # noqa: E402
 from marc_agent.perception.sar_selection import format_sar_verifier_prompt  # noqa: E402
 from marc_agent.perception.situation_rules import (  # noqa: E402
@@ -382,14 +383,22 @@ def _det_sort_key(det: dict) -> Tuple[tuple, str]:
 
 
 def person_candidate_ids(people: List[dict], camera_id: str) -> Dict[int, str]:
-    """Runtime-matching IDs: ``{camera_id}:person:{n}`` in bbox-then-class order."""
+    """Runtime-matching IDs: ``{camera_id}:{pose_class}:{n}`` in bbox-then-class order."""
     ordered = sorted(people, key=_det_sort_key)
-    return {id(p): f"{camera_id}:person:{i}" for i, p in enumerate(ordered)}
+    counts: dict[str, int] = defaultdict(int)
+    mapping: Dict[int, str] = {}
+    for person in ordered:
+        pose = str(person.get("class") or "person")
+        idx = counts[pose]
+        counts[pose] += 1
+        mapping[id(person)] = person_candidate_id(camera_id, pose, idx)
+    return mapping
 
 
 def person_candidate_id_list(people: List[dict], camera_id: str) -> Tuple[str, ...]:
     ordered = sorted(people, key=_det_sort_key)
-    return tuple(f"{camera_id}:person:{i}" for i in range(len(ordered)))
+    id_map = person_candidate_ids(people, camera_id)
+    return tuple(id_map[id(person)] for person in ordered)
 
 
 def _speak_landmark(cls: str, rng: random.Random, drink: bool = False) -> str:
@@ -965,7 +974,7 @@ def _gt_candidate_rows(people: List[dict], camera_id: str, payload: dict) -> Lis
     ordered = sorted(people, key=_det_sort_key)
     rows = []
     for person in ordered:
-        cid = id_map.get(id(person), f"{camera_id}:person:0")
+        cid = id_map.get(id(person), person_candidate_id(camera_id, str(person.get("class") or "person"), 0))
         best = _pick_support_landmark(person, landmarks, payload) if landmarks else None
         dist = _xy_m(person, best) if best else None
         overlap = _box_overlap(person, best)
@@ -1138,7 +1147,7 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 if hard:
                     n_hard += 1
             for instruction, person, lm, sit, hard, rel in sar_rows:
-                cid = id_map.get(id(person), f"{camera_id}:person:0")
+                cid = id_map.get(id(person), person_candidate_id(camera_id, str(person.get("class") or "person"), 0))
                 rec = _load_recipes().get(str(person.get("recipe_id") or ""), {})
                 sar_bucket.append(_sample(
                     png_path, payload, camera_id, instruction, person, lm, fmt,
@@ -1180,7 +1189,7 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
         "landmark_class_counts": dict(lm_counts.most_common()),
         "object_class_counts": dict(obj_counts.most_common()),
         "sar_situation_counts": dict(sit_counts.most_common()),
-        "assistant": "SAR: {camera_id}:person:{n}|{situation}; objects: interpretation JSON without coords",
+        "assistant": "SAR: {camera_id}:{pose_class}:{n}|{situation}; objects: interpretation JSON without coords",
         "situation_rules": RULES_VERSION,
         "notes": (
             "Fine-tune the SAR LoRA on train_sar.jsonl / val_sar.jsonl only. "

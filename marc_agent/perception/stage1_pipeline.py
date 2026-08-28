@@ -25,6 +25,8 @@ from marc_agent.command_parser import (
 from marc_agent.perception.cctv_project import (
     CctvProjector,
 )
+from marc_agent.perception.cctv_yolo import detector_can_emit, refine_detection_round
+from marc_agent.perception.camera_gate import apply_camera_gate
 from marc_agent.perception.object_selection import (
     ObjectSelection,
     rank_object_candidates,
@@ -35,6 +37,7 @@ from marc_agent.perception.sar_selection import (
     SarSelectionResult,
     Verifier,
     candidate_evidence,
+    projection_relation,
     select_sar_candidate,
 )
 from marc_agent.perception.qwen_remote import (
@@ -361,6 +364,9 @@ def run_stage1_candidate_pipeline(
             reason,
             (time.perf_counter() - started) * 1000.0,
         )
+
+    detections = refine_detection_round(parsed, detections)
+    detections = apply_camera_gate(parsed, detections)
     selection = None
     object_selection = None
     failure_reason = None
@@ -452,12 +458,15 @@ def _project_pair(
     *,
     relation: Optional[Relation],
     support_class: Optional[str],
+    pose_class: Optional[str] = None,
 ) -> Optional[tuple[tuple[float, float, float], tuple[float, float, float]]]:
     target_xyz = projector.project_contact(
         camera_id,
         target_box,
         relation=relation,
         support_class=support_class,
+        pose_class=pose_class,
+        support_box=anchor_box,
     )
     if target_xyz is None:
         return None
@@ -479,14 +488,9 @@ def _grounding_payload(
     fallback_class: Optional[str] = None,
     relation: Optional[Relation] = None,
 ) -> GroundingResult:
+    del selection, fallback_class
     landmark = parsed.landmark or ""
-    if not landmark and selection is not None and selection.anchor is not None:
-        landmark = selection.anchor.class_name
-    if not landmark and fallback_class:
-        landmark = fallback_class
     submitted_relation = relation if relation is not None else parsed.relation
-    if submitted_relation is None and landmark and uses_vehicle_anchor(parsed):
-        submitted_relation = Relation.NEAR
     return _grounding_result_cls()(
         camera_id=camera_id,
         target_type=parsed.target_type,
@@ -523,8 +527,9 @@ def _compose_person(
         person.camera_id,
         person.bbox_xyxy,
         anchor.bbox_xyxy if anchor is not None else None,
-        relation=parsed.relation,
+        relation=projection_relation(parsed, candidates.command_text),
         support_class=anchor.class_name if anchor is not None else None,
+        pose_class=person.pose_class,
     )
     if projected is None:
         log.info(
@@ -688,7 +693,14 @@ def _compose_last_resort(
     projector: CctvProjector,
     parsed: ParsedCommand,
 ) -> Optional[Stage1RoundResult]:
-    """Project a landmark or vehicle box as both target and anchor. Never zeros."""
+    """Project a landmark box as both target and anchor. Never zeros.
+
+    Trained detector classes must not fall back to submitting the landmark as
+    the object (a picnic table is not a pencil case). Ignored classes such as
+    umbrella still use this last resort.
+    """
+    if detector_can_emit(parsed.target_type):
+        return None
     boxes = _last_resort_boxes(parsed, candidates.detections, candidates.command_text)
     relation = parsed.relation
     if relation is None and uses_vehicle_anchor(parsed, candidates.command_text):

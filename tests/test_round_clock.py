@@ -46,7 +46,7 @@ def _sar_round() -> CctvDetectionRound:
         ],
         people=[
             PersonCandidate(
-                "rig_a:person:0",
+                "rig_a:person_walking:0",
                 (30.0, 80.0, 130.0, 400.0),
                 "person_walking",
                 0.8,
@@ -54,7 +54,7 @@ def _sar_round() -> CctvDetectionRound:
                 (640, 480),
             ),
             PersonCandidate(
-                "rig_a:person:1",
+                "rig_a:person_bending:0",
                 (315.0, 100.0, 405.0, 390.0),
                 "person_bending",
                 0.8,
@@ -152,7 +152,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
 
         def verifier(_board):
             calls.append(1)
-            return "rig_a:person:1|emergency"
+            return "rig_a:person_bending:0|emergency"
 
         clock = _clock(30.0, 0.0)
         client = _Now(27.0)
@@ -170,7 +170,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
             )
         self.assertEqual([], calls)
         self.assertEqual("deterministic_fallback", result.sar_selection.method)
-        self.assertEqual("rig_a:person:1", result.selected_candidate_id)
+        self.assertEqual("rig_a:person_bending:0", result.selected_candidate_id)
 
     def test_remaining_thirty_seconds_calls_verifier(self):
         calls = []
@@ -180,7 +180,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
 
         def verifier(_board):
             calls.append(1)
-            return "rig_a:person:1|emergency"
+            return "rig_a:person_bending:0|emergency"
 
         clock = _clock(30.0, 0.0)
         result = run_stage1_candidate_pipeline(
@@ -224,7 +224,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
 
         def verifier(_board):
             calls.append(1)
-            return "rig_a:person:1|emergency"
+            return "rig_a:person_bending:0|emergency"
 
         clock = _clock(30.0, 0.0)
         with patch.dict(os.environ, {"MARC_QWEN_MIN_REMAINING_S": "0"}, clear=False):

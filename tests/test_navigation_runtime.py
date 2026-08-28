@@ -27,6 +27,35 @@ def _load():
         return yaml.safe_load(stream)
 
 
+def _xyz_cloud(points):
+    """Minimal PointCloud2 with FLOAT32 xyz for lidar_cloud_to_obstacles."""
+    pts = np.asarray(points, dtype=np.float32)
+    if pts.ndim != 2:
+        pts = pts.reshape(1, 3)
+    n = int(pts.shape[0])
+    step = 16
+    payload = np.zeros(n * step, dtype=np.uint8)
+    for i, row in enumerate(pts):
+        payload[i * step:i * step + 12] = np.frombuffer(row[:3].tobytes(), dtype=np.uint8)
+
+    class _F:
+        def __init__(self, name, offset):
+            self.name = name
+            self.offset = offset
+            self.datatype = 7
+            self.count = 1
+
+    class _Msg:
+        fields = [_F("x", 0), _F("y", 4), _F("z", 8)]
+        height = 1
+        width = n
+        point_step = step
+        is_bigendian = False
+        data = payload
+
+    return _Msg()
+
+
 class _Pos:
     def __init__(self, x, y):
         self.x = float(x)
@@ -58,7 +87,7 @@ class _Occ:
 class FakeClient:
     """Unicycle client paced by ``sleep``; occupancy is optional."""
 
-    def __init__(self, start, occ=None, stop_after_s=None):
+    def __init__(self, start, occ=None, stop_after_s=None, lidar_xyz=None, lidar_after_s=None):
         self._pose = [float(start[0]), float(start[1]), float(start[2])]
         self._t = 0.0
         self._v = 0.0
@@ -67,6 +96,8 @@ class FakeClient:
         self.cmds = []
         self._occ = occ
         self.stop_after_s = stop_after_s
+        self._lidar_xyz = lidar_xyz
+        self._lidar_after_s = lidar_after_s
 
     def now_s(self):
         return self._t
@@ -93,7 +124,11 @@ class FakeClient:
         return self._occ
 
     def get_lidar(self):
-        return None
+        if self._lidar_xyz is None:
+            return None
+        if self._lidar_after_s is not None and self._t < float(self._lidar_after_s):
+            return None
+        return _xyz_cloud(self._lidar_xyz)
 
     def get_imu(self):
         return None
@@ -257,6 +292,29 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertIsNone(missed)
         found = planner.plan(start, goal, inflation_m=0.0, snap_m=2.5, margin_m=12.0)
         self.assertIsNotNone(found)
+
+    def test_off_road_start_joins_road(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        res = 0.25
+        grid = np.full((40, 80), 100, dtype=np.int8)
+        grid[20, 16:70] = 0
+        occ = _Occ(grid, res, 0.0, 0.0)
+        helper = OccupancyGridPlanner()
+        helper.update_from_array(grid, res, 0.0, 0.0)
+        pose = helper._c2w(8, 20)
+        goal = helper._c2w(20, 60)
+        client = FakeClient([pose[0], pose[1], 0.0], occ=occ)
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.0,
+            exclude_m=0.6,
+            stuck_time_s=30.0,
+            replan_cap=8,
+        )
+        result = nav.navigate_to(goal, 25.0, leg="search", tol=0.7)
+        self.assertEqual("reached", result.status.value)
 
 
 if __name__ == "__main__":

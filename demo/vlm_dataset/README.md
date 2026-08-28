@@ -56,7 +56,7 @@ The converter prints `hard=` / `hard_frac=` (same-class object clones that
 still uniquely identify), SAR situation counts, and per-class histograms.
 
 SAR rows use the R03 pose×support matrix (`marc_agent.perception.situation_rules`,
-version 2026.1). Assistant text is **only** `{camera_id}:person:{n}|{situation}`
+version 2026.1). Assistant text is **only** `{camera_id}:{pose_class}:{n}|{situation}`
 (no coordinates). Picnic-table lying/prone is `abnormal`; crouch is `abnormal`
 everywhere; unlabeled ground `person_lying_down` (no `surface_class`) is
 dropped; `person_prone` is always `accident`. Parking-proxy frames

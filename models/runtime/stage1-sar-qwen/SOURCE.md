@@ -11,10 +11,12 @@
 
 ## How the snapshot gets into the agent
 
-`docker compose up --build` runs [`../fetch_runtime_weights.py`](../fetch_runtime_weights.py)
+`docker compose up --build` with ``MARC_QWEN_BACKEND=local`` (the submission
+default) runs [`../fetch_runtime_weights.py`](../fetch_runtime_weights.py)
 inside [`demo/Dockerfile`](../../../demo/Dockerfile) **before** `HF_HUB_OFFLINE=1`.
 That downloads this revision into `/agent/models/runtime/stage1-sar-qwen/model`.
-Scoring runtime never talks to the Hub.
+Remote/vLLM practice builds (`demo/docker-compose.qwen-remote.yml`) skip this
+Hub pull. Scoring runtime never talks to the Hub.
 
 On a developer host (optional, same pins):
 

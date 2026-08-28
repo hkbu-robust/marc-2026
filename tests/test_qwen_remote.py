@@ -38,7 +38,7 @@ def _board() -> CandidateBoard:
     image = Image.new("RGB", (32, 24), color=(20, 40, 60))
     return CandidateBoard(
         images=(image,),
-        prompt="Reply exactly rig_a:person:0|emergency",
+        prompt="Reply exactly rig_a:person_prone:0|emergency",
         evidence=(),
     )
 
@@ -61,13 +61,13 @@ class QwenRemoteTests(unittest.TestCase):
         def post(url, body, headers, timeout):
             captured.update(url=url, body=body, headers=headers, timeout=timeout)
             return json.dumps(
-                {"choices": [{"message": {"content": "rig_a:person:0|emergency"}}]}
+                {"choices": [{"message": {"content": "rig_a:person_prone:0|emergency"}}]}
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
         with self.assertLogs("marc_agent.qwen_remote", level="INFO") as logged:
-            self.assertEqual("rig_a:person:0|emergency", verifier(_board()))
-        self.assertIn("text=rig_a:person:0|emergency", "\n".join(logged.output))
+            self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
+        self.assertIn("text=rig_a:person_prone:0|emergency", "\n".join(logged.output))
         self.assertEqual(
             "http://workstation:8000/v1/chat/completions", captured["url"]
         )
@@ -125,7 +125,7 @@ class QwenRemoteTests(unittest.TestCase):
                 response = json.dumps(
                     {
                         "choices": [
-                            {"message": {"content": "rig_a:person:0|emergency"}}
+                            {"message": {"content": "rig_a:person_prone:0|emergency"}}
                         ]
                     }
                 ).encode("utf-8")
@@ -156,7 +156,7 @@ class QwenRemoteTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2.0)
 
-        self.assertEqual("rig_a:person:0|emergency", output)
+        self.assertEqual("rig_a:person_prone:0|emergency", output)
         self.assertEqual("/v1/chat/completions", captured["path"])
         self.assertEqual("Bearer test-secret", captured["authorization"])
         self.assertEqual("qwen3-vl-8b", captured["payload"]["model"])
@@ -169,12 +169,12 @@ class QwenRemoteTests(unittest.TestCase):
             if len(calls) == 1:
                 raise QwenRemoteTimeout("vLLM did not respond within 5.0s")
             return json.dumps(
-                {"choices": [{"message": {"content": "rig_a:person:0|emergency"}}]}
+                {"choices": [{"message": {"content": "rig_a:person_prone:0|emergency"}}]}
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
         with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
-            self.assertEqual("rig_a:person:0|emergency", verifier(_board()))
+            self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
         self.assertEqual(2, len(calls))
         output = "\n".join(captured.output)
         self.assertIn("attempt=1/2", output)

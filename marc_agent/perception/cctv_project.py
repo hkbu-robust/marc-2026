@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from marc_agent.command_parser import Relation
+from marc_agent.perception.situation_rules import POSE_GROUPS
 
 
 log = logging.getLogger("marc_agent.cctv_project")
@@ -74,10 +75,31 @@ def k_from_camera_info(info) -> Optional[tuple[float, float, float, float]]:
     return fx, fy, cx, cy
 
 
-def contact_pixel(bbox_xyxy: tuple[float, float, float, float]) -> tuple[float, float]:
-    """Bottom-center of a detector box (feet / ground contact), not the box center."""
-    x1, _y1, x2, y2 = bbox_xyxy
-    return ((x1 + x2) / 2.0, float(y2))
+# Inset from y_max for long prone/lying boxes so the ray hits torso, not padded feet.
+PROSTRATE_CONTACT_INSET = 0.2
+LOWER_HALF_CENTER = 0.75
+PROSTRATE_HALF_CENTER = 0.60
+
+
+def contact_pixel(
+    bbox_xyxy: tuple[float, float, float, float],
+    pose_class: Optional[str] = None,
+) -> tuple[float, float]:
+    """Lower-half centroid of a detector box (ground contact), not the box center.
+
+    Upright boxes use ``y1 + 0.75·height``. Prostrate poses sample higher in the
+    image (closer to the torso) so a long lying box does not project from padded
+    feet. Camera pitch is applied later by the calibrated ray, not here.
+    """
+    x1, y1, x2, y2 = bbox_xyxy
+    height = max(0.0, float(y2) - float(y1))
+    pose = (pose_class or "").strip().lower()
+    frac = (
+        PROSTRATE_HALF_CENTER
+        if pose in POSE_GROUPS["prostrate"]
+        else LOWER_HALF_CENTER
+    )
+    return ((float(x1) + float(x2)) / 2.0, float(y1) + frac * height)
 
 
 def raised_plane_z(
@@ -234,6 +256,44 @@ def _point_to_aabb_dist(
     return math.hypot(dx, dy)
 
 
+def _support_footprint_xy(
+    projector: "CctvProjector",
+    camera_id: str,
+    anchor_box: tuple[float, float, float, float],
+    z_plane: float,
+) -> Optional[tuple[float, float, float, float]]:
+    """Axis-aligned world XY of the support box projected onto ``z_plane``."""
+    x1, y1, x2, y2 = anchor_box
+    corners = []
+    for u, v in (
+        (x1, y1),
+        (x2, y1),
+        (x2, y2),
+        (x1, y2),
+        ((x1 + x2) / 2.0, y2),
+    ):
+        point = projector.project_pixel(camera_id, u, v, z_plane=z_plane)
+        if point is not None:
+            corners.append(point)
+    if len(corners) < 2:
+        return None
+    xs = [point[0] for point in corners]
+    ys = [point[1] for point in corners]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def snap_xy_to_footprint(
+    xyz: tuple[float, float, float],
+    footprint: tuple[float, float, float, float],
+) -> tuple[float, float, float]:
+    xmin, ymin, xmax, ymax = footprint
+    return (
+        min(max(xyz[0], xmin), xmax),
+        min(max(xyz[1], ymin), ymax),
+        xyz[2],
+    )
+
+
 def pair_alignment_score(
     projector: "CctvProjector",
     camera_id: str,
@@ -262,28 +322,16 @@ def pair_alignment_score(
     rel = relation.value if isinstance(relation, Relation) else relation
     if rel in {"on", "above"}:
         z_plane = raised_plane_z(geometry.ground_height, support_class, relation)
-        x1, y1, x2, y2 = anchor_box
-        corners = []
-        for u, v in (
-            (x1, y1),
-            (x2, y1),
-            (x2, y2),
-            (x1, y2),
-            ((x1 + x2) / 2.0, y2),
-        ):
-            point = projector.project_pixel(camera_id, u, v, z_plane=z_plane)
-            if point is not None:
-                corners.append(point)
-        if len(corners) < 2:
+        footprint = _support_footprint_xy(projector, camera_id, anchor_box, z_plane)
+        if footprint is None:
             anchor_xyz = projector.project_contact(camera_id, anchor_box)
             if anchor_xyz is None:
                 return None
             dist = _xy_dist(target_xyz, anchor_xyz)
         else:
-            xs = [point[0] for point in corners]
-            ys = [point[1] for point in corners]
+            xmin, ymin, xmax, ymax = footprint
             dist = _point_to_aabb_dist(
-                target_xyz[0], target_xyz[1], min(xs), min(ys), max(xs), max(ys)
+                target_xyz[0], target_xyz[1], xmin, ymin, xmax, ymax
             )
         return 1.0 / (1.0 + dist)
     anchor_xyz = projector.project_contact(camera_id, anchor_box)
@@ -341,16 +389,26 @@ class CctvProjector:
         relation: Optional[Relation | str] = None,
         support_class: Optional[str] = None,
         raised: bool = False,
+        pose_class: Optional[str] = None,
+        support_box: Optional[tuple[float, float, float, float]] = None,
     ) -> Optional[tuple[float, float, float]]:
         geometry = self.lookup(camera_id)
         if geometry is None:
             return None
-        u, v = contact_pixel(bbox_xyxy)
+        u, v = contact_pixel(bbox_xyxy, pose_class=pose_class)
         rel = relation
         if raised and rel is None:
             rel = Relation.ON
         z_plane = raised_plane_z(geometry.ground_height, support_class, rel)
-        return intersect_ray_plane(geometry, u, v, z_plane)
+        xyz = intersect_ray_plane(geometry, u, v, z_plane)
+        if xyz is None:
+            return None
+        rel_name = rel.value if isinstance(rel, Relation) else rel
+        if rel_name in {"on", "above"} and support_box is not None:
+            footprint = _support_footprint_xy(self, camera_id, support_box, z_plane)
+            if footprint is not None:
+                xyz = snap_xy_to_footprint(xyz, footprint)
+        return xyz
 
 
 def _keep_cctv_transform(transform) -> bool:

@@ -16,10 +16,39 @@ from marc_agent.perception.bundle_paths import (
     STAGE1_CCTV_CONTRACT,
     STAGE1_CCTV_WEIGHTS,
 )
+from marc_agent.perception.candidate_ids import (
+    object_candidate_id,
+    person_candidate_id,
+)
 from marc_agent.perception.pose_to_situation import is_person_pose, situation_for_pose
-from marc_agent.types import CctvFrame, ObjectCandidate, PersonCandidate, SarCandidate
+from marc_agent.types import (
+    CctvDetectionRound,
+    CctvFrame,
+    ObjectCandidate,
+    PersonCandidate,
+    SarCandidate,
+)
 
 log = logging.getLogger("marc_agent.cctv_yolo")
+
+REFINE_CONF = 0.12
+CROP_PAD_FRAC = 0.15
+
+
+def _pad_box(
+    box: tuple[float, float, float, float],
+    image_size: tuple[float, float],
+    pad_frac: float = CROP_PAD_FRAC,
+) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = box
+    width, height = float(image_size[0]), float(image_size[1])
+    pad = pad_frac * max(width, height)
+    return (
+        max(0.0, float(x1) - pad),
+        max(0.0, float(y1) - pad),
+        min(width, float(x2) + pad),
+        min(height, float(y2) + pad),
+    )
 
 
 def _env_str(name: str, default: str) -> str:
@@ -60,6 +89,7 @@ class RuntimeContract:
     candidate_limit: int
     use_fp16: bool
     ordered_classes: tuple[str, ...]
+    ignored_classes: tuple[str, ...]
 
     @classmethod
     def load(cls, contract_path: Path = STAGE1_CCTV_CONTRACT) -> "RuntimeContract":
@@ -76,6 +106,7 @@ class RuntimeContract:
             candidate_limit=int(inference.get("candidate_limit", 50)),
             use_fp16=str(inference.get("quantize", "")).lower() == "fp16",
             ordered_classes=tuple(payload.get("ordered_classes") or ()),
+            ignored_classes=tuple(payload.get("ignored_classes") or ()),
         )
 
 
@@ -87,16 +118,15 @@ def detections_to_candidates(
     objects: list[ObjectCandidate] = []
     people: list[PersonCandidate] = []
     class_counts: dict[str, int] = defaultdict(int)
-    person_count = 0
 
     ordered = sorted(detections, key=lambda item: (item[2], item[0], -item[1]))
     for class_name, confidence, bbox in ordered:
         if is_person_pose(class_name):
-            candidate_id = f"{camera_id}:person:{person_count}"
-            person_count += 1
+            idx = class_counts[class_name]
+            class_counts[class_name] += 1
             people.append(
                 PersonCandidate(
-                    candidate_id=candidate_id,
+                    candidate_id=person_candidate_id(camera_id, class_name, idx),
                     bbox_xyxy=bbox,
                     pose_class=class_name,
                     confidence=confidence,
@@ -108,7 +138,7 @@ def detections_to_candidates(
 
         idx = class_counts[class_name]
         class_counts[class_name] += 1
-        candidate_id = f"{camera_id}:{class_name}:{idx}"
+        candidate_id = object_candidate_id(camera_id, class_name, idx)
         objects.append(
             ObjectCandidate(
                 candidate_id=candidate_id,
@@ -179,7 +209,7 @@ class CctvYoloDetector:
         self.names = {int(k): str(v) for k, v in dict(raw_names).items()}
 
     def _predict_frame(
-        self, rgb: np.ndarray
+        self, rgb: np.ndarray, *, confidence: Optional[float] = None
     ) -> list[tuple[str, float, tuple[float, float, float, float]]]:
         self.load()
         assert self.model is not None
@@ -199,7 +229,7 @@ class CctvYoloDetector:
         use_fp16 = self.contract.use_fp16 and self.device != "cpu"
         predict_kwargs = {
             "verbose": False,
-            "conf": self.contract.confidence,
+            "conf": float(self.contract.confidence if confidence is None else confidence),
             "iou": self.contract.nms_iou,
             "imgsz": self.contract.imgsz,
             "max_det": self.contract.candidate_limit,
@@ -247,6 +277,68 @@ class CctvYoloDetector:
 
         return all_objects, all_people
 
+    def refine_around_landmarks(
+        self,
+        frames: dict[str, CctvFrame],
+        objects: list[ObjectCandidate],
+        target_type: str,
+        landmark_classes: frozenset[str],
+    ) -> list[ObjectCandidate]:
+        """Re-run YOLO on padded landmark crops when the requested class is missing."""
+        if not landmark_classes or not target_type:
+            return []
+        if target_type in self.contract.ignored_classes:
+            return []
+        if target_type not in self.contract.ordered_classes:
+            return []
+        extra: list[ObjectCandidate] = []
+        counts: dict[tuple[str, str], int] = defaultdict(int)
+        for item in objects:
+            counts[(item.camera_id, item.class_name)] += 1
+        for landmark in objects:
+            if landmark.class_name not in landmark_classes:
+                continue
+            frame = frames.get(landmark.camera_id)
+            rgb = None if frame is None else getattr(frame, "rgb", None)
+            if rgb is None:
+                continue
+            array = np.asarray(rgb)
+            height, width = array.shape[:2]
+            x1, y1, x2, y2 = _pad_box(
+                landmark.bbox_xyxy, (width, height)
+            )
+            ix1, iy1, ix2, iy2 = int(x1), int(y1), int(max(x1 + 1, x2)), int(max(y1 + 1, y2))
+            crop = array[iy1:iy2, ix1:ix2]
+            if crop.size == 0:
+                continue
+            detections = self._predict_frame(crop, confidence=REFINE_CONF)
+            image_size = (int(frame.width), int(frame.height))
+            for class_name, confidence, bbox in detections:
+                if class_name != target_type:
+                    continue
+                mapped = (
+                    bbox[0] + ix1,
+                    bbox[1] + iy1,
+                    bbox[2] + ix1,
+                    bbox[3] + iy1,
+                )
+                key = (landmark.camera_id, class_name)
+                idx = counts[key]
+                counts[key] += 1
+                extra.append(
+                    ObjectCandidate(
+                        candidate_id=object_candidate_id(
+                            landmark.camera_id, class_name, idx
+                        ),
+                        class_name=class_name,
+                        bbox_xyxy=mapped,
+                        confidence=confidence,
+                        camera_id=landmark.camera_id,
+                        image_size=image_size,
+                    )
+                )
+        return extra
+
     def unload(self) -> None:
         model = self.model
         self.model = None
@@ -274,3 +366,47 @@ def detect_frames_with_yolo(
     if _detector is None:
         _detector = CctvYoloDetector()
     return _detector.detect(frames)
+
+
+def detector_can_emit(class_name: str) -> bool:
+    """True when the bundled CCTV head is trained to output this class."""
+    name = (class_name or "").strip().lower()
+    if not name:
+        return False
+    contract = RuntimeContract.load()
+    if name in contract.ignored_classes:
+        return False
+    return name in contract.ordered_classes
+
+
+def refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetectionRound:
+    """Add missing trained-class boxes from landmark crops. No-op without a live detector."""
+    if parsed is None or parsed.target_type == "person":
+        return round_
+    if any(item.class_name == parsed.target_type for item in round_.objects):
+        return round_
+    global _detector
+    if _detector is None:
+        return round_
+    names = set()
+    if parsed.landmark:
+        names.add(parsed.landmark)
+    elif parsed.scene_hint == "park":
+        names.update({"picnic_table", "bench"})
+    extra = _detector.refine_around_landmarks(
+        round_.frames,
+        round_.objects,
+        parsed.target_type,
+        frozenset(names),
+    )
+    if not extra:
+        return round_
+    objects = list(round_.objects) + extra
+    return CctvDetectionRound(
+        objects=objects,
+        people=list(round_.people),
+        sar=list(round_.sar),
+        frames=round_.frames,
+        camera_ids=list(round_.camera_ids),
+        metrics=round_.metrics,
+    )

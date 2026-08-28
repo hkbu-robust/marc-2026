@@ -165,7 +165,7 @@ class StubDetectionTests(unittest.TestCase):
     def test_live_mode_retains_people_and_records_missing_frames(self):
         people = [
             PersonCandidate(
-                "rig_2_c:person:0",
+                "rig_2_c:person_prone:0",
                 (10.0, 20.0, 30.0, 40.0),
                 "person_prone",
                 0.9,

@@ -66,6 +66,7 @@ class ParsedCommand:
     relation: Optional[Relation] = None
     situation: Optional[Situation] = None
     scene_hint: Optional[str] = None
+    place_cues: tuple[str, ...] = ()
 
 
 _OBJECT_ALIASES = {
@@ -156,6 +157,9 @@ _VEHICLE_CUE_RE = re.compile(
     r"\b(?:my|the)\s+car\b"
 )
 _DEMONSTRATIVE_PLACE_RE = re.compile(r"\b(?:there|here)\b")
+_OFF_SUPPORT_RE = re.compile(
+    r"\b(?:(?:fallen|fell|falling)\s+)?off(?:\s+of)?\s+(?:(?:an?|the)\s+)?$"
+)
 _FIND_RE = re.compile(rf"\b(?:{_FIND_PATTERN})\b")
 _BRING_RE = re.compile(rf"\b(?:{_BRING_PATTERN})\b")
 _ACTION_RE = re.compile(rf"\b(?:{_FIND_PATTERN}|{_BRING_PATTERN})\b")
@@ -533,11 +537,14 @@ def _has_vehicle_cue(text: str) -> bool:
 
 
 def uses_vehicle_anchor(parsed: ParsedCommand, text: str = "") -> bool:
-    """True when ranking should pair the target with YOLO vehicle classes."""
+    """True when ranking should pair the target with YOLO vehicle classes.
+
+    Parking/lot scene hints are not vehicles. Only explicit car cues (got out of
+    the car, the car) request a vehicle pair, and even then the parser landmark
+    stays empty so submit does not invent a car name.
+    """
     if parsed.landmark is not None or parsed.target_type == "person":
         return False
-    if parsed.scene_hint in PARKING_SCENES:
-        return True
     return bool(text) and _has_vehicle_cue(text)
 
 
@@ -547,6 +554,10 @@ def implicit_anchor_classes(parsed: ParsedCommand, text: str = "") -> frozenset[
         return frozenset({parsed.landmark})
     if uses_vehicle_anchor(parsed, text):
         return VEHICLE_LANDMARKS
+    if parsed.scene_hint == "parking_space":
+        return VEHICLE_LANDMARKS
+    if parsed.scene_hint == "park":
+        return SEATING_LANDMARKS
     return frozenset()
 
 
@@ -625,6 +636,8 @@ def _choose_landmark(
         )
         if is_sar and direct_relations:
             attached_relation = True
+        if _OFF_SUPPORT_RE.search(prefix):
+            attached_relation = True
         if attached_relation:
             return match.value
         location_prefix = text[max(0, match.start - 12) : match.start]
@@ -647,8 +660,10 @@ def _choose_landmark(
             prefix = text[max(0, match.start - 24) : match.start]
             relations = _relations_before_landmark(prefix, match.value)
             clause_start, clause_end = _clause_bounds(text, match.start, match.end)
-            support_relation = Relation.ON in relations or re.search(
-                rf"\b(?:{_NEXT_TO_PATTERN})\s+(?:the\s+)?$", prefix
+            support_relation = (
+                Relation.ON in relations
+                or bool(re.search(rf"\b(?:{_NEXT_TO_PATTERN})\s+(?:the\s+)?$", prefix))
+                or bool(_OFF_SUPPORT_RE.search(prefix))
             )
             if support_relation and _has_target_reference(
                 text[clause_start:clause_end], target_type, is_sar
@@ -917,6 +932,16 @@ def _scene_hint(text: str, target_type: str, is_sar: bool) -> Optional[str]:
     return None
 
 
+def _place_cues(landmarks: list[_Match], chosen: Optional[str]) -> tuple[str, ...]:
+    """Landmark classes mentioned in the command but not selected as the support."""
+    seen: list[str] = []
+    for match in landmarks:
+        if match.value == chosen or match.value in seen:
+            continue
+        seen.append(match.value)
+    return tuple(seen)
+
+
 def parse_command(
     text: str,
     *,
@@ -949,6 +974,7 @@ def parse_command(
         else:
             hint_scope = _sar_scene_scope(scope)
     hint = _scene_hint(hint_scope, target_type, is_sar)
+    cues = _place_cues(landmarks, landmark)
 
     if is_sar:
         return ParsedCommand(
@@ -957,6 +983,7 @@ def parse_command(
             landmark=landmark,
             situation=_resolve_situation(evidence_scope),
             scene_hint=hint,
+            place_cues=cues,
         )
 
     relations = _implicit_support_on(
@@ -979,6 +1006,7 @@ def parse_command(
         landmark=landmark,
         relation=relation,
         scene_hint=hint,
+        place_cues=cues,
     )
 
 
