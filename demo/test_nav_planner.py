@@ -123,6 +123,33 @@ def test_path_blocked_and_frontal():
     _check(not frontal_hit([(0.8, 2.0, 0.1)], pose), "disc to the side should not be frontal")
 
 
+def test_parking_lot_path_goes_around_unknown():
+    p, grid = _planner(h=40, w=50, res=0.25)
+    grid[:, :] = -1
+    grid[:, 2] = 0
+    grid[2, :] = 0
+    grid[:, 47] = 0
+    _check(p.update_from_array(grid, 0.25, 0.0, 0.0), "reload parking map")
+    start = _cell_xy(p, 30, 2)
+    goal = _cell_xy(p, 30, 30)
+    path = p.plan(start, goal, inflation_m=0.0, margin_m=20.0, snap_m=8.0, snap_goal_m=25.0)
+    _check(path, "parking lot: no path")
+    _check(len(path) >= 2, "parking lot: expected an L, got %d waypoints" % len(path))
+    chord = math.hypot(path[-1][0] - start[0], path[-1][1] - start[1])
+    _check(chord > 1.0, "parking lot: snapped goal should be away from start")
+    for wx, wy in path:
+        r, c = p._w2c(wx, wy)
+        _check(grid[r, c] == 0, "parking lot: waypoint on non-road cell %s" % ((r, c),))
+        _check(
+            not (8 <= r <= 28 and 8 <= c <= 40),
+            "parking lot: path cut through the lot at %s" % ((r, c),),
+        )
+    _check(
+        not path_is_blocked(p, [start] + list(path), inflation_m=0.0),
+        "parking lot: on-road polyline should be clear",
+    )
+
+
 def test_off_road_snap_keeps_join_waypoint():
     p, grid = _planner(h=40, w=80, res=0.25)
     grid[:, :] = 100
@@ -358,6 +385,7 @@ def main():
         test_wall_repair_goes_around,
         test_lidar_xyz_to_world,
         test_path_blocked_and_frontal,
+        test_parking_lot_path_goes_around_unknown,
         test_off_road_snap_keeps_join_waypoint,
         test_pointcloud2_xyz,
         test_overlay_persists_across_occupancy_reload,

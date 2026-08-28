@@ -9,7 +9,7 @@ from marc_agent.perception.cctv_project import (
     CctvProjector,
     static_lookup,
 )
-from marc_agent.perception.stage1_pipeline import run_stage1_round
+from marc_agent.perception.stage1_pipeline import run_stage1_round, IGNORED_CLASS_DUMMY_XYZ
 from marc_agent.command_parser import Intent
 from marc_agent.types import (
     CctvDetectionRound,
@@ -201,7 +201,7 @@ class Stage1RoundTests(unittest.TestCase):
             verifier=lambda board: "rig_a:person_bending:0|emergency",
             projector=empty,
         )
-    def test_umbrella_without_target_submits_projected_landmark(self):
+    def test_umbrella_without_target_submits_dummy(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
                 objects=[
@@ -224,10 +224,12 @@ class Stage1RoundTests(unittest.TestCase):
             projector=_geometry(),
         )
         self.assertIsNotNone(result.grounding)
-        self.assertNotEqual([0.0, 0.0, 0.0], result.grounding.target_coord)
+        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
+        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
         self.assertEqual("umbrella", result.grounding.target_type)
         self.assertEqual("vending_machine", result.grounding.landmark)
-        self.assertEqual("landmark_fallback", result.method)
+        self.assertEqual("ignored_class_dummy", result.method)
+        self.assertEqual("rig_a", result.grounding.camera_id)
 
     def test_bring_intent_reuses_object_pipeline(self):
         from marc_agent.command_parser import Intent

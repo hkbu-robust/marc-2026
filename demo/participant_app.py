@@ -343,6 +343,10 @@ class DemoParticipant:
                 "approach": list(approach),
                 "pose_xy": list(pose_xy) if pose_xy is not None else None,
                 "handoff": handoff,
+                "last_method": result.last_method,
+                "waypoint_count": len(result.path) if result.path else 0,
+                "first_waypoint": list(result.path[0]) if result.path else None,
+                "last_waypoint": list(result.path[-1]) if result.path else None,
             })
         if not c.is_running:
             return
