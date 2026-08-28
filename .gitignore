@@ -37,3 +37,4 @@ simulation-platform/.env
 docs/luka/
 .DS_Store
 .Xauthority
+.vscode/

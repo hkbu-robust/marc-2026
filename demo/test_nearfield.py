@@ -16,6 +16,7 @@ from nearfield import (
     ARM_BASE_FWD,
     MissingDetector,
     NearFieldAcquire,
+    _candidate_detection,
     depth_in_bbox,
     gated_cmd_vel,
     localize_detection,
@@ -153,6 +154,53 @@ def test_missing_detector_fail_closed():
     _check(not pos, "missing detector must never command linear, got %s" % c.cmds)
 
 
+def test_candidate_selection_skips_box_outside_reveal():
+    depth = np.full((48, 64), 0.60, dtype=np.float32)
+    result = {
+        "rgb_shape": (48, 64),
+        "candidates": [
+            {"xyxy": (55, 20, 63, 28), "confidence": 0.95, "class_id": 0, "class_name": "mug"},
+            {"xyxy": (28, 20, 36, 28), "confidence": 0.80, "class_id": 0, "class_name": "mug"},
+        ],
+    }
+    selected = _candidate_detection(
+        result, depth, (50.0, 50.0, 32.0, 24.0), (0.0, 0.0, 0.0),
+        (0.60, 0.0), 0.01,
+    )
+    _check(selected is not None, "expected an in-radius candidate")
+    _check(selected["rank"] == 2, "outside-radius top candidate must be skipped")
+
+
+def test_candidate_selection_needs_depth_and_prefers_hint_distance():
+    depth = np.full((48, 64), 0.60, dtype=np.float32)
+    result = {
+        "rgb_shape": (48, 64),
+        "candidates": [
+            {"xyxy": (48, 20, 56, 28), "confidence": 0.95, "class_id": 0, "class_name": "mug"},
+            {"xyxy": (28, 20, 36, 28), "confidence": 0.80, "class_id": 0, "class_name": "mug"},
+        ],
+    }
+    _check(
+        _candidate_detection(result, None, (50, 50, 32, 24), (0, 0, 0), (0.6, 0), 1.0) is None,
+        "candidate without depth must not drive acquisition",
+    )
+    _check(
+        _candidate_detection(result, depth, (50, 50, 32, 24), None, (0.6, 0), 1.0) is None,
+        "candidate without chassis pose must not bypass reveal containment",
+    )
+    selected = _candidate_detection(
+        result, depth, (50, 50, 32, 24), (0, 0, 0), (0.60, 0.0), 1.0,
+    )
+    _check(selected["rank"] == 2, "candidate nearest the reveal hint must beat confidence")
+
+
+def test_no_depth_never_commands_linear_motion():
+    acq = NearFieldAcquire.__new__(NearFieldAcquire)
+    acq._phase, acq._phase_t0, acq._align_ok, acq._scan_sign = "align", 0.0, 1, 1.0
+    linear, _ = acq._command(1.0, n_obj=1, err=0.0, d_obj=None)
+    _check(linear == 0.0, "missing depth must never command positive linear motion")
+
+
 def main():
     tests = [
         test_depth_in_bbox_ignores_bad_center_pixel,
@@ -161,6 +209,9 @@ def main():
         test_gated_cmd_zeros_linear_outside_disc,
         test_fixture_box_localizes,
         test_missing_detector_fail_closed,
+        test_candidate_selection_skips_box_outside_reveal,
+        test_candidate_selection_needs_depth_and_prefers_hint_distance,
+        test_no_depth_never_commands_linear_motion,
     ]
     failed = 0
     for fn in tests:

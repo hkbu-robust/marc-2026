@@ -68,6 +68,8 @@ class YoloConfig:
     nms_iou: float = 0.7
     end2end: bool = False
     candidate_limit: int = MAX_CANDIDATES
+    quantize: Optional[str] = None
+    ordered_classes: tuple[str, ...] = ()
     status: str = "unknown"
     known_limitations: tuple[str, ...] = ()
 
@@ -77,6 +79,8 @@ class YoloConfig:
         contract_path = Path(weights).with_name("runtime_contract.json")
         contract = json.loads(contract_path.read_text()) if contract_path.is_file() else {}
         inference = contract.get("inference", {})
+        quantize = inference.get("quantize")
+        quantize = "fp16" if _env_bool("MARC_YOLO_HALF", quantize == "fp16") else None
         return cls(
             weights=weights,
             conf=_env_float("MARC_YOLO_CONF", inference.get("confidence", DEFAULT_CONF)),
@@ -89,6 +93,8 @@ class YoloConfig:
             candidate_limit=max(
                 1, min(MAX_CANDIDATES, int(inference.get("candidate_limit", MAX_CANDIDATES)))
             ),
+            quantize=quantize,
+            ordered_classes=tuple(str(name) for name in contract.get("ordered_classes", ())),
             status=str(contract.get("status", "unknown")),
             known_limitations=tuple(str(item) for item in contract.get("known_limitations", ())),
         )
@@ -155,6 +161,12 @@ class YoloTracker:
             self.model = YOLO(weights)
             raw_names = getattr(self.model, "names", None) or {}
             self.names = {int(k): str(v) for k, v in dict(raw_names).items()}
+            loaded_order = tuple(self.names[index] for index in sorted(self.names))
+            if self.cfg.ordered_classes and loaded_order != self.cfg.ordered_classes:
+                raise ValueError(
+                    f"checkpoint class order {loaded_order} does not match contract "
+                    f"{self.cfg.ordered_classes}"
+                )
             print(
                 f"[yolo] ready status={self.cfg.status} classes={len(self.names)} "
                 f"conf={self.cfg.conf} max={self.cfg.candidate_limit}"
@@ -180,7 +192,11 @@ class YoloTracker:
     ) -> dict:
         """Return up to 20 confidence-sorted candidates for one exact target."""
         target = str(target_type or "").strip()
-        class_ids = {name: class_id for class_id, name in self.names.items()}
+        class_ids = {
+            name: class_id for class_id, name in (
+                self.names.items() if self.names else enumerate(self.cfg.ordered_classes)
+            )
+        }
         if target not in class_ids:
             return {"status": "unsupported_target", "target_type": target, "rgb_shape": None, "candidates": []}
         if self.model is None:
@@ -206,6 +222,7 @@ class YoloTracker:
             max_det=min(MAX_CANDIDATES, int(self.cfg.candidate_limit)),
             end2end=bool(self.cfg.end2end),
             iou=float(self.cfg.nms_iou),
+            quantize=self.cfg.quantize if self.device != "cpu" else None,
         )
         try:
             results = self.model.predict(src, **kw)
@@ -237,7 +254,9 @@ class YoloTracker:
                 "class_name": target,
             })
         candidates.sort(key=lambda item: item["confidence"], reverse=True)
-        candidates = candidates[:MAX_CANDIDATES]
+        candidates = candidates[:min(MAX_CANDIDATES, int(self.cfg.candidate_limit))]
+        for rank, candidate in enumerate(candidates, 1):
+            candidate["rank"] = rank
         return {
             "status": "ok" if candidates else "not_detected",
             "target_type": target,

@@ -270,6 +270,7 @@ def train_detector(args: argparse.Namespace) -> None:
     record = {
         "status": "disposable_smoke" if args.smoke else "provisional",
         "promotion_eligible": not args.smoke,
+        "completed": False,
         "seed_checkpoint": {
             "path": str(checkpoint),
             "sha256": STAGE1_SEED_SHA256,
@@ -324,6 +325,7 @@ def train_detector(args: argparse.Namespace) -> None:
         record["outputs"] = {"best": str(trainer.best), "last": str(trainer.last)}
         record["peak_training_memory_gib"] = torch.cuda.max_memory_reserved() / 1024**3
         record["final_metrics"] = trainer.metrics
+        record["completed"] = True
         _write_json(record_path, record)
 
     model.add_callback("on_train_start", on_train_start)

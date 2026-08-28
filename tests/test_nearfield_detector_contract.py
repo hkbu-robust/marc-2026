@@ -62,6 +62,11 @@ class NearfieldDetectorContractTests(unittest.TestCase):
         self.assertEqual([], result["candidates"])
         self.assertEqual([], tracker.model.calls)
 
+    def test_supported_target_without_model_is_detector_unavailable(self):
+        tracker = YoloTracker(YoloConfig(ordered_classes=("mug", "tumbler")))
+        result = tracker.detect_candidates(np.zeros((48, 64, 3), dtype=np.uint8), "mug")
+        self.assertEqual("detector_unavailable", result["status"])
+
     def test_supported_but_missing_is_not_detected(self):
         tracker = self._tracker(_Boxes())
         result = tracker.detect_candidates(np.zeros((48, 64, 3), dtype=np.uint8), "mug")
@@ -84,6 +89,7 @@ class NearfieldDetectorContractTests(unittest.TestCase):
         )
         self.assertTrue(all(item["class_name"] == "mug" for item in result["candidates"]))
         self.assertTrue(all(item["class_id"] == 0 for item in result["candidates"]))
+        self.assertEqual(list(range(1, MAX_CANDIDATES + 1)), [item["rank"] for item in result["candidates"]])
         self.assertEqual((0.0, 0.0, 64.0, 48.0), result["candidates"][0]["xyxy"])
 
     def test_detect_is_thin_first_candidate_wrapper(self):
@@ -101,10 +107,11 @@ class NearfieldDetectorContractTests(unittest.TestCase):
             weights.touch()
             (root / "runtime_contract.json").write_text(json.dumps({
                 "status": "provisional",
+                "ordered_classes": ["mug", "tumbler"],
                 "known_limitations": ["ordinary umbrella is absent"],
                 "inference": {
                     "imgsz": 1280, "confidence": 0.2, "nms_iou": 0.5,
-                    "end2end": False, "candidate_limit": 50,
+                    "end2end": False, "candidate_limit": 50, "quantize": "fp16",
                 },
             }), encoding="utf-8")
             with patch.dict("os.environ", {"MARC_YOLO_WEIGHTS": str(weights)}, clear=False):
@@ -112,6 +119,8 @@ class NearfieldDetectorContractTests(unittest.TestCase):
             self.assertEqual(1280, config.imgsz)
             self.assertEqual(0.2, config.conf)
             self.assertEqual(MAX_CANDIDATES, config.candidate_limit)
+            self.assertEqual("fp16", config.quantize)
+            self.assertEqual(("mug", "tumbler"), config.ordered_classes)
             self.assertEqual("provisional", config.status)
 
 

@@ -1,0 +1,63 @@
+{
+  "status": "provisional",
+  "checkpoint": "model.pt",
+  "checkpoint_sha256": "3092b0c64f5d543f20a8dd6fa0bc9ce645298be9b36722dc39f7878e4ee58232",
+  "selected_training_checkpoint": {
+    "name": "epoch40.pt",
+    "sha256": "931e1824a4cf08cb5865f112d9405e83b936d14616d067aace5c98b78488d146"
+  },
+  "ordered_classes": [
+    "tumbler",
+    "cracker_box",
+    "cola_can",
+    "disposable_cup",
+    "juice",
+    "tissue",
+    "mug",
+    "sunblock",
+    "pencilcase"
+  ],
+  "preprocessing": {
+    "input": "full-frame PIL.Image RGB or NumPy uint8 HWC RGB",
+    "resize": "Ultralytics letterbox to imgsz=1920",
+    "internal": "RGB HWC to CHW, FP16/FP32, divide by 255"
+  },
+  "inference": {
+    "full_frame": true,
+    "imgsz": 1920,
+    "end2end": false,
+    "nms_iou": 0.5,
+    "confidence": 0.3,
+    "candidate_limit": 10,
+    "quantize": "fp16"
+  },
+  "local_checkpoint_load_verified": true,
+  "offline_bundle_load_verified": true,
+  "runtime_benchmark": {
+    "path": "YoloDetector -> YoloTracker.detect_candidates -> NearFieldAcquire candidate/radius selection",
+    "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "batch": 1,
+    "warmup_iterations": 5,
+    "timed_iterations": 30,
+    "mean_ms": 19.496014869461458,
+    "median_ms": 19.48991371318698,
+    "p95_ms": 19.711334258317947,
+    "peak_allocated_gib": 0.5912961959838867,
+    "peak_reserved_gib": 1.125
+  },
+  "output": {
+    "type": "exact-target candidates",
+    "fields": ["rank", "class_id", "class_name", "confidence", "xyxy"],
+    "coordinates": "pixel xyxy in the original RGB image",
+    "ordering": "confidence descending",
+    "maximum_candidates": 10
+  },
+  "known_limitations": [
+    "Ordinary umbrella is absent; this provisional dataset covers nine of ten scored classes.",
+    "No independent test split exists.",
+    "No reliable scenario, range, or bearing manifest exists.",
+    "The same validation split is used for model selection and readiness reporting.",
+    "This is a provisional nine-class integration model, not final challenge-readiness evidence.",
+    "Empty-label intent metadata is absent; empty-label frames are not known intentional negatives."
+  ]
+}

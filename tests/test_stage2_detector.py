@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 from PIL import Image
 
-from training.evaluate_cctv_detector import _best_available, _frames, _select, _training_record
+from training.evaluate_cctv_detector import _best_available, _frames, _score, _select, _training_record
 from training.stage2_detector import prepare_dataset
 
 
@@ -99,6 +99,30 @@ class Stage2DatasetTests(unittest.TestCase):
 
         self.assertEqual(0.8, _select([result(0.99, 0.0), result(0.8, 0.8)])["macro_f1"])
         self.assertEqual(0.8, _best_available([result(0.99, 0.0), result(0.8, 0.8)])["macro_f1"])
+
+    def test_target_budget_is_applied_after_class_filtering(self):
+        frame = {
+            "image": Path("frame.png"), "camera": "all", "shape": (48, 64),
+            "labels": [(0, 0.5, 0.5, 0.25, 0.25)],
+        }
+        distractors = [
+            {"class_id": 1, "conf": 0.99 - index / 100, "xyxy": [0, 0, 5, 5]}
+            for index in range(20)
+        ]
+        target = {"class_id": 0, "conf": 0.1, "xyxy": [24, 18, 40, 30]}
+        score = _score([frame], {"frame.png": [*distractors, target]}, ["target", "other"], 0.01, 1)
+        self.assertEqual(1.0, score["classes"]["target"]["recall"])
+        self.assertEqual("after exact-target filtering", score["candidate_limit_applied"])
+
+    def test_size_buckets_use_native_short_side(self):
+        frame = {
+            "image": Path("frame.png"), "camera": "all", "shape": (480, 640),
+            "labels": [(0, 0.5, 0.5, 40 / 640, 8 / 480)],
+        }
+        prediction = {"class_id": 0, "conf": 0.9, "xyxy": [300, 236, 340, 244]}
+        score = _score([frame], {"frame.png": [prediction]}, ["target"], 0.01, 20)
+        self.assertEqual(1, score["sizes"]["tiny"]["gt"])
+        self.assertNotIn("small", score["sizes"])
 
     def test_smoke_record_cannot_be_promoted(self):
         with tempfile.TemporaryDirectory() as temp:

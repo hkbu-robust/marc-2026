@@ -1,0 +1,22 @@
+{
+  "status": "ok",
+  "target_type": "tumbler",
+  "rgb_shape": [
+    480,
+    640
+  ],
+  "candidates": [
+    {
+      "xyxy": [
+        629.3333740234375,
+        152.0,
+        640.0,
+        160.33334350585938
+      ],
+      "confidence": 0.73388671875,
+      "class_id": 0,
+      "class_name": "tumbler",
+      "rank": 1
+    }
+  ]
+}

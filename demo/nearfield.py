@@ -408,6 +408,40 @@ def _yaw_for_err(err: float) -> float:
     return math.copysign(mag, ang)
 
 
+def _candidate_detection(result, depth, k, pose, hint_xy, radius, R=None, t=None):
+    """Choose the exact-target candidate nearest the reveal hint with usable depth."""
+    shape = result.get("rgb_shape")
+    if shape is None or depth is None or pose is None:
+        return None
+    h, w = int(shape[0]), int(shape[1])
+    eligible = []
+    for rank, candidate in enumerate(result.get("candidates", ()), 1):
+        bbox = candidate["xyxy"]
+        localized = localize_detection(
+            bbox, depth, shape, k, pose, hint_xy, radius,
+            conf=candidate["confidence"], name=candidate["class_name"], R=R, t=t,
+        )
+        if localized.reason in {"no_depth", "outside_radius"}:
+            continue
+        hint_distance = (
+            math.dist(localized.world_xy, hint_xy)
+            if localized.world_xy is not None and hint_xy is not None else 0.0
+        )
+        eligible.append((hint_distance, -candidate["confidence"], rank, candidate))
+    if not eligible:
+        return None
+    _, _, rank, candidate = min(eligible)
+    bbox = candidate["xyxy"]
+    x1, y1, x2, y2 = bbox
+    cx = 0.5 * (x1 + x2)
+    return {
+        "status": "ok", "n_obj": 1, "bbox": bbox,
+        "conf": candidate["confidence"], "cls": candidate["class_id"],
+        "name": candidate["class_name"], "rank": candidate.get("rank", rank), "rgb_shape": shape,
+        "error": float(np.clip((cx - 0.5 * (w - 1)) / (0.5 * (w - 1)), -1.0, 1.0)),
+    }
+
+
 class NearFieldAcquire:
     """Search inside the reveal disc, close on bbox depth, emit arm_base 3D."""
 
@@ -453,10 +487,19 @@ class NearFieldAcquire:
             rgb, depth, info, rgb_msg = self._read_locked()
             det = None
             if rgb is not None:
-                det = self.detector.detect(rgb)
-                if det is not None and det.get("status") == "unsupported_target":
+                result = self.detector.detect_candidates(rgb, ttype)
+                status = result.get("status")
+                if status == "unsupported_target":
                     self._stop()
                     return LocalizedTarget(valid=False, reason="unsupported_target")
+                if status not in {"ok", "not_detected"}:
+                    self._stop()
+                    return LocalizedTarget(valid=False, reason=str(status or "detector_error"))
+                k = k_from_info(info, rgb.shape[:2])
+                R, tvec = self._cam_to_car(rgb_msg)
+                det = _candidate_detection(
+                    result, depth, k, pose, hint_xy, radius, R=R, t=tvec
+                )
                 last_good_t = now
 
             n_obj = 0 if det is None else int(det.get("n_obj") or 0)
@@ -467,8 +510,6 @@ class NearFieldAcquire:
                 d_obj = depth_in_bbox(depth, bbox, det.get("rgb_shape") or rgb.shape[:2])
 
             if n_obj > 0 and bbox is not None and depth is not None and pose is not None:
-                k = k_from_info(info, rgb.shape[:2] if rgb is not None else (480, 640))
-                R, tvec = self._cam_to_car(rgb_msg)
                 cand = localize_detection(
                     bbox, depth, det.get("rgb_shape") or rgb.shape[:2], k, pose,
                     hint_xy, radius,
@@ -535,7 +576,7 @@ class NearFieldAcquire:
 
     def _command(self, now: float, n_obj: int, err, d_obj) -> tuple:
         since = now - self._phase_t0
-        has = n_obj > 0 and err is not None
+        has = n_obj > 0 and err is not None and d_obj is not None
         if d_obj is not None and n_obj > 0 and d_obj < ALREADY_NEAR_M:
             return 0.0, 0.0
 
