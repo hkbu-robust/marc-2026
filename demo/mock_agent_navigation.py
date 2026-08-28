@@ -415,8 +415,14 @@ def run_nav_leg(
     return result.reached
 
 
-def path_is_blocked(planner, waypoints, extra_obstacles=None, inflation_m=0.25):
-    """True if any remaining polyline segment fails Bresenham LOS on the inflated grid."""
+def path_is_blocked(
+    planner, waypoints, extra_obstacles=None, inflation_m=0.25, ignore_overlay=False,
+):
+    """True if any remaining polyline segment fails Bresenham LOS on the inflated grid.
+
+    ``ignore_overlay=True`` checks occupancy only (100 / unknown). Use that to reject
+    off-road cuts while still keeping a D* detour whose start chord hits lidar overlay.
+    """
     if planner is None or not planner.ready or waypoints is None or len(waypoints) < 2:
         return False
     cells = []
@@ -432,7 +438,7 @@ def path_is_blocked(planner, waypoints, extra_obstacles=None, inflation_m=0.25):
     cmax = min(planner._w, max(c for _, c in cells) + pad + 1)
     sub = planner._grid[rmin:rmax, cmin:cmax]
     trav = OccupancyGridPlanner._traversable(sub)
-    if planner._overlay is not None:
+    if not ignore_overlay and planner._overlay is not None:
         trav = np.logical_and(
             trav, np.logical_not(planner._overlay[rmin:rmax, cmin:cmax]))
     if extra_obstacles:

@@ -34,6 +34,8 @@ log = logging.getLogger("marc_agent.cctv_yolo")
 REFINE_CONF = 0.12
 CROP_PAD_FRAC = 0.15
 REFINE_DEDUP_IOU = 0.45
+REFINE_IMGSZ = 640
+REFINE_IMGSZ_STRIDE = 32
 
 
 def _pad_box(
@@ -43,13 +45,39 @@ def _pad_box(
 ) -> tuple[float, float, float, float]:
     x1, y1, x2, y2 = box
     width, height = float(image_size[0]), float(image_size[1])
-    pad = pad_frac * max(width, height)
+    pad = pad_frac * max(float(x2) - float(x1), float(y2) - float(y1), 1.0)
     return (
         max(0.0, float(x1) - pad),
         max(0.0, float(y1) - pad),
         min(width, float(x2) + pad),
         min(height, float(y2) + pad),
     )
+
+
+def _letterbox_imgsz(
+    width: int,
+    height: int,
+    *,
+    cap: int,
+    stride: int = REFINE_IMGSZ_STRIDE,
+) -> int:
+    side = max(int(width), int(height), stride)
+    side = min(side, int(cap))
+    return max(stride, ((side + stride - 1) // stride) * stride)
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    if "outofmemory" in name:
+        return True
+    text = str(exc).lower()
+    return "out of memory" in text and "cuda" in text
+
+
+def _release_cuda() -> None:
+    from marc_agent.gpu_handoff import empty_cuda_cache
+
+    empty_cuda_cache()
 
 
 def _box_iou(
@@ -227,7 +255,11 @@ class CctvYoloDetector:
         self.names = {int(k): str(v) for k, v in dict(raw_names).items()}
 
     def _predict_frame(
-        self, rgb: np.ndarray, *, confidence: Optional[float] = None
+        self,
+        rgb: np.ndarray,
+        *,
+        confidence: Optional[float] = None,
+        imgsz: Optional[int] = None,
     ) -> list[tuple[str, float, tuple[float, float, float, float]]]:
         self.load()
         assert self.model is not None
@@ -245,11 +277,12 @@ class CctvYoloDetector:
             pass
 
         use_fp16 = self.contract.use_fp16 and self.device != "cpu"
+        letterbox = self.contract.imgsz if imgsz is None else int(imgsz)
         predict_kwargs = {
             "verbose": False,
             "conf": float(self.contract.confidence if confidence is None else confidence),
             "iou": self.contract.nms_iou,
-            "imgsz": self.contract.imgsz,
+            "imgsz": letterbox,
             "max_det": self.contract.candidate_limit,
             "device": self.device,
         }
@@ -293,6 +326,7 @@ class CctvYoloDetector:
             all_objects.extend(objects)
             all_people.extend(people)
 
+        _release_cuda()
         return all_objects, all_people
 
     def refine_around_landmarks(
@@ -333,6 +367,27 @@ class CctvYoloDetector:
             )
         return extra
 
+    def _landmarks_for_refine(
+        self,
+        objects: list[ObjectCandidate],
+        landmark_classes: frozenset[str],
+    ) -> list[ObjectCandidate]:
+        """One highest-confidence landmark per camera to bound refine VRAM."""
+        best: dict[str, ObjectCandidate] = {}
+        for item in objects:
+            if item.class_name not in landmark_classes:
+                continue
+            current = best.get(item.camera_id)
+            if current is None or item.confidence > current.confidence:
+                best[item.camera_id] = item
+                continue
+            if (
+                item.confidence == current.confidence
+                and item.candidate_id < current.candidate_id
+            ):
+                best[item.camera_id] = item
+        return [best[camera_id] for camera_id in sorted(best)]
+
     def _predict_around_landmarks(
         self,
         frames: dict[str, CctvFrame],
@@ -349,11 +404,7 @@ class CctvYoloDetector:
     ]:
         """Map low-threshold crop detections back into their full camera frames."""
         mapped_detections = []
-        landmarks = sorted(
-            (item for item in objects if item.class_name in landmark_classes),
-            key=lambda item: item.candidate_id,
-        )
-        for landmark in landmarks:
+        for landmark in self._landmarks_for_refine(objects, landmark_classes):
             frame = frames.get(landmark.camera_id)
             rgb = None if frame is None else getattr(frame, "rgb", None)
             if rgb is None:
@@ -368,8 +419,28 @@ class CctvYoloDetector:
             if crop.size == 0:
                 continue
             image_size = (int(frame.width), int(frame.height))
+            try:
+                crop_imgsz = _letterbox_imgsz(
+                    crop.shape[1],
+                    crop.shape[0],
+                    cap=min(REFINE_IMGSZ, self.contract.imgsz),
+                )
+                detections = self._predict_frame(
+                    crop, confidence=REFINE_CONF, imgsz=crop_imgsz
+                )
+            except Exception as exc:
+                if not _is_cuda_oom(exc):
+                    raise
+                log.warning(
+                    "[cctv-yolo] refine crop OOM camera=%s landmark=%s; skipping",
+                    landmark.camera_id,
+                    landmark.candidate_id,
+                )
+                _release_cuda()
+                continue
+            _release_cuda()
             for class_name, confidence, bbox in sorted(
-                self._predict_frame(crop, confidence=REFINE_CONF),
+                detections,
                 key=lambda item: (item[2], item[0], -item[1]),
             ):
                 mapped = (
@@ -476,6 +547,20 @@ def refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetectionR
     global _detector
     if _detector is None:
         return round_
+    try:
+        return _refine_detection_round(parsed, round_)
+    except Exception as exc:
+        if not _is_cuda_oom(exc):
+            raise
+        log.warning(
+            "[cctv-yolo] refine OOM; keeping full-frame detections error=%s",
+            exc,
+        )
+        _release_cuda()
+        return round_
+
+
+def _refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetectionRound:
     if parsed.target_type == "person":
         names = frozenset({parsed.landmark}) if parsed.landmark else frozenset()
         extra_people = _detector.refine_people_around_landmarks(
@@ -483,6 +568,12 @@ def refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetectionR
             round_.objects,
             round_.people,
             names,
+        )
+        log.info(
+            "[cctv-yolo] person-refine landmark=%s added=%d ids=%s",
+            parsed.landmark,
+            len(extra_people),
+            ",".join(item.candidate_id for item in extra_people) or "-",
         )
         if not extra_people:
             return round_

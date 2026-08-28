@@ -248,6 +248,32 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("object_relation", selected.method)
         self.assertIn("output=not a pair", "\n".join(captured.output))
 
+    def test_single_pair_logs_skip_reason_and_does_not_call_verifier(self):
+        parsed = parse_command("Find the tumbler.")
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "rig_a:tumbler:0",
+                    "tumbler",
+                    (40.0, 40.0, 80.0, 120.0),
+                    "rig_a",
+                    0.9,
+                ),
+            ],
+            camera_ids=["rig_a"],
+        )
+        called = []
+        with self.assertLogs("marc_agent.object_selection", level="INFO") as logged:
+            selected = select_object_candidate(
+                parsed,
+                round_,
+                command_text="Find the tumbler.",
+                verifier=lambda board: called.append(1) or "nope",
+            )
+        self.assertEqual("rig_a:tumbler:0", selected.target.candidate_id)
+        self.assertFalse(called)
+        self.assertIn("verify=False reason=single_pair", "\n".join(logged.output))
+
     def test_no_landmark_verifier_picks_lower_confidence_tumbler(self):
         parsed = parse_command("Find the tumbler.")
         round_ = CctvDetectionRound(
@@ -292,6 +318,18 @@ class ObjectSelectionTests(unittest.TestCase):
         round_ = _on_table_vs_beside_bench()
         ranked = rank_object_candidates(parsed, round_)
         target_id, anchor_id = parse_object_verifier_output("rig_a:mug:", ranked)
+        self.assertEqual("rig_a:mug:0", target_id)
+        self.assertEqual("rig_a:picnic_table:0", anchor_id)
+
+    def test_verifier_thinking_trace_uses_last_valid_pair(self):
+        parsed = parse_command("Find the mug on the picnic table.")
+        round_ = _on_table_vs_beside_bench()
+        ranked = rank_object_candidates(parsed, round_)
+        target_id, anchor_id = parse_object_verifier_output(
+            "<think>rig_b:mug:0|rig_b:bench:0 looks closer</think>\n"
+            "The match is rig_a:mug:0|rig_a:picnic_table:0",
+            ranked,
+        )
         self.assertEqual("rig_a:mug:0", target_id)
         self.assertEqual("rig_a:picnic_table:0", anchor_id)
 

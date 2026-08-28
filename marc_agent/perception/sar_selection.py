@@ -13,6 +13,7 @@ from typing import Callable, Iterable, Optional
 from marc_agent.command_parser import ParsedCommand, Relation, SEATING_LANDMARKS
 from marc_agent.perception.camera_gate import scene_classes
 from marc_agent.perception.pose_to_situation import situation_for_pose
+from marc_agent.perception.qwen_reply import call_verifier, last_parsed
 from marc_agent.perception.qwen_runtime import (
     QwenRuntimeConfig,
     configured_max_crops,
@@ -22,6 +23,7 @@ from marc_agent.perception.situation_rules import POSE_GROUPS, SUPPORT_CLASSES
 from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidate
 
 _SITUATIONS = frozenset({"normal", "abnormal", "emergency", "accident"})
+_P_ID_RE = re.compile(r"^P(\d+)$", re.IGNORECASE)
 log = logging.getLogger("marc_agent.sar_selection")
 
 
@@ -490,11 +492,12 @@ def build_candidate_board(
             images.append(_context_crop(frame, item))
 
     rows = []
-    for item in evidence:
+    for index, item in enumerate(evidence, start=1):
         anchor = item.anchor
         rows.append(
             " | ".join(
                 (
+                    f"P{index:02d}",
                     item.person.candidate_id,
                     f"camera={item.person.camera_id}",
                     f"pose={item.person.pose_class}",
@@ -535,9 +538,18 @@ def parse_verifier_output(
     raw_output: str,
     candidate_ids: tuple[str, ...],
 ) -> tuple[str, Optional[str]]:
-    """Validate a finite candidate ID; tolerate the previous situation suffix."""
-    text = (raw_output or "").strip()
-    if not text or any(char.isspace() for char in text):
+    """Validate a finite candidate ID; tolerate thinking, prose, and a situation suffix."""
+    return last_parsed(
+        raw_output,
+        lambda token: _parse_sar_token(token, candidate_ids),
+    )
+
+
+def _parse_sar_token(
+    token: str, candidate_ids: tuple[str, ...]
+) -> tuple[str, Optional[str]]:
+    text = (token or "").strip()
+    if not text:
         raise ValueError("output must be exactly CANDIDATE_ID")
     parts = text.split("|")
     situation = parts[-1] if parts[-1] in _SITUATIONS else None
@@ -546,6 +558,11 @@ def parse_verifier_output(
 
 
 def _resolve_candidate_id(raw_id: str, candidate_ids: tuple[str, ...]) -> str:
+    numbered = _P_ID_RE.fullmatch((raw_id or "").strip())
+    if numbered:
+        index = int(numbered.group(1)) - 1
+        if 0 <= index < len(candidate_ids):
+            return candidate_ids[index]
     if raw_id in candidate_ids:
         return raw_id
     joined = raw_id.replace("|", ":")
@@ -566,6 +583,10 @@ def _resolve_candidate_id(raw_id: str, candidate_ids: tuple[str, ...]) -> str:
         if len(matches) == 1:
             return matches[0]
     raise ValueError(f"unknown candidate ID: {raw_id!r}")
+
+
+def _chat_template_kwargs() -> dict:
+    return {"enable_thinking": False}
 
 
 class QwenSarVerifier:
@@ -601,13 +622,18 @@ class QwenSarVerifier:
             content = [{"type": "image", "image": image} for image in board.images]
             content.append({"type": "text", "text": board.prompt})
             messages = [{"role": "user", "content": content}]
-            inputs = self._processor.apply_chat_template(
-                messages,
+            template_kw = dict(
                 tokenize=True,
                 add_generation_prompt=True,
                 return_dict=True,
                 return_tensors="pt",
             )
+            try:
+                inputs = self._processor.apply_chat_template(
+                    messages, **template_kw, **_chat_template_kwargs(),
+                )
+            except TypeError:
+                inputs = self._processor.apply_chat_template(messages, **template_kw)
             inputs = inputs.to(self._model.device)
 
             import torch
@@ -681,11 +707,13 @@ def select_sar_candidate(
     metrics = None
     if verifier is not None:
         try:
-            raw_output = verifier(board)
-            metrics = _verifier_metrics(verifier, board)
-            candidate_id, evidence_situation = parse_verifier_output(
-                raw_output, board.candidate_ids
+            (parsed, raw_output) = call_verifier(
+                verifier,
+                board,
+                lambda text: parse_verifier_output(text, board.candidate_ids),
             )
+            candidate_id, evidence_situation = parsed
+            metrics = _verifier_metrics(verifier, board)
             selected = next(
                 item.person
                 for item in board.evidence
@@ -713,6 +741,8 @@ def select_sar_candidate(
             metrics = _verifier_metrics(verifier, board)
             fallback_reason = f"verifier_failed:{type(exc).__name__}"
             raw_output = locals().get("raw_output")
+            if raw_output is None:
+                raw_output = getattr(exc, "raw_output", None)
             preview = (
                 " ".join(raw_output.split()) if isinstance(raw_output, str) else None
             )

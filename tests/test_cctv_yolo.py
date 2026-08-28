@@ -15,6 +15,8 @@ from marc_agent.perception.bundle_paths import STAGE1_CCTV_CONTRACT, STAGE1_CCTV
 from marc_agent.perception.cctv_yolo import (
     CctvYoloDetector,
     RuntimeContract,
+    _letterbox_imgsz,
+    _pad_box,
     detections_to_candidates,
     person_candidates_to_sar,
     refine_detection_round,
@@ -153,7 +155,7 @@ class CctvYoloTests(unittest.TestCase):
         detector.model = object()
         detector.names = {8: "pencilcase"}
 
-        def fake_predict(rgb, *, confidence=None):
+        def fake_predict(rgb, *, confidence=None, **_kwargs):
             self.assertLess(confidence, detector.contract.confidence)
             return [("pencilcase", 0.4, (5.0, 6.0, 15.0, 18.0))]
 
@@ -186,7 +188,7 @@ class CctvYoloTests(unittest.TestCase):
         detector.model = object()
         detector.names = {8: "person_reclining"}
 
-        def fake_predict(rgb, *, confidence=None):
+        def fake_predict(rgb, *, confidence=None, **_kwargs):
             self.assertLess(confidence, detector.contract.confidence)
             return [("person_reclining", 0.4, (5.0, 6.0, 55.0, 66.0))]
 
@@ -224,7 +226,7 @@ class CctvYoloTests(unittest.TestCase):
         detector.model = object()
         detector.names = {8: "person_sitting"}
         detector._predict_frame = Mock(
-            return_value=[("person_sitting", 0.4, (96.0, 96.0, 196.0, 296.0))]
+            return_value=[("person_sitting", 0.4, (30.0, 30.0, 130.0, 230.0))]
         )
         frame = CctvFrame(
             "rig_a",
@@ -302,6 +304,117 @@ class CctvYoloTests(unittest.TestCase):
             round_.people,
             frozenset({"bench"}),
         )
+
+    def test_pad_box_uses_box_size_not_frame_size(self):
+        padded = _pad_box((100.0, 200.0, 200.0, 300.0), (1920.0, 1080.0))
+        self.assertEqual((85.0, 185.0, 215.0, 315.0), padded)
+
+    def test_letterbox_imgsz_caps_refine_crops(self):
+        self.assertEqual(224, _letterbox_imgsz(200, 180, cap=640))
+        self.assertEqual(640, _letterbox_imgsz(800, 800, cap=640))
+        self.assertEqual(1920, _letterbox_imgsz(1920, 1080, cap=1920))
+
+    def test_small_crop_predict_uses_capped_imgsz(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.device = "cpu"
+        detector.model = Mock()
+        detector.names = {0: "mug"}
+        result = Mock()
+        result.boxes = None
+        detector.model.predict.return_value = [result]
+        crop = np.zeros((120, 80, 3), dtype=np.uint8)
+        detector._predict_frame(crop, confidence=0.12, imgsz=224)
+        self.assertEqual(224, detector.model.predict.call_args.kwargs["imgsz"])
+
+    def test_full_frame_predict_keeps_contract_imgsz(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.device = "cpu"
+        detector.model = Mock()
+        detector.names = {0: "mug"}
+        result = Mock()
+        result.boxes = None
+        detector.model.predict.return_value = [result]
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        detector._predict_frame(frame)
+        self.assertEqual(1920, detector.model.predict.call_args.kwargs["imgsz"])
+
+    def test_refine_uses_one_landmark_per_camera(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.model = object()
+        detector.names = {}
+        detector._predict_frame = Mock(return_value=[])
+        frame = CctvFrame(
+            "rig_a",
+            640,
+            480,
+            np.zeros((480, 640, 3), dtype=np.uint8),
+        )
+        bikes = [
+            ObjectCandidate(
+                "rig_a:bicycle:0",
+                "bicycle",
+                (40.0, 40.0, 80.0, 120.0),
+                0.4,
+                "rig_a",
+                (640, 480),
+            ),
+            ObjectCandidate(
+                "rig_a:bicycle:1",
+                "bicycle",
+                (200.0, 80.0, 280.0, 200.0),
+                0.9,
+                "rig_a",
+                (640, 480),
+            ),
+        ]
+        detector.refine_people_around_landmarks(
+            {"rig_a": frame},
+            bikes,
+            [],
+            frozenset({"bicycle"}),
+        )
+        self.assertEqual(1, detector._predict_frame.call_count)
+        crop = detector._predict_frame.call_args.args[0]
+        self.assertLess(crop.shape[0], 480)
+        self.assertLess(crop.shape[1], 640)
+        self.assertLessEqual(detector._predict_frame.call_args.kwargs["imgsz"], 640)
+
+    def test_refine_oom_keeps_full_frame_detections(self):
+        parsed = parse_command(
+            "Find the person fallen on the ground next to the toppled bicycle."
+        )
+        bike = ObjectCandidate(
+            "rig_a:bicycle:0",
+            "bicycle",
+            (100.0, 200.0, 200.0, 400.0),
+            0.9,
+            "rig_a",
+            (640, 480),
+        )
+        person = PersonCandidate(
+            "rig_a:person_walking:0",
+            (20.0, 40.0, 80.0, 300.0),
+            "person_walking",
+            0.9,
+            "rig_a",
+            (640, 480),
+        )
+        round_ = CctvDetectionRound(
+            objects=[bike],
+            people=[person],
+            camera_ids=["rig_a"],
+        )
+        detector = Mock()
+        detector.refine_people_around_landmarks.side_effect = RuntimeError(
+            "CUDA out of memory. Tried to allocate 158.00 MiB"
+        )
+        with patch("marc_agent.perception.cctv_yolo._detector", detector):
+            refined = refine_detection_round(parsed, round_)
+        self.assertIs(round_, refined)
+        self.assertEqual([person], refined.people)
 
 
 if __name__ == "__main__":

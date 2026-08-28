@@ -125,12 +125,12 @@ class SarSelectionTests(unittest.TestCase):
                 self.text,
                 self.command,
                 _round(),
-                verifier=lambda board: "I choose rig_a:person_walking:0",
+                verifier=lambda board: "I choose nobody",
             )
         self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
         self.assertEqual("deterministic_fallback", result.method)
-        self.assertEqual("verifier_failed:ValueError", result.reason)
-        self.assertIn("output=I choose rig_a:person_walking:0", "\n".join(captured.output))
+        self.assertEqual("verifier_failed:ReplyParseError", result.reason)
+        self.assertIn("output=I choose nobody", "\n".join(captured.output))
 
     def test_remote_adapter_method_is_recorded(self):
         class RemoteStub:
@@ -148,11 +148,24 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual("qwen_remote", result.method)
         self.assertEqual("qwen_remote", result.verifier_metrics.backend)
 
-    def test_output_parser_rejects_unknown_candidates_and_extra_text(self):
+    def test_output_parser_rejects_unknown_candidates(self):
         with self.assertRaisesRegex(ValueError, "unknown candidate"):
             parse_verifier_output("rig_b:person_walking:0|emergency", ("rig_a:person_walking:0",))
-        with self.assertRaisesRegex(ValueError, "exactly"):
-            parse_verifier_output("rig_a:person_walking:0|emergency because", ("rig_a:person_walking:0",))
+
+    def test_output_parser_accepts_prose_and_thinking_with_valid_id(self):
+        ids = ("rig_a:person_bending:0", "rig_a:person_walking:0")
+        candidate_id, situation = parse_verifier_output(
+            "rig_a:person_walking:0|emergency because",
+            ids,
+        )
+        self.assertEqual("rig_a:person_walking:0", candidate_id)
+        self.assertEqual("emergency", situation)
+        candidate_id, situation = parse_verifier_output(
+            "<think>\nP01 is closer to the bench\n</think>\nP02",
+            ids,
+        )
+        self.assertEqual("rig_a:person_walking:0", candidate_id)
+        self.assertIsNone(situation)
 
     def test_output_parser_accepts_candidate_id_without_situation(self):
         candidate_id, situation = parse_verifier_output(
@@ -161,6 +174,25 @@ class SarSelectionTests(unittest.TestCase):
         )
         self.assertEqual("rig_a:person_walking:0", candidate_id)
         self.assertIsNone(situation)
+
+    def test_output_parser_accepts_numbered_p01(self):
+        candidate_id, situation = parse_verifier_output(
+            "P01",
+            ("rig_a:person_bending:0", "rig_a:person_walking:0"),
+        )
+        self.assertEqual("rig_a:person_bending:0", candidate_id)
+        self.assertIsNone(situation)
+        candidate_id, situation = parse_verifier_output(
+            "p02|emergency",
+            ("rig_a:person_bending:0", "rig_a:person_walking:0"),
+        )
+        self.assertEqual("rig_a:person_walking:0", candidate_id)
+        self.assertEqual("emergency", situation)
+
+    def test_board_prefixes_numbered_aliases(self):
+        board = build_candidate_board(self.text, self.command, _round())
+        self.assertIn("P01 | rig_a:person_bending:0", board.prompt)
+        self.assertIn("P02 | rig_a:person_walking:0", board.prompt)
 
     def test_output_parser_accepts_split_camera_pipe(self):
         board = (

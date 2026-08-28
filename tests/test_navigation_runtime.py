@@ -87,7 +87,15 @@ class _Occ:
 class FakeClient:
     """Unicycle client paced by ``sleep``; occupancy is optional."""
 
-    def __init__(self, start, occ=None, stop_after_s=None, lidar_xyz=None, lidar_after_s=None):
+    def __init__(
+        self,
+        start,
+        occ=None,
+        stop_after_s=None,
+        lidar_xyz=None,
+        lidar_after_s=None,
+        lidar_origin_max_m=None,
+    ):
         self._pose = [float(start[0]), float(start[1]), float(start[2])]
         self._t = 0.0
         self._v = 0.0
@@ -98,6 +106,8 @@ class FakeClient:
         self.stop_after_s = stop_after_s
         self._lidar_xyz = lidar_xyz
         self._lidar_after_s = lidar_after_s
+        self._lidar_origin = (float(start[0]), float(start[1]))
+        self._lidar_origin_max_m = lidar_origin_max_m
 
     def now_s(self):
         return self._t
@@ -128,6 +138,13 @@ class FakeClient:
             return None
         if self._lidar_after_s is not None and self._t < float(self._lidar_after_s):
             return None
+        if self._lidar_origin_max_m is not None:
+            away = math.hypot(
+                self._pose[0] - self._lidar_origin[0],
+                self._pose[1] - self._lidar_origin[1],
+            )
+            if away >= float(self._lidar_origin_max_m):
+                return None
         return _xyz_cloud(self._lidar_xyz)
 
     def get_imu(self):
@@ -186,8 +203,8 @@ class NavigationRuntimeTests(unittest.TestCase):
                 if case.get("expect_frontal_zero"):
                     self.assertTrue(client.cmds, "expected cmd_vel samples")
                     self.assertTrue(
-                        all(abs(v) < 1e-9 for v, _w in client.cmds),
-                        "frontal hazard must command zero linear, got %s" % client.cmds[:8],
+                        all(v <= 1e-9 for v, _w in client.cmds),
+                        "frontal hazard must not command forward, got %s" % client.cmds[:8],
                     )
 
     def test_live_approach_goal_not_centroid(self):
@@ -368,6 +385,56 @@ class NavigationRuntimeTests(unittest.TestCase):
         result = nav.navigate_to(goal, 25.0, leg="search", tol=0.7)
         self.assertEqual("reached", result.status.value)
 
+    def test_spawn_pad_lidar_ring_still_moves(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        ring = []
+        for deg in range(0, 360, 30):
+            rad = math.radians(deg)
+            ring.append([0.30 * math.cos(rad), 0.30 * math.sin(rad), 0.4])
+        client = FakeClient(
+            [1.0, 5.0, 0.0],
+            occ=occ,
+            lidar_xyz=ring,
+            lidar_origin_max_m=0.55,
+        )
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=20,
+        )
+        result = nav.navigate_to((16.0, 5.0), 20.0, leg="search", tol=0.7)
+        self.assertTrue(any(v > 1e-6 for v, _w in client.cmds))
+        x, y, _yaw = client.get_world_pose()
+        self.assertGreaterEqual(math.hypot(x - 1.0, y - 5.0), 0.5)
+        self.assertIn(result.status.value, ("reached", "timeout"))
+
+    def test_spawn_pad_off_road_no_creep(self):
+        grid = np.full((20, 40), 100, dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        ring = []
+        for deg in range(0, 360, 30):
+            rad = math.radians(deg)
+            ring.append([0.30 * math.cos(rad), 0.30 * math.sin(rad), 0.4])
+        client = FakeClient([1.0, 5.0, 0.0], occ=occ, lidar_xyz=ring)
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=8,
+        )
+        result = nav.navigate_to((16.0, 5.0), 2.0, leg="search", tol=0.7)
+        self.assertEqual("no_path", result.status.value)
+        self.assertFalse(
+            any(v > 1e-6 for v, _w in client.cmds),
+            "off-road spawn must not creep, got %s" % client.cmds[:8],
+        )
+
     def test_path_blocked_zeros_linear_after_motion(self):
         grid = np.zeros((20, 40), dtype=np.int8)
         occ = _Occ(grid, 0.5, 0.0, 0.0)
@@ -386,11 +453,82 @@ class NavigationRuntimeTests(unittest.TestCase):
             replan_cap=8,
         )
         nav.navigate_to((16.0, 5.0), 5.0, leg="search", tol=0.7)
-        moving = [i for i, (v, _w) in enumerate(client.cmds) if abs(v) > 1e-6]
-        stopped = [i for i, (v, _w) in enumerate(client.cmds) if abs(v) < 1e-9]
+        moving = [i for i, (v, _w) in enumerate(client.cmds) if v > 1e-6]
+        stopped = [i for i, (v, _w) in enumerate(client.cmds) if v <= 1e-9]
         self.assertTrue(moving, "expected forward motion before the lidar wall")
-        self.assertTrue(stopped, "path_blocked / dwell must command zero linear")
+        self.assertTrue(stopped, "path_blocked / dwell must stop forward")
         self.assertGreater(max(stopped), min(moving))
+
+    def test_lidar_ahead_reverses_then_goes_around(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([3.0, 5.0, 0.0], occ=occ)
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=20,
+        )
+        result = nav.navigate_to(
+            (16.0, 5.0), 40.0, leg="search", tol=0.7,
+            extra_obstacles=[(4.0, 5.0, 0.35)],
+        )
+        self.assertEqual("reached", result.status.value)
+        reverse = [i for i, (v, _w) in enumerate(client.cmds) if v < -1e-6]
+        forward = [i for i, (v, _w) in enumerate(client.cmds) if v > 1e-6]
+        self.assertTrue(reverse, "expected reverse on free road with a frontal disc")
+        self.assertTrue(forward, "expected forward after the bumper box cleared")
+        self.assertLess(min(reverse), max(forward))
+
+    def test_overlay_narrow_strip_keeps_dstar_detour(self):
+        from mock_agent_navigation import OccupancyGridPlanner, path_is_blocked
+
+        res = 0.1
+        grid = np.full((40, 80), 100, dtype=np.int8)
+        grid[2:18, :] = 0
+        occ = _Occ(grid, res, 0.0, 0.0)
+        helper = OccupancyGridPlanner()
+        helper.update_from_array(grid, res, 0.0, 0.0)
+        start = helper._c2w(3, 8)
+        goal = helper._c2w(10, 70)
+        disc = helper._c2w(10, 35) + (0.35,)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, res, 0.0, 0.0)
+        planner.stamp_overlay([disc], now_s=1.0)
+        planner.clear_start_hole(start, exclude_m=0.20)
+        dstar = planner.plan(start, goal, inflation_m=0.25, snap_m=8.0, margin_m=12.0)
+        self.assertIsNotNone(dstar)
+        chord = [start] + list(dstar)
+        self.assertTrue(
+            path_is_blocked(planner, chord, inflation_m=0.25, ignore_overlay=True),
+            "0.25 m occupancy inflation should reject the curb-hugging overlay detour",
+        )
+        self.assertFalse(
+            path_is_blocked(planner, chord, inflation_m=0.0, ignore_overlay=True),
+            "inflation-0 occupancy must still see the on-road detour",
+        )
+        nav = Stage2Navigator(
+            FakeClient([start[0], start[1], 0.0], occ=occ),
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=20,
+        )
+        self.assertIsNotNone(nav._plan_path(planner, start, goal))
+        client = FakeClient([start[0], start[1], 0.0], occ=occ)
+        result = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=20,
+        ).navigate_to(goal, 40.0, leg="search", tol=0.7, extra_obstacles=[disc])
+        self.assertEqual("reached", result.status.value)
+        self.assertTrue(any(v > 1e-6 for v, _w in client.cmds))
 
     def test_overlay_live_skips_thin_inflation(self):
         res = 0.1

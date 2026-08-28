@@ -13,6 +13,7 @@ from typing import Callable, Mapping, TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from marc_agent.perception.qwen_reply import LENGTH_RETRY_TOKENS, choice_text
 from marc_agent.perception.qwen_runtime import QwenRemoteConfig
 
 if TYPE_CHECKING:
@@ -144,7 +145,12 @@ def image_data_url(image: object, *, quality: int) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
-def build_remote_payload(board: "CandidateBoard", config: QwenRemoteConfig) -> bytes:
+def build_remote_payload(
+    board: "CandidateBoard",
+    config: QwenRemoteConfig,
+    *,
+    max_tokens: int | None = None,
+) -> bytes:
     content = [
         {
             "type": "image_url",
@@ -157,8 +163,9 @@ def build_remote_payload(board: "CandidateBoard", config: QwenRemoteConfig) -> b
         "model": config.model_name,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0,
-        "max_tokens": config.max_new_tokens,
+        "max_tokens": int(max_tokens if max_tokens is not None else config.max_new_tokens),
         "stream": False,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
@@ -178,35 +185,58 @@ class RemoteQwenSarVerifier:
         self._post = post
         self.last_metrics: QwenRemoteMetrics | None = None
         self.budget_timeout_s: float | None = None
+        self.last_finish_reason: str | None = None
 
     def set_budget_timeout(self, timeout_s: float) -> None:
         self.budget_timeout_s = float(timeout_s)
 
+    def retry_longer(self, board: "CandidateBoard") -> str:
+        """Re-post with more tokens after a truncated reply failed to parse."""
+        return self._complete(
+            board,
+            max_tokens=max(LENGTH_RETRY_TOKENS, int(self.config.max_new_tokens)),
+        )
+
     def __call__(self, board: "CandidateBoard") -> str:
-        body = build_remote_payload(board, self.config)
-        headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-        }
+        return self._complete(board)
+
+    def _timeout_s(self) -> tuple[float, int]:
         timeout_s = float(self.config.timeout_s)
         capped = False
         if self.budget_timeout_s is not None:
             timeout_s = min(timeout_s, float(self.budget_timeout_s))
             capped = timeout_s + 1e-9 < float(self.config.timeout_s)
         max_attempts = 1 if capped else 2
+        return timeout_s, max_attempts
+
+    def _complete(
+        self,
+        board: "CandidateBoard",
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
+        body = build_remote_payload(board, self.config, max_tokens=max_tokens)
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+        timeout_s, max_attempts = self._timeout_s()
         started = time.perf_counter()
         raw = b""
+        latency_ms = 0.0
         try:
             for attempt in range(1, max_attempts + 1):
                 log.info(
                     "[qwen-remote] dispatch endpoint=%s model=%s images=%d "
-                    "candidates=%d request=%dB timeout=%.1fs attempt=%d/%d",
+                    "candidates=%d request=%dB timeout=%.1fs max_tokens=%d "
+                    "attempt=%d/%d",
                     self.config.chat_completions_url,
                     self.config.model_name,
                     len(board.images),
                     len(board.candidate_ids),
                     len(body),
                     timeout_s,
+                    int(max_tokens if max_tokens is not None else self.config.max_new_tokens),
                     attempt,
                     max_attempts,
                 )
@@ -218,14 +248,22 @@ class RemoteQwenSarVerifier:
                         timeout_s,
                     )
                     break
-                except QwenRemoteTimeout:
+                except (QwenRemoteTimeout, QwenRemoteConnectionError) as exc:
                     latency_ms = (time.perf_counter() - started) * 1000.0
+                    kind = (
+                        "timeout"
+                        if isinstance(exc, QwenRemoteTimeout)
+                        else "failed"
+                    )
                     log.warning(
-                        "[qwen-remote] timeout endpoint=%s model=%s "
-                        "latency=%.0fms attempt=%d/%d",
+                        "[qwen-remote] %s endpoint=%s model=%s "
+                        "latency=%.0fms error=%s detail=%s attempt=%d/%d",
+                        kind,
                         self.config.chat_completions_url,
                         self.config.model_name,
                         latency_ms,
+                        type(exc).__name__,
+                        exc,
                         attempt,
                         max_attempts,
                     )
@@ -254,22 +292,23 @@ class RemoteQwenSarVerifier:
             )
         try:
             payload = json.loads(raw.decode("utf-8"))
-            text = payload["choices"][0]["message"]["content"]
-        except (UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            text, finish_reason = choice_text(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            self.last_finish_reason = None
             raise QwenRemoteResponseError(
                 "vLLM response did not contain choices[0].message.content"
             ) from exc
-        if not isinstance(text, str):
-            raise QwenRemoteResponseError("vLLM message content must be text")
+        self.last_finish_reason = finish_reason
         preview = " ".join(text.split())
         log.info(
             "[qwen-remote] response status=ok model=%s images=%d request=%dB "
-            "response=%dB latency=%.0fms text=%s",
+            "response=%dB latency=%.0fms finish_reason=%s text=%s",
             self.config.model_name,
             len(board.images),
             len(body),
             len(raw),
             latency_ms,
+            finish_reason or "none",
             preview,
         )
         return text

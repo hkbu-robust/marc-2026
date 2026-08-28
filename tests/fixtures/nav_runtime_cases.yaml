@@ -153,5 +153,6 @@ drive_cases:
     extra_obstacles: [[1.8, 5.0, 0.4]]
     deadline_s: 1.5
     dt: 0.10
+    # Don't ram: no forward. Reverse on free road is allowed.
     expect_frontal_zero: true
     expect_status_in: [no_path, timeout, aborted]

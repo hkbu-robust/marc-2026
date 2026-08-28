@@ -24,6 +24,7 @@ from marc_agent.command_parser import (
 )
 from marc_agent.perception.camera_gate import apply_camera_gate
 from marc_agent.perception.cctv_project import pair_alignment_score
+from marc_agent.perception.qwen_reply import call_verifier, last_parsed
 from marc_agent.perception.qwen_runtime import configured_max_crops
 from marc_agent.types import CctvDetectionRound, ObjectCandidate
 
@@ -571,11 +572,20 @@ def parse_object_verifier_output(
 
     Accepts ``TARGET_ID|ANCHOR_ID``, a bare ``TARGET_ID`` (uses the best ranked
     pair for that target), or a unique truncated prefix such as ``rig_3_c:tumbler:``.
+    Thinking traces and extra prose are ignored; the last valid token wins.
     """
-    text = (raw_output or "").strip()
+    return last_parsed(
+        raw_output,
+        lambda token: _parse_object_token(token, ranked),
+    )
+
+
+def _parse_object_token(
+    text: str, ranked: tuple[ObjectSelection, ...]
+) -> tuple[str, Optional[str]]:
+    text = (text or "").strip()
     if not text:
         raise ValueError("output must be exactly TARGET_ID|ANCHOR_ID")
-    text = text.splitlines()[0].strip().split()[0]
     allowed = {_pair_key(item) for item in ranked}
     if "|" in text:
         if text.count("|") != 1:
@@ -627,20 +637,25 @@ def select_object_candidate(
     if not ranked:
         return None
     geometry = ranked[0]
-    should_verify = verifier is not None and len(ranked) >= 2
-    if should_verify and _world_unique_near(
-        ranked, parsed, projector, command_text
-    ):
-        should_verify = False
-    if should_verify and _place_unique(
-        ranked, parsed, command_text, projector, occupancy_at
-    ):
-        should_verify = False
+    skip_reason = "ok"
+    should_verify = False
+    if verifier is None:
+        skip_reason = "no_verifier"
+    elif len(ranked) < 2:
+        skip_reason = "single_pair"
+    elif _world_unique_near(ranked, parsed, projector, command_text):
+        skip_reason = "world_unique_near"
+    elif _place_unique(ranked, parsed, command_text, projector, occupancy_at):
+        skip_reason = "place_unique"
+    else:
+        should_verify = True
     log.info(
-        "[object-selection] pairs=%d classes=%s verify=%s geometry=%s occupancy=%s",
+        "[object-selection] pairs=%d classes=%s verify=%s reason=%s "
+        "geometry=%s occupancy=%s",
         len(ranked),
         ",".join(sorted(_target_classes(parsed))),
         should_verify,
+        skip_reason,
         geometry.target.candidate_id,
         "ok" if occupancy_at is not None else "missing",
     )
@@ -657,8 +672,11 @@ def select_object_candidate(
     )
     method = str(getattr(verifier, "method", "qwen"))
     try:
-        raw_output = verifier(board)
-        target_id, anchor_id = parse_object_verifier_output(raw_output, ranked)
+        (target_id, anchor_id), raw_output = call_verifier(
+            verifier,
+            board,
+            lambda text: parse_object_verifier_output(text, ranked),
+        )
         selected = next(
             item
             for item in ranked
@@ -681,6 +699,8 @@ def select_object_candidate(
         )
     except Exception as exc:
         raw_output = locals().get("raw_output")
+        if raw_output is None:
+            raw_output = getattr(exc, "raw_output", None)
         preview = " ".join(raw_output.split()) if isinstance(raw_output, str) else None
         log.warning(
             "[qwen] object verifier failed backend=%s error=%s detail=%s "

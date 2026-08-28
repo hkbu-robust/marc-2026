@@ -201,6 +201,13 @@ class Stage1RoundTests(unittest.TestCase):
             verifier=lambda board: "rig_a:person_bending:0|emergency",
             projector=empty,
         )
+        self.assertIsNotNone(result.grounding)
+        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
+        self.assertNotEqual([0.0, 0.0, 0.0], result.grounding.target_coord)
+        self.assertEqual("ignored_class_dummy", result.method)
+        self.assertEqual("emergency", result.grounding.situation)
+        self.assertEqual("trash_can", result.grounding.landmark)
+
     def test_umbrella_without_target_submits_dummy(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
@@ -228,6 +235,35 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
         self.assertEqual("umbrella", result.grounding.target_type)
         self.assertEqual("vending_machine", result.grounding.landmark)
+        self.assertEqual("ignored_class_dummy", result.method)
+        self.assertEqual("rig_a", result.grounding.camera_id)
+
+    def test_pencilcase_without_target_submits_dummy(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:picnic_table:0",
+                        "picnic_table",
+                        (200.0, 180.0, 420.0, 430.0),
+                        0.92,
+                        "rig_a",
+                        (640, 480),
+                    )
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "I was taking notes at an outdoor table and left my pencil case behind.",
+            detector=detector,
+            projector=_geometry(),
+        )
+        self.assertIsNotNone(result.grounding)
+        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
+        self.assertEqual("pencilcase", result.grounding.target_type)
+        self.assertEqual("picnic_table", result.grounding.landmark)
         self.assertEqual("ignored_class_dummy", result.method)
         self.assertEqual("rig_a", result.grounding.camera_id)
 
@@ -390,8 +426,12 @@ class Stage1RoundTests(unittest.TestCase):
             detector=detector,
             projector=_geometry(),
         )
-        self.assertIsNone(result.grounding)
-        self.assertEqual("object_selection:no_match", result.failure_reason)
+        self.assertIsNotNone(result.grounding)
+        self.assertEqual("pencilcase", result.grounding.target_type)
+        self.assertEqual("picnic_table", result.grounding.landmark)
+        self.assertEqual("ignored_class_dummy", result.method)
+        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
+        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
 
     def test_empty_parking_space_submits_tumbler_without_car_name(self):
         def detector(client, *, stub_path=None):

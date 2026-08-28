@@ -49,6 +49,7 @@ class QwenRemoteTests(unittest.TestCase):
         self.assertEqual("qwen3-vl-8b", payload["model"])
         self.assertEqual(0, payload["temperature"])
         self.assertFalse(payload["stream"])
+        self.assertEqual({"enable_thinking": False}, payload["chat_template_kwargs"])
         content = payload["messages"][0]["content"]
         url = content[0]["image_url"]["url"]
         self.assertTrue(url.startswith("data:image/jpeg;base64,"))
@@ -92,7 +93,25 @@ class QwenRemoteTests(unittest.TestCase):
         output = "\n".join(captured.output)
         self.assertIn("dispatch endpoint=", output)
         self.assertIn("error=QwenRemoteConnectionError", output)
+        self.assertIn("attempt=1/2", output)
+        self.assertIn("attempt=2/2", output)
         self.assertNotIn("test-secret", output)
+
+    def test_connection_retries_once_then_returns(self):
+        calls = []
+
+        def post(*_args):
+            calls.append(1)
+            if len(calls) == 1:
+                raise QwenRemoteConnectionError("connection refused")
+            return json.dumps(
+                {"choices": [{"message": {"content": "rig_a:person_prone:0|emergency"}}]}
+            ).encode("utf-8")
+
+        verifier = RemoteQwenSarVerifier(_config(), post=post)
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
+            self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
+        self.assertEqual(2, len(calls))
 
     def test_health_check_requires_configured_served_model(self):
         response = json.dumps({"data": [{"id": "qwen3-vl-8b"}]}).encode()
@@ -205,6 +224,71 @@ class QwenRemoteTests(unittest.TestCase):
             with self.assertRaises(QwenRemoteAuthenticationError):
                 verifier(_board())
         self.assertEqual(1, len(calls))
+
+    def test_empty_content_falls_back_to_reasoning_content(self):
+        def post(*_args):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "content": "",
+                                "reasoning_content": "P01",
+                            },
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+        verifier = RemoteQwenSarVerifier(_config(), post=post)
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as logged:
+            self.assertEqual("P01", verifier(_board()))
+        self.assertEqual("stop", verifier.last_finish_reason)
+        self.assertIn("finish_reason=stop", "\n".join(logged.output))
+
+    def test_length_finish_retries_longer_after_parse_fail(self):
+        from marc_agent.perception.qwen_reply import call_verifier
+        from marc_agent.perception.sar_selection import parse_verifier_output
+
+        calls = []
+
+        def post(url, body, headers, timeout):
+            payload = json.loads(body)
+            calls.append(payload["max_tokens"])
+            if payload["max_tokens"] < 128:
+                return json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "finish_reason": "length",
+                                "message": {"content": "<think>not done"},
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": "P02"},
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+        verifier = RemoteQwenSarVerifier(_config(), post=post)
+        ids = ("rig_a:person_bending:0", "rig_a:person_walking:0")
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
+            parsed, raw = call_verifier(
+                verifier,
+                _board(),
+                lambda text: parse_verifier_output(text, ids),
+            )
+        self.assertEqual(("rig_a:person_walking:0", None), parsed)
+        self.assertEqual("P02", raw)
+        self.assertEqual([8, 128], calls)
 
 
 if __name__ == "__main__":

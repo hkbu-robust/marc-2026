@@ -23,7 +23,7 @@ from marc_agent.command_parser import (
 from marc_agent.perception.cctv_project import (
     CctvProjector,
 )
-from marc_agent.perception.cctv_yolo import detector_can_emit, refine_detection_round
+from marc_agent.perception.cctv_yolo import refine_detection_round
 from marc_agent.perception.camera_gate import apply_camera_gate
 from marc_agent.perception.object_selection import (
     ObjectSelection,
@@ -523,10 +523,12 @@ def _compose_person(
 ) -> Stage1RoundResult:
     parsed = candidates.parsed
     selection = candidates.sar_selection
-    if parsed is None or selection is None or selection.selected is None:
-        reason = candidates.failure_reason or "sar_selection:no_candidate"
+    if parsed is None:
+        reason = candidates.failure_reason or "command_parse"
         log.info("[stage1] skip submit reason=%s", reason)
         return Stage1RoundResult(candidates, None, None, reason)
+    if selection is None or selection.selected is None:
+        return _compose_last_resort(candidates, projector, parsed)
 
     person = selection.selected
     evidence = candidate_evidence(
@@ -550,18 +552,11 @@ def _compose_person(
     )
     if projected is None:
         log.info(
-            "[stage1] skip submit reason=projection_failed camera=%s candidate=%s",
+            "[stage1] projection_failed camera=%s candidate=%s; using dummy",
             person.camera_id,
             person.candidate_id,
         )
-        return Stage1RoundResult(
-            candidates,
-            None,
-            selection.method,
-            "projection_failed",
-            person.candidate_id,
-            anchor.candidate_id if anchor is not None else None,
-        )
+        return _compose_last_resort(candidates, projector, parsed)
     target_xyz, anchor_xyz = projected
     grounding = _grounding_payload(parsed, person.camera_id, target_xyz, anchor_xyz)
     log.info(
@@ -636,16 +631,7 @@ def _compose_object(
             continue
         ordered.append(item)
     if not ordered:
-        fallback = _compose_last_resort(candidates, projector, parsed)
-        if fallback is not None:
-            return fallback
-        log.info(
-            "[stage1] skip submit reason=object_selection:no_match target_type=%s",
-            parsed.target_type,
-        )
-        return Stage1RoundResult(
-            candidates, None, "object_relation", "object_selection:no_match"
-        )
+        return _compose_last_resort(candidates, projector, parsed)
 
     for selection in ordered:
         projected = _project_selection(projector, parsed, selection)
@@ -681,37 +667,40 @@ def _compose_object(
             anchor_id,
         )
 
-    log.info("[stage1] skip submit reason=projection_failed")
-    fallback = _compose_last_resort(candidates, projector, parsed)
-    if fallback is not None:
-        return fallback
-    return Stage1RoundResult(
-        candidates,
-        None,
-        chosen.method if chosen is not None else "object_relation",
-        "projection_failed",
-    )
+    log.info("[stage1] projection_failed; using dummy target_type=%s", parsed.target_type)
+    return _compose_last_resort(candidates, projector, parsed)
+
+
+def _dummy_camera_id(detections: CctvDetectionRound, parsed: ParsedCommand) -> str:
+    landmark = parsed.landmark
+    if landmark:
+        for camera_id in detections.camera_ids:
+            if any(
+                item.camera_id == camera_id and item.class_name == landmark
+                for item in detections.objects
+            ):
+                return camera_id
+        for item in detections.objects:
+            if item.class_name == landmark:
+                return item.camera_id
+    if detections.camera_ids:
+        return detections.camera_ids[0]
+    if detections.frames:
+        return next(iter(detections.frames))
+    return ""
 
 
 def _compose_last_resort(
     candidates: Stage1CandidateResult,
     projector: CctvProjector,
     parsed: ParsedCommand,
-) -> Optional[Stage1RoundResult]:
-    """End the round for detector-ignored classes without submitting a landmark as the object.
+) -> Stage1RoundResult:
+    """Submit parser fields with a dummy XYZ so the round always ends.
 
-    Trained detector classes must not fall back here (a picnic table is not a pencil case).
-    Ignored classes such as umbrella submit a deterministic dummy coordinate.
+    Does not invent a detection box. A picnic table is not a pencil case.
     """
     del projector
-    if detector_can_emit(parsed.target_type):
-        return None
-    detections = candidates.detections
-    camera_id = ""
-    if detections.camera_ids:
-        camera_id = detections.camera_ids[0]
-    elif detections.frames:
-        camera_id = next(iter(detections.frames))
+    camera_id = _dummy_camera_id(candidates.detections, parsed)
     xyz = IGNORED_CLASS_DUMMY_XYZ
     grounding = _grounding_payload(
         parsed,
@@ -742,7 +731,7 @@ def compose_stage1_grounding(
     candidates: Stage1CandidateResult,
     projector: CctvProjector,
 ) -> Stage1RoundResult:
-    """Project a selected candidate into a GroundingResult, or skip without zeros."""
+    """Project a selected candidate into a GroundingResult, or dummy XYZ."""
     parsed = candidates.parsed
     if parsed is None:
         reason = candidates.failure_reason or "command_parse"
