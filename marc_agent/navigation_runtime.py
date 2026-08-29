@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-from marc_agent.lidar_safety import advise, pointcloud2_xyz
+from marc_agent.lidar_safety import advise, overlay_discs, pointcloud2_xyz
 from marc_agent.retrieval_state import DEFAULT_GOAL_TOLERANCE
 
 _DEMO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo")
@@ -194,7 +194,7 @@ class Stage2Navigator:
         Snap an occupied/unknown goal onto the nearest free inflated cell.
         A free goal behind a wall stays put so D* can fail closed or go around.
         Never thin inflation below the configured chassis radius.
-        Lidar never enters the grid; the live corridor handles close hits.
+        Occupancy 100/unknown still fail-closed. Live lidar discs sit on overlay.
         """
         plan_goal = goal_xy
         free = getattr(planner, "cell_free", None)
@@ -239,9 +239,9 @@ class Stage2Navigator:
         """Follow occupancy D* Lite until inside ``tol`` of ``goal_xy``.
 
         ``goal_xy`` and ``tol`` may be callables so a late Stage 2 reveal can retarget.
-        Live lidar only scales or reverses in the chassis corridor. Off-road / unknown
-        start stays fail-closed (zero, no_path). ``extra_obstacles`` is a test hook of
-        world discs fed into that corridor, not a map overlay.
+        Live lidar stamps overlay discs so D* detours unmarked cars, and still
+        scales or reverses in the chassis corridor. Off-road / unknown start stays
+        fail-closed (zero, no_path). ``extra_obstacles`` is a test hook of world discs.
         """
         client = self.client
         extra = list(extra_obstacles or [])
@@ -304,6 +304,16 @@ class Stage2Navigator:
             xyz = pointcloud2_xyz(cloud) if cloud is not None else None
             advice = advise(_merge_xyz(xyz, _world_discs_to_base(extra, pose)))
             now_s = client.now_s()
+            discs = overlay_discs(xyz, pose)
+            discs.extend(extra)
+            if planner.ready:
+                planner.expire_overlay(now_s)
+                replace = getattr(planner, "replace_overlay", None)
+                if callable(replace):
+                    replace(discs, now_s=now_s)
+                else:
+                    planner.stamp_overlay(discs, now_s=now_s)
+                planner.clear_start_hole((x, y), exclude_m=0.20)
             if advice.stop:
                 stop_latched = True
             elif not math.isfinite(advice.ahead_m) or advice.ahead_m >= RESUME_M:
@@ -320,7 +330,9 @@ class Stage2Navigator:
             if bumper_hot:
                 last_reason = ReplanReason.FRONTAL
                 if not prev_frontal:
-                    log.info("[Stage2] %s FRONTAL lidar stop -> reverse on free road", leg)
+                    log.info("[Stage2] %s FRONTAL lidar stop -> reverse, stamp, replan", leg)
+                    need_replan = True
+                    replan_reason = ReplanReason.FRONTAL
             prev_frontal = bumper_hot
 
             if last_xy is not None:
@@ -338,9 +350,7 @@ class Stage2Navigator:
                 remain = list(follower.path[follower.idx:])
                 if remain and _occupancy_cell_free(planner, x, y):
                     join = [(x, y), remain[0]]
-                    if path_is_blocked(
-                        planner, join, inflation_m=0.0, ignore_overlay=True,
-                    ):
+                    if path_is_blocked(planner, join, inflation_m=0.0):
                         log.info("[Stage2] %s path blocked -> replan", leg)
                         last_reason = ReplanReason.PATH_BLOCKED
                         need_replan = True
@@ -375,6 +385,7 @@ class Stage2Navigator:
                             path=self.last_path, last_method=self.last_method,
                         )
                     log.info("[Stage2] %s replan reason=%s count=%d", leg, replan_reason, n_replan)
+                planner.clear_start_hole((x, y), exclude_m=0.20)
                 path = self._plan_path(planner, (x, y), cur_goal, allow_thin=True)
                 if path:
                     follower = PathFollower(path, passthrough=self.cruise)

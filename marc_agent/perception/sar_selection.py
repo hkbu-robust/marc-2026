@@ -25,7 +25,12 @@ from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidat
 _SITUATIONS = frozenset({"normal", "abnormal", "emergency", "accident"})
 _P_ID_RE = re.compile(r"^P(\d+)$", re.IGNORECASE)
 SHORTLIST_CAP = 8
-WORLD_NEAR_FLOOR_M = 4.0
+WORLD_NEAR_FLOOR_M = 0.0
+_FACE_DOWN_POSES = frozenset({"person_prone", "person_lying_down"})
+_SEATING_LYING_POSES = (
+    (POSE_GROUPS["prostrate"] - frozenset({"person_bending"}))
+    | frozenset({"person_reclining"})
+)
 log = logging.getLogger("marc_agent.sar_selection")
 
 
@@ -229,14 +234,10 @@ def _pose_word_bonus(person: PersonCandidate, command: ParsedCommand, text: str)
         bonus += 1.5
     face_down = bool(_POSE_WORD_PRONE.search(text))
     if face_down and seating:
-        if person.pose_class == "person_prone":
-            bonus -= 1.0
-        elif person.pose_class in {
-            "person_bending",
-            "person_lying_down",
-            "person_reclining",
-        }:
+        if person.pose_class in {"person_prone", "person_lying_down"}:
             bonus += 0.8
+        elif person.pose_class == "person_bending":
+            bonus -= 1.0
     elif face_down or requested == "accident":
         if person.pose_class == "person_prone":
             bonus += 2.0
@@ -352,7 +353,6 @@ _POSE_CUE_CLASSES = (
     (re.compile(r"\b(?:collapsed|fell|fallen)\b"), POSE_GROUPS["prostrate"]),
     (re.compile(r"\b(?:face[\s-]*down|prone)\b"), frozenset({"person_prone"})),
 )
-_SEATING_LYING_POSES = POSE_GROUPS["prostrate"] | frozenset({"person_reclining"})
 
 
 def _named_pose_classes(
@@ -361,17 +361,18 @@ def _named_pose_classes(
     """YOLO pose classes named in the command. The last cue wins when several appear."""
     chosen: frozenset[str] = frozenset()
     last_end = -1
+    last_is_face_down = False
     for pattern, classes in _POSE_CUE_CLASSES:
         for match in pattern.finditer(text or ""):
             if match.end() >= last_end:
                 last_end = match.end()
                 chosen = classes
-    if (
-        command is not None
-        and command.landmark in SEATING_LANDMARKS
-        and chosen & {"person_lying_down", "person_prone"}
-    ):
-        return _SEATING_LYING_POSES
+                last_is_face_down = classes == frozenset({"person_prone"})
+    if command is not None and command.landmark in SEATING_LANDMARKS:
+        if last_is_face_down:
+            return _FACE_DOWN_POSES
+        if chosen & {"person_lying_down", "person_prone"}:
+            return _SEATING_LYING_POSES
     return chosen
 
 

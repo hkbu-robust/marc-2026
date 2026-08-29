@@ -96,6 +96,7 @@ class FakeClient:
         lidar_after_s=None,
         lidar_origin_max_m=None,
         lidar_until_s=None,
+        lidar_world_xyz=None,
     ):
         self._pose = [float(start[0]), float(start[1]), float(start[2])]
         self._t = 0.0
@@ -106,6 +107,7 @@ class FakeClient:
         self._occ = occ
         self.stop_after_s = stop_after_s
         self._lidar_xyz = lidar_xyz
+        self._lidar_world = lidar_world_xyz
         self._lidar_after_s = lidar_after_s
         self._lidar_origin = (float(start[0]), float(start[1]))
         self._lidar_origin_max_m = lidar_origin_max_m
@@ -137,8 +139,6 @@ class FakeClient:
         return self._occ
 
     def get_lidar(self):
-        if self._lidar_xyz is None:
-            return None
         if self._lidar_after_s is not None and self._t < float(self._lidar_after_s):
             return None
         if self._lidar_until_s is not None and self._t >= float(self._lidar_until_s):
@@ -152,6 +152,17 @@ class FakeClient:
                 self._lidar_left_origin = True
             if self._lidar_left_origin:
                 return None
+        if self._lidar_world is not None:
+            x, y, yaw = self._pose
+            cc, ss = math.cos(yaw), math.sin(yaw)
+            rows = []
+            for item in self._lidar_world:
+                dx = float(item[0]) - x
+                dy = float(item[1]) - y
+                rows.append([dx * cc + dy * ss, -dx * ss + dy * cc, float(item[2])])
+            return _xyz_cloud(rows)
+        if self._lidar_xyz is None:
+            return None
         return _xyz_cloud(self._lidar_xyz)
 
     def get_imu(self):
@@ -711,6 +722,66 @@ class NavigationRuntimeTests(unittest.TestCase):
         planner.clear_start_hole(start, exclude_m=0.20)
         row, col = planner._w2c(ahead[0], ahead[1])
         self.assertTrue(bool(planner._overlay[row, col]))
+
+    def test_live_lidar_disc_detours_on_free_occupancy(self):
+        from mock_agent_navigation import OccupancyGridPlanner, path_is_blocked
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        start = (1.0, 5.0)
+        goal = (16.0, 5.0)
+        car = (3.0, 5.0, 0.4)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        planner.stamp_overlay([car], now_s=1.0)
+        planner.clear_start_hole(start, exclude_m=0.20)
+        chord = [start, goal]
+        self.assertTrue(
+            path_is_blocked(planner, chord, inflation_m=0.0),
+            "straight chord through a live lidar disc must be blocked",
+        )
+        self.assertFalse(
+            path_is_blocked(planner, chord, inflation_m=0.0, ignore_overlay=True),
+            "occupancy-only must still see free cells",
+        )
+        nav = Stage2Navigator(
+            FakeClient([start[0], start[1], 0.0], occ=occ, lidar_world_xyz=[car]),
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=20,
+        )
+        result = nav.navigate_to(goal, 40.0, leg="search", tol=0.7)
+        self.assertEqual("reached", result.status.value)
+        self.assertTrue(any(v > 1e-6 for v, _w in nav.client.cmds))
+        path = result.path or ()
+        through = [
+            (wx, wy) for wx, wy in path
+            if abs(wy - 5.0) < 0.25 and abs(wx - 3.0) < 0.45
+        ]
+        self.assertEqual([], through, "D* must detour around the lidar disc, got %s" % (path,))
+
+    def test_plan_path_does_not_punch_goal_overlay(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        start = (1.0, 5.0)
+        goal = (16.0, 5.0)
+        bumper = (15.6, 5.0, 0.4)
+        planner.stamp_overlay([bumper], now_s=1.0)
+        planner.clear_start_hole(start, exclude_m=0.20)
+        nav = Stage2Navigator(FakeClient([start[0], start[1], 0.0]), inflation_m=0.25)
+        nav._plan_path(planner, start, goal)
+        row, col = planner._w2c(bumper[0], bumper[1])
+        self.assertTrue(bool(planner._overlay[row, col]))
+        planner.clear_goal_hole(goal, exclude_m=0.6)
+        self.assertFalse(
+            bool(planner._overlay[row, col]),
+            "0.6 m goal hole would erase a bumper disc; live nav must not call it",
+        )
 
 
 if __name__ == "__main__":

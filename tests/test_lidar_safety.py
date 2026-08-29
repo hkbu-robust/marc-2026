@@ -9,8 +9,10 @@ import numpy as np
 
 from marc_agent.lidar_safety import (
     CLEAR_FAR,
+    DISC_R,
     STOP_X_MAX,
     advise,
+    overlay_discs,
     pointcloud2_xyz,
 )
 
@@ -110,6 +112,20 @@ class LidarSafetyTests(unittest.TestCase):
         self.assertIsNotNone(got)
         self.assertEqual((2, 3), got.shape)
         np.testing.assert_allclose(got, xyz, atol=1e-5)
+
+    def test_overlay_discs_are_world_frame(self):
+        pose = (10.0, 20.0, 0.0)
+        discs = overlay_discs(_xyz([1.0, 0.0, 0.4]), pose)
+        self.assertEqual(1, len(discs))
+        wx, wy, rad = discs[0]
+        self.assertAlmostEqual(11.0, wx, places=2)
+        self.assertAlmostEqual(20.0, wy, places=2)
+        self.assertAlmostEqual(DISC_R, rad, places=3)
+
+    def test_overlay_discs_ignore_ground_and_self(self):
+        pose = (0.0, 0.0, 0.0)
+        self.assertEqual([], overlay_discs(_xyz([1.0, 0.0, -0.5]), pose))
+        self.assertEqual([], overlay_discs(_xyz([0.2, 0.0, 0.4]), pose))
 
 
 if __name__ == "__main__":

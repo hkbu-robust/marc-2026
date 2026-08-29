@@ -28,6 +28,7 @@ from marc_agent.perception.lost_item_priors import (
     evidence_for_candidate,
     parked_vehicle_count,
     prior_key,
+    speaker_left_item,
     stall_is_empty,
 )
 from marc_agent.perception.qwen_reply import call_verifier, last_parsed
@@ -290,7 +291,11 @@ def _finish_rank(
         if apply_priors
         else []
     )
-    demote = apply_priors and any(not item.owned for item in evidences)
+    demote = (
+        apply_priors
+        and any(not item.owned for item in evidences)
+        and not speaker_left_item(command_text)
+    )
     by_id = {id(item): evidence for item, evidence in zip(ranked, evidences)}
     object_list = list(objects)
     people_list = list(people)
@@ -323,17 +328,31 @@ def _finish_rank(
     def world_parts(item: ObjectSelection) -> tuple:
         if item.anchor is None:
             return (1, 0.0)
+        relation = parsed.relation or Relation.NEAR
+        if relation in (Relation.NEAR, Relation.BESIDE, None):
+            dist = _pair_world_dist_m(item, projector)
+            if dist is None:
+                return (1, 0.0)
+            return (0, dist)
         world = pair_alignment_score(
             projector,
             item.target.camera_id,
             item.target.bbox_xyxy,
             item.anchor.bbox_xyxy,
-            parsed.relation or Relation.NEAR,
+            relation,
             item.anchor.class_name,
         )
         if world is None:
             return (1, 0.0)
         return (0, -world)
+
+    def road_parts(item: ObjectSelection) -> tuple:
+        if parsed.scene_hint != "road":
+            return (0,)
+        place, _floor, _cell, _world = _place_features(
+            item, parsed, command_text, projector, occupancy_at
+        )
+        return (-place,)
 
     if use_place:
         ranked.sort(
@@ -347,14 +366,24 @@ def _finish_rank(
             )
         )
     elif projector is not None and any(item.anchor is not None for item in ranked):
-        ranked.sort(
-            key=lambda item: (
-                *world_parts(item),
-                prior(item),
-                -item.score,
-                *ids(item),
+        if parsed.scene_hint == "road":
+            ranked.sort(
+                key=lambda item: (
+                    *road_parts(item),
+                    *world_parts(item),
+                    -item.score,
+                    *ids(item),
+                )
             )
-        )
+        else:
+            ranked.sort(
+                key=lambda item: (
+                    *world_parts(item),
+                    prior(item),
+                    -item.score,
+                    *ids(item),
+                )
+            )
     elif score_first:
         ranked.sort(
             key=lambda item: (-item.score, prior(item), *ids(item))
@@ -485,6 +514,17 @@ def _target_world_xy(projector, target: ObjectCandidate):
     if xyz is None:
         return None
     return (float(xyz[0]), float(xyz[1]))
+
+
+def _pair_world_dist_m(item: ObjectSelection, projector) -> Optional[float]:
+    """Ground metres from target to the paired landmark. None if either end fails."""
+    if projector is None or item.anchor is None:
+        return None
+    target_xy = _target_world_xy(projector, item.target)
+    anchor_xy = _target_world_xy(projector, item.anchor)
+    if target_xy is None or anchor_xy is None:
+        return None
+    return math.hypot(target_xy[0] - anchor_xy[0], target_xy[1] - anchor_xy[1])
 
 
 def _place_features(

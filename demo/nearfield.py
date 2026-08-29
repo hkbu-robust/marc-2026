@@ -19,6 +19,7 @@ from typing import Optional, Protocol
 import numpy as np
 
 from marc_agent.lidar_safety import advise, pointcloud2_xyz
+from marc_agent.retrieval_state import yolo_may_center
 
 log = logging.getLogger("participant_app")
 
@@ -598,7 +599,14 @@ class NearFieldAcquire:
                         return cand
 
             prev_phase = self._phase
-            lin, ang = self._command(now, n_obj, err, d_obj)
+            may_center = yolo_may_center(
+                n_obj > 0,
+                pose,
+                hint_xy,
+                radius,
+                d_obj,
+            )
+            lin, ang = self._command(now, n_obj, err, d_obj, may_center=may_center)
             if self._phase != prev_phase:
                 self._dump_frame(self._phase, rgb, bbox, "" if det is None else (det.get("name") or ""))
             lin, ang = gated_cmd_vel(pose, lin, ang, hint_xy, radius, dt=dt)
@@ -643,7 +651,9 @@ class NearFieldAcquire:
         self._phase_t0 = now
         self._align_ok = 0
 
-    def _command(self, now: float, n_obj: int, err, d_obj) -> tuple:
+    def _command(self, now: float, n_obj: int, err, d_obj, *, may_center: bool = True) -> tuple:
+        if not may_center:
+            return 0.0, 0.0
         since = now - self._phase_t0
         has = n_obj > 0 and err is not None and d_obj is not None
         if d_obj is not None and n_obj > 0 and d_obj < ALREADY_NEAR_M:

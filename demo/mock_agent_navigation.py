@@ -918,6 +918,14 @@ class OccupancyGridPlanner:
             self._overlay[r0:r1, c0:c1][disc] = True
             self._overlay_t[r0:r1, c0:c1][disc] = now
 
+    def replace_overlay(self, obstacles, now_s=0.0):
+        """Redraw the lidar layer from this tick's discs. Does not punch occupancy."""
+        if not self.ready or self._overlay is None:
+            return
+        self._overlay[:] = False
+        self._overlay_t[:] = 0.0
+        self.stamp_overlay(obstacles, now_s=now_s)
+
     def expire_overlay(self, now_s=0.0):
         """Free overlay cells not restamped within OVERLAY_TTL_S."""
         if self._overlay is None or self._overlay_t is None:

@@ -201,6 +201,31 @@ def close_enough_to_search(
     return dist <= radius + float(goal_tol)
 
 
+YOLO_CENTER_DEPTH_M = 2.5
+
+
+def yolo_may_center(
+    detected: bool,
+    pose_xy,
+    hint_center,
+    hint_radius,
+    depth_m=None,
+    goal_tol: float = DEFAULT_GOAL_TOLERANCE,
+) -> bool:
+    """True when YOLO may yaw/crawl: target seen and near the search endpoint."""
+    if not detected:
+        return False
+    if close_enough_to_search(pose_xy, hint_center, hint_radius, goal_tol):
+        return True
+    if depth_m is None:
+        return False
+    try:
+        depth = float(depth_m)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(depth) and depth <= YOLO_CENTER_DEPTH_M
+
+
 def nearfield_start_reason(
     reached: bool,
     pose_xy,
