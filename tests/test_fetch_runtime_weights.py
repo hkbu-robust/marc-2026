@@ -217,6 +217,19 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
         self.assertIn("MARC_QWEN_BACKEND: remote", text)
         self.assertIn("args:", text)
 
+    def test_base_compose_files_pin_local_qwen(self):
+        for path in (Path("docker-compose.yml"), Path("demo/docker-compose.yml")):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn('MARC_SAR_DETECTOR: "qwen"', text)
+            self.assertIn('MARC_QWEN_BACKEND: "local"', text)
+            self.assertNotIn("MARC_QWEN_BACKEND:-local", text)
+
+    def test_local_mount_skips_bake_but_runs_local_backend(self):
+        text = Path("demo/docker-compose.qwen-local.yml").read_text(encoding="utf-8")
+        self.assertIn("build:", text)
+        self.assertIn("MARC_QWEN_BACKEND: remote", text)
+        self.assertIn('MARC_QWEN_BACKEND: "local"', text)
+
     def test_default_gripper_is_robotiq_2f_140(self):
         with patch.dict(os.environ):
             os.environ.pop("MARC_GRASPGENX_GRIPPER", None)

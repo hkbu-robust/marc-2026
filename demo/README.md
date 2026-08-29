@@ -72,8 +72,8 @@ Stage 1 candidate settings:
 | Variable | Default | Meaning |
 |---|---|---|
 | `MARC_STAGE1_DETECTOR` | bundled YOLO when present | `yolo` for live candidates; `stub` is test-only |
-| `MARC_SAR_DETECTOR` | `qwen` | `qwen` enables Qwen verification; `fallback` uses deterministic pose/anchor evidence |
-| `MARC_QWEN_BACKEND` | `local` | `local` loads Transformers in the agent; `remote` calls a workstation vLLM server |
+| `MARC_SAR_DETECTOR` | `qwen` | Base and submission Compose pin Qwen verification on |
+| `MARC_QWEN_BACKEND` | `local` | Base and submission Compose pin in-process Transformers; only the explicit remote overlay changes it |
 | `MARC_QWEN_MODEL_DIR` | `/agent/models/runtime/stage1-sar-qwen/model` | Complete pinned local Transformers snapshot |
 | `MARC_QWEN_BASE_URL` | -- | Remote vLLM URL including `/v1`, e.g. `http://192.168.1.20:8000/v1` |
 | `MARC_QWEN_API_KEY` | -- | Bearer key configured on the vLLM server; never written to metrics |
@@ -85,6 +85,11 @@ Stage 1 candidate settings:
 | `MARC_STAGE1_METRICS_PATH` | `artifacts/stage1_rounds.jsonl` | Per-round candidate counts, latency, selection method, and failures |
 
 ### Qwen on the participant/platform machine
+
+The standard root and demo Compose files now force local Qwen, so stale exported
+remote URL/backend variables cannot silently send inference to another workstation.
+The root submission build bakes the pinned model into the image and needs no Qwen
+environment variables at runtime.
 
 For practice, mount the downloaded snapshot instead of copying 17.5 GB into every image:
 
@@ -99,6 +104,8 @@ build. Judging runtime is offline and does not apply a host bind-mount.
 
 For a faster local rebuild while iterating, you can still mount a host snapshot
 with `demo/docker-compose.qwen-local.yml` as above.
+That override skips the image copy because the read-only host mount supplies the
+same complete local snapshot; inference still runs inside the participant container.
 
 ### Qwen on a separate workstation
 
