@@ -19,6 +19,7 @@ from marc_agent.perception.qwen_remote import (
     RemoteQwenSarVerifier,
     build_remote_payload,
     check_remote_health,
+    _parse_points,
 )
 from marc_agent.perception.qwen_runtime import QwenRemoteConfig
 from marc_agent.perception.sar_selection import CandidateBoard
@@ -45,6 +46,13 @@ def _board() -> CandidateBoard:
 
 
 class QwenRemoteTests(unittest.TestCase):
+    def test_molmo_point_coordinates_parse_by_image(self):
+        raw = '<points coords="1 1 456 532;2 2 286 081">target</points>'
+        self.assertEqual(
+            ((1, 456.0, 532.0), (2, 286.0, 81.0)),
+            _parse_points(raw),
+        )
+
     def test_all_camera_scene_description_is_cached_and_used_for_selection(self):
         prompts = []
         max_tokens = []

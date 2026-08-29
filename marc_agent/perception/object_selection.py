@@ -33,6 +33,7 @@ from marc_agent.perception.lost_item_priors import (
     stall_is_empty,
 )
 from marc_agent.perception.qwen_reply import call_verifier, last_parsed
+from marc_agent.perception.qwen_remote import pack_camera_evidence
 from marc_agent.perception.qwen_runtime import configured_max_crops
 from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidate
 
@@ -42,7 +43,6 @@ ObjectVerifier = Callable[["ObjectBoard"], str]
 OccupancyAt = Callable[[float, float], Optional[int]]
 
 OBJECT_BOARD_LIMIT = 12
-_REMOTE_BATCH_SIZE = 3
 _OFF_ROAD_SCENES = frozenset(PARKING_SCENES | {"park"})
 _FLOOR_PLACE_RE = re.compile(
     r"\b(?:on the (?:floor|ground|pavement)|lot floor)\b",
@@ -454,24 +454,6 @@ def _place_only_request(parsed: ParsedCommand, command_text: str) -> bool:
     return parsed.scene_hint is not None or _floor_place_request(command_text)
 
 
-def _place_board_ranked(
-    ranked: tuple[ObjectSelection, ...],
-    parsed: ParsedCommand,
-    command_text: str,
-    round_: CctvDetectionRound,
-    projector,
-) -> tuple[ObjectSelection, ...]:
-    """Keep occupied bays off the verifier board when a vacant stall exists."""
-    if not _place_only_request(parsed, command_text):
-        return ranked
-    empty = tuple(
-        item
-        for item in ranked
-        if stall_is_empty(item.target, round_.people, round_.objects, projector)
-    )
-    return empty if empty else ranked
-
-
 def _image_floor_frac(target: ObjectCandidate) -> float:
     height = max(1.0, float(target.image_size[1]))
     return float(target.bbox_xyxy[3]) / height
@@ -707,15 +689,16 @@ def _annotated_view(frame, ranked: tuple[ObjectSelection, ...]):
     sx = image.width / frame.width
     sy = image.height / frame.height
     draw = ImageDraw.Draw(image)
-    for item in ranked:
+    for index, item in enumerate(ranked, start=1):
         if item.target.camera_id != frame.camera_id:
             continue
+        label = f"O{index:02d}"
         box = tuple(
             round(value * (sx if index % 2 == 0 else sy))
             for index, value in enumerate(item.target.bbox_xyxy)
         )
         draw.rectangle(box, outline="red", width=3)
-        draw.text((box[0] + 3, box[1] + 3), item.target.candidate_id, fill="red")
+        draw.text((box[0] + 3, box[1] + 3), label, fill="red")
         if item.anchor:
             anchor_box = tuple(
                 round(value * (sx if index % 2 == 0 else sy))
@@ -724,21 +707,31 @@ def _annotated_view(frame, ranked: tuple[ObjectSelection, ...]):
             draw.rectangle(anchor_box, outline="cyan", width=3)
             draw.text(
                 (anchor_box[0] + 3, anchor_box[1] + 3),
-                item.anchor.candidate_id,
+                f"{label}-A",
                 fill="cyan",
             )
     return image
 
 
-def _context_crop(frame, item: ObjectSelection):
+def _context_crop(frame, item: ObjectSelection, label: str = ""):
     from PIL import Image, ImageDraw
 
     x1, y1, x2, y2 = item.target.bbox_xyxy
-    side = min(
-        max(frame.width, frame.height),
-        max(128.0, 3.0 * max(x2 - x1, y2 - y1)),
-    )
-    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    if item.anchor is not None:
+        ax1, ay1, ax2, ay2 = item.anchor.bbox_xyxy
+        left, top = min(x1, ax1), min(y1, ay1)
+        right, bottom = max(x2, ax2), max(y2, ay2)
+        cx, cy = (left + right) / 2.0, (top + bottom) / 2.0
+        side = min(
+            max(frame.width, frame.height),
+            max(128.0, 1.35 * max(right - left, bottom - top)),
+        )
+    else:
+        side = min(
+            max(frame.width, frame.height),
+            max(128.0, 3.0 * max(x2 - x1, y2 - y1)),
+        )
+        cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
     crop_box = (
         max(0, math.floor(cx - side / 2.0)),
         max(0, math.floor(cy - side / 2.0)),
@@ -759,7 +752,16 @@ def _context_crop(frame, item: ObjectSelection):
         round((y2 - crop_box[1]) * sy),
     )
     draw.rectangle(box, outline="red", width=3)
-    draw.text((4, 4), item.target.candidate_id, fill="red")
+    draw.text((4, 4), label or item.target.candidate_id, fill="red")
+    if item.anchor is not None:
+        anchor_box = (
+            round((ax1 - crop_box[0]) * sx),
+            round((ay1 - crop_box[1]) * sy),
+            round((ax2 - crop_box[0]) * sx),
+            round((ay2 - crop_box[1]) * sy),
+        )
+        draw.rectangle(anchor_box, outline="cyan", width=3)
+        draw.text((anchor_box[0] + 3, anchor_box[1] + 3), f"{label}-A", fill="cyan")
     return image
 
 
@@ -774,8 +776,12 @@ def format_object_verifier_prompt(
     """User text for the object-relation verifier."""
     return (
         "Select the single object candidate that best matches the spatial request. "
-        "YOLO class labels are proposals, not facts. First silently inspect every red "
-        "TARGET_ID box and its detail crop. Discard boxes that do not visually contain "
+        "YOLO class labels are fallible priors, not facts. A matching label is positive "
+        "evidence and wins visual ambiguity; override it only when the crop clearly "
+        "contradicts the label. First silently inspect every red "
+        "TARGET_ID box and its detail crop. Each visual= field maps the row to an exact "
+        "IMAGE and, when present, its yellow crop tile. Discard boxes that do not visually "
+        "contain "
         "the parsed target type, including a shoe, body part, background patch, or other "
         "object mislabeled as the target. Also reject a cyan anchor whose visible class "
         "does not match its metadata. Never select a false positive because it has higher "
@@ -791,8 +797,8 @@ def format_object_verifier_prompt(
         "(lot, grass, curb). Parked cars (not a distant taxi) mark a parking-lot "
         "camera. NEAR and BESIDE "
         "mean beside the landmark, not sitting on top of it. When several instances "
-        "exist and the request is not a place, prefer an unattended one; items next to "
-        "a person are usually theirs. A unique instance is enough even beside a person. "
+        "exist, decide from the requested target, relation, landmark, and place. "
+        "A unique instance is enough even beside a person. "
         "If the object is not on the named support, still pick it when it shares the "
         "landmark's camera. Reply with exactly "
         "TARGET_ID|ANCHOR_ID and nothing else. Copy the listed anchor_id; it may be "
@@ -816,6 +822,7 @@ def build_object_board(
     ranked: tuple[ObjectSelection, ...],
     *,
     max_crops: Optional[int] = None,
+    pack_cameras: bool = False,
     projector=None,
     occupancy_at: Optional[OccupancyAt] = None,
 ) -> ObjectBoard:
@@ -823,21 +830,48 @@ def build_object_board(
     crop_limit = configured_max_crops() if max_crops is None else max_crops
     if crop_limit < 0:
         raise ValueError("max_crops must be non-negative")
+    cropped = []
+    for index, item in enumerate(ranked, start=1):
+        if len(cropped) >= crop_limit:
+            break
+        if round_.frames.get(item.target.camera_id) is not None:
+            cropped.append((f"O{index:02d}", item))
+
     images: list[object] = []
+    visual_refs: dict[str, str] = {}
     for camera_id in sorted({item.target.camera_id for item in ranked}):
         frame = round_.frames.get(camera_id)
-        if frame is not None:
-            images.append(_annotated_view(frame, ranked))
-    cropped_ids = set()
-    for item in ranked:
-        if len(cropped_ids) >= crop_limit:
-            break
-        if item.target.candidate_id in cropped_ids:
+        if frame is None:
             continue
-        frame = round_.frames.get(item.target.camera_id)
-        if frame is not None:
-            images.append(_context_crop(frame, item))
-            cropped_ids.add(item.target.candidate_id)
+        image_number = len(images) + 1
+        camera_crops = tuple(
+            (label, _context_crop(frame, item, label))
+            for label, item in cropped
+            if item.target.camera_id == camera_id
+        )
+        if pack_cameras:
+            images.append(
+                pack_camera_evidence(_annotated_view(frame, ranked), camera_crops)
+            )
+            for label, item in cropped:
+                if item.target.camera_id == camera_id:
+                    visual_refs[_pair_key(item)] = (
+                        f"IMAGE_{image_number}:tile={label}"
+                    )
+        else:
+            images.append(_annotated_view(frame, ranked))
+            for label, item in cropped:
+                if item.target.camera_id != camera_id:
+                    continue
+                images.append(_context_crop(frame, item, label))
+                visual_refs[_pair_key(item)] = (
+                    f"IMAGE_{image_number},detail=IMAGE_{len(images)}"
+                )
+        for item in ranked:
+            if item.target.camera_id == camera_id:
+                visual_refs.setdefault(
+                    _pair_key(item), f"IMAGE_{image_number}:overview"
+                )
     rows = []
     for item in ranked:
         anchor = item.anchor
@@ -850,6 +884,7 @@ def build_object_board(
             f"anchor_id={anchor.candidate_id if anchor else 'none'}",
             f"score={item.score:.4f}",
             f"match={item.match}",
+            f"visual={visual_refs.get(_pair_key(item), 'none')}",
         ]
         evidence = evidence_for_candidate(item.target, round_.people, projector)
         fields.append(f"owned={'true' if evidence.owned else 'false'}")
@@ -978,7 +1013,6 @@ def select_object_candidate(
     if not ranked:
         return None
     geometry = ranked[0]
-    board_ranked = ranked
     if verifier is None:
         log.info(
             "[object-selection] pairs=%d classes=%s verify=False reason=no_verifier "
@@ -989,10 +1023,6 @@ def select_object_candidate(
             "ok" if occupancy_at is not None else "missing",
         )
         return geometry
-    if _place_only_request(parsed, command_text):
-        board_ranked = _place_board_ranked(
-            ranked, parsed, command_text, round_, projector
-        )
     log.info(
         "[object-selection] pairs=%d classes=%s verify=%s reason=%s "
         "geometry=%s occupancy=%s",
@@ -1006,71 +1036,68 @@ def select_object_candidate(
 
     method = str(getattr(verifier, "method", "qwen"))
     try:
-        contenders = board_ranked
         remote = method == "molmo_remote"
-        while remote and len(contenders) > _REMOTE_BATCH_SIZE:
-            log.info(
-                "[vlm] object tournament contenders=%d batch_size=%d",
-                len(contenders),
-                _REMOTE_BATCH_SIZE,
+        contenders = ranked
+
+        def verify(items: tuple[ObjectSelection, ...]):
+            candidate_board = build_object_board(
+                command_text,
+                parsed,
+                round_,
+                items,
+                max_crops=len(items) if remote else None,
+                pack_cameras=remote,
+                projector=projector,
+                occupancy_at=occupancy_at,
             )
-            winners = []
-            for offset in range(0, len(contenders), _REMOTE_BATCH_SIZE):
-                batch = contenders[offset : offset + _REMOTE_BATCH_SIZE]
+            parsed_reply, reply = call_verifier(
+                verifier,
+                candidate_board,
+                lambda text: parse_object_verifier_output(text, items),
+            )
+            chosen = next(item for item in items if _pair_key(item) == parsed_reply)
+            return chosen, reply, candidate_board
+
+        if remote:
+            groups: dict[str, list[ObjectSelection]] = {}
+            for item in contenders:
+                groups.setdefault(item.target.class_name, []).append(item)
+            survivors: list[ObjectSelection] = []
+            screened: dict[
+                tuple[str, Optional[str]], tuple[ObjectSelection, str, ObjectBoard]
+            ] = {}
+            for class_name, group in groups.items():
+                batch = tuple(group)
                 if len(batch) == 1:
-                    winners.append(batch[0])
+                    survivors.extend(batch)
                     continue
-                batch_board = build_object_board(
-                    command_text,
-                    parsed,
-                    round_,
-                    batch,
-                    max_crops=len(batch),
-                    projector=projector,
-                    occupancy_at=occupancy_at,
-                )
                 try:
-                    (target_id, anchor_id), _ = call_verifier(
-                        verifier,
-                        batch_board,
-                        lambda text, batch=batch: parse_object_verifier_output(
-                            text, batch
-                        ),
-                    )
-                    winners.append(
-                        next(
-                            item
-                            for item in batch
-                            if _pair_key(item) == (target_id, anchor_id)
-                        )
+                    result = verify(batch)
+                    winner = result[0]
+                    survivors.append(winner)
+                    screened[_pair_key(winner)] = result
+                    log.info(
+                        "[vlm] object class-screen class=%s candidates=%d selected=%s",
+                        class_name,
+                        len(batch),
+                        winner.target.candidate_id,
                     )
                 except Exception as exc:
                     log.warning(
-                        "[vlm] object batch failed offset=%d size=%d error=%s; "
-                        "advancing geometry winner",
-                        offset,
+                        "[vlm] object class-screen failed class=%s candidates=%d "
+                        "error=%s; keeping all",
+                        class_name,
                         len(batch),
                         type(exc).__name__,
                     )
-                    winners.append(batch[0])
-            contenders = tuple(winners)
-        board = build_object_board(
-            command_text,
-            parsed,
-            round_,
-            contenders,
-            max_crops=len(contenders) if remote else None,
-            projector=projector,
-            occupancy_at=occupancy_at,
-        )
-        (target_id, anchor_id), raw_output = call_verifier(
-            verifier,
-            board,
-            lambda text: parse_object_verifier_output(text, contenders),
-        )
-        selected = next(
-            item for item in contenders if _pair_key(item) == (target_id, anchor_id)
-        )
+                    survivors.extend(batch)
+            contenders = tuple(survivors)
+
+        if remote and len(contenders) == 1 and _pair_key(contenders[0]) in screened:
+            selected, raw_output, board = screened[_pair_key(contenders[0])]
+        else:
+            selected, raw_output, board = verify(contenders)
+        target_id, anchor_id = _pair_key(selected)
         log.info(
             "[vlm] object verified target=%s anchor=%s backend=%s output=%s",
             target_id,

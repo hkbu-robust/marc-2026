@@ -845,7 +845,7 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual("valid_model_output", result.reason)
         self.assertEqual("qwen", result.method)
 
-    def test_remote_verifier_tournaments_every_shortlisted_person(self):
+    def test_remote_verifier_compares_every_shortlisted_person_in_one_request(self):
         text = "Find the person lying face-down and motionless."
         command = parse_command(text)
         people = [
@@ -863,6 +863,7 @@ class SarSelectionTests(unittest.TestCase):
             camera_ids=["rig_a"],
         )
         seen = set()
+        calls = []
 
         class Verifier:
             method = "molmo_remote"
@@ -870,17 +871,20 @@ class SarSelectionTests(unittest.TestCase):
             last_finish_reason = "stop"
 
             def __call__(self, board):
+                calls.append(board)
                 seen.update(board.candidate_ids)
-                assert len(board.candidate_ids) <= 3
-                assert len(board.images) <= 6
+                assert len(board.candidate_ids) == 8
+                assert len(board.images) == 1
+                assert "visual=IMAGE_1:tile=P08" in board.prompt
                 desired = "rig_a:person_prone:7"
                 return desired if desired in board.candidate_ids else board.candidate_ids[0]
 
         result = select_sar_candidate(text, command, round_, verifier=Verifier())
         self.assertEqual("rig_a:person_prone:7", result.selected.candidate_id)
         self.assertEqual({person.candidate_id for person in people}, seen)
+        self.assertEqual(1, len(calls))
 
-    def test_remote_verifier_keeps_explicit_pose_candidates(self):
+    def test_remote_verifier_keeps_pose_mismatches_for_visual_review(self):
         text = "Find the person lying face-down and motionless."
         command = parse_command(text)
         round_ = CctvDetectionRound(
@@ -903,7 +907,9 @@ class SarSelectionTests(unittest.TestCase):
                 return board.candidate_ids[0]
 
         select_sar_candidate(text, command, round_, verifier=Verifier())
-        self.assertEqual(["rig_a:person_prone:0"], seen)
+        self.assertEqual(
+            ["rig_a:person_prone:0", "rig_a:person_walking:0"], seen
+        )
 
     def test_fallback_after_bad_qwen_stays_on_shortlist(self):
         with self.assertLogs("marc_agent.sar_selection", level="INFO"):

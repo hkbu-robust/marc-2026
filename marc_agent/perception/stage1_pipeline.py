@@ -409,6 +409,23 @@ def run_stage1_candidate_pipeline(
                 type(exc).__name__,
                 exc,
             )
+    point_objects = getattr(selected_verifier, "point_object_candidates", None)
+    if parsed.target_type != "person" and callable(point_objects):
+        try:
+            extra_objects = point_objects(parsed, detections, command_text)
+            if extra_objects:
+                detections = replace(
+                    detections,
+                    objects=list(detections.objects) + list(extra_objects),
+                )
+            selected_verifier = _select_verifier(selected_verifier, clock, client)
+        except Exception as exc:
+            log.warning(
+                "[vlm] point refinement failed error=%s detail=%s; "
+                "continuing with detector candidates",
+                type(exc).__name__,
+                exc,
+            )
     selection = None
     object_selection = None
     failure_reason = None

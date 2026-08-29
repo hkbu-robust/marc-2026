@@ -1157,7 +1157,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertIn("Occupancy 0 is drivable road", prompt)
         self.assertIn("stall is vacant", prompt)
         self.assertIn("Parked cars (not a distant taxi)", prompt)
-        self.assertIn("YOLO class labels are proposals, not facts", prompt)
+        self.assertIn("YOLO class labels are fallible priors, not facts", prompt)
         self.assertIn("including a shoe", prompt)
         self.assertIn("remaining visually valid target instances", prompt)
         self.assertIn("first listed id", prompt)
@@ -1270,7 +1270,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("cam:tumbler:1", selected.target.candidate_id)
         self.assertEqual("qwen", selected.method)
 
-    def test_remote_verifier_tournaments_large_boards_without_dropping_candidates(self):
+    def test_remote_verifier_compares_large_board_in_one_packed_request(self):
         text = "Find the umbrella."
         parsed = parse_command(text)
         round_ = CctvDetectionRound(
@@ -1292,11 +1292,13 @@ class ObjectSelectionTests(unittest.TestCase):
             camera_ids=["cam"],
         )
         seen = set()
+        calls = []
 
         class Verifier:
             method = "molmo_remote"
 
             def __call__(self, board):
+                calls.append(board)
                 self.last_finish_reason = "stop"
                 self.last_metrics = None
                 seen.update(board.candidate_ids)
@@ -1310,14 +1312,82 @@ class ObjectSelectionTests(unittest.TestCase):
 
             @staticmethod
             def assert_board(board):
-                assert len(board.candidate_ids) <= 3
-                assert len(board.images) <= 6
+                assert len(board.candidate_ids) == 4
+                assert len(board.images) == 1
+                assert "visual=IMAGE_1:tile=O04" in board.prompt
 
         selected = select_object_candidate(
             parsed, round_, command_text=text, verifier=Verifier()
         )
         self.assertEqual("cam:umbrella:3", selected.target.candidate_id)
         self.assertEqual({f"cam:umbrella:{index}" for index in range(4)}, seen)
+        self.assertEqual(1, len(calls))
+
+    def test_remote_verifier_screens_detector_classes_before_final_choice(self):
+        text = "Find the mug."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam:mug:0", "mug", (20, 100, 60, 160), "cam"),
+                _object("cam:mug:1", "mug", (80, 100, 120, 160), "cam"),
+                _object("cam:cola_can:0", "cola_can", (140, 100, 180, 160), "cam"),
+                _object("cam:cola_can:1", "cola_can", (200, 100, 240, 160), "cam"),
+            ],
+            frames={"cam": CctvFrame(
+                "cam", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)
+            )},
+            camera_ids=["cam"],
+        )
+        calls = []
+
+        class Verifier:
+            method = "molmo_remote"
+            last_metrics = None
+            last_finish_reason = "stop"
+
+            def __call__(self, board):
+                calls.append(board)
+                ids = board.candidate_ids
+                if all(":mug:" in item for item in ids):
+                    return "cam:mug:1|none"
+                if all(":cola_can:" in item for item in ids):
+                    return "cam:cola_can:1|none"
+                return "cam:mug:1|none"
+
+        selected = select_object_candidate(
+            parsed, round_, command_text=text, verifier=Verifier()
+        )
+        self.assertEqual("cam:mug:1", selected.target.candidate_id)
+        self.assertEqual([2, 2, 2], [len(board.ranked) for board in calls])
+
+    def test_packed_board_gives_each_target_anchor_pair_its_own_tile(self):
+        text = "Find the tumbler in the parking lot."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam:tumbler:0", "tumbler", (300, 250, 330, 290), "cam"),
+                _object("cam:police_car:0", "police_car", (100, 180, 280, 360), "cam"),
+                _object("cam:suv:0", "suv", (350, 180, 550, 360), "cam"),
+            ],
+            frames={"cam": CctvFrame(
+                "cam", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)
+            )},
+            camera_ids=["cam"],
+        )
+        ranked = rank_object_candidates(
+            parsed, round_, command_text=text, visual_proposals=True
+        )
+        board = build_object_board(
+            text,
+            parsed,
+            round_,
+            ranked,
+            max_crops=len(ranked),
+            pack_cameras=True,
+        )
+        self.assertGreaterEqual(len(ranked), 2)
+        self.assertIn("visual=IMAGE_1:tile=O01", board.prompt)
+        self.assertIn("visual=IMAGE_1:tile=O02", board.prompt)
 
     def test_parking_lot_camera_beats_park_camera_with_taxi(self):
         text = "Find the tumbler dropped in the empty parking space."

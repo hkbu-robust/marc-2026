@@ -19,6 +19,7 @@ from marc_agent.command_parser import (
 from marc_agent.perception.camera_gate import scene_classes
 from marc_agent.perception.pose_to_situation import situation_for_pose
 from marc_agent.perception.qwen_reply import call_verifier, last_parsed
+from marc_agent.perception.qwen_remote import pack_camera_evidence
 from marc_agent.perception.qwen_runtime import (
     QwenRuntimeConfig,
     configured_max_crops,
@@ -30,7 +31,6 @@ from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidat
 _SITUATIONS = frozenset({"normal", "abnormal", "emergency", "accident"})
 _P_ID_RE = re.compile(r"^P(\d+)$", re.IGNORECASE)
 SHORTLIST_CAP = 8
-_REMOTE_BATCH_SIZE = 3
 _FACE_DOWN_POSES = frozenset(
     {"person_prone", "person_lying_down", "person_bending"}
 )
@@ -568,8 +568,9 @@ def format_sar_verifier_prompt(
         "detector metadata together. The middle token of each CANDIDATE_ID is the detector "
         "pose (person_sitting, person_lying_down, person_prone, …); prefer the pose that "
         "matches the request. Every listed candidate is eligible; detail_crop=no means "
-        "the candidate appears only in its annotated camera view. Reply with exactly "
-        "CANDIDATE_ID and nothing else.\n"
+        "the candidate appears only in its annotated camera view. Each visual= field maps "
+        "the row to an exact IMAGE and, when present, its yellow crop tile. Reply with "
+        "exactly CANDIDATE_ID and nothing else.\n"
         f"Original request: {command_text}\n"
         f"Parsed requested situation: {req}\n"
         f"Parsed requested landmark: {landmark or 'none'}\n"
@@ -628,21 +629,52 @@ def _assemble_board(
     round_: CctvDetectionRound,
     evidence: tuple[CandidateEvidence, ...],
     max_crops: Optional[int],
+    pack_cameras: bool = False,
 ) -> CandidateBoard:
     crop_limit = configured_max_crops() if max_crops is None else max_crops
     if crop_limit < 0:
         raise ValueError("max_crops must be non-negative")
     detail_evidence = _detail_crop_evidence(evidence, crop_limit)
     detail_ids = {item.person.candidate_id for item in detail_evidence}
+    aliases = {
+        item.person.candidate_id: f"P{index:02d}"
+        for index, item in enumerate(evidence, start=1)
+    }
     images: list[object] = []
+    visual_refs: dict[str, str] = {}
     for camera_id in sorted({item.person.camera_id for item in evidence}):
         frame = round_.frames.get(camera_id)
-        if frame is not None:
+        if frame is None:
+            continue
+        image_number = len(images) + 1
+        camera_crops = tuple(
+            (aliases[item.person.candidate_id], _context_crop(frame, item))
+            for item in detail_evidence
+            if item.person.camera_id == camera_id
+        )
+        if pack_cameras:
+            images.append(
+                pack_camera_evidence(_annotated_view(frame, evidence), camera_crops)
+            )
+            for item in detail_evidence:
+                if item.person.camera_id == camera_id:
+                    visual_refs[item.person.candidate_id] = (
+                        f"IMAGE_{image_number}:tile={aliases[item.person.candidate_id]}"
+                    )
+        else:
             images.append(_annotated_view(frame, evidence))
-    for item in detail_evidence:
-        frame = round_.frames.get(item.person.camera_id)
-        if frame is not None:
-            images.append(_context_crop(frame, item))
+            for item in detail_evidence:
+                if item.person.camera_id != camera_id:
+                    continue
+                images.append(_context_crop(frame, item))
+                visual_refs[item.person.candidate_id] = (
+                    f"IMAGE_{image_number},detail=IMAGE_{len(images)}"
+                )
+        for item in evidence:
+            if item.person.camera_id == camera_id:
+                visual_refs.setdefault(
+                    item.person.candidate_id, f"IMAGE_{image_number}:overview"
+                )
 
     rows = []
     for index, item in enumerate(evidence, start=1):
@@ -655,6 +687,7 @@ def _assemble_board(
                     f"camera={item.person.camera_id}",
                     f"pose={item.person.pose_class}",
                     f"confidence={item.person.confidence:.3f}",
+                    f"visual={visual_refs.get(item.person.candidate_id, 'none')}",
                     f"anchor={anchor.class_name if anchor else 'none'}",
                     f"anchor_id={anchor.candidate_id if anchor else 'none'}",
                     (
@@ -904,63 +937,13 @@ def select_sar_candidate(
     if verifier is not None:
         try:
             method = str(getattr(verifier, "method", "qwen"))
-            if method == "molmo_remote":
-                poses = _named_pose_classes(command_text, command)
-                pose_contenders = tuple(
-                    item for item in contenders if item.person.pose_class in poses
-                )
-                if pose_contenders:
-                    contenders = pose_contenders
-                    board = _assemble_board(
-                        command_text, command, round_, contenders, None
-                    )
-            while method == "molmo_remote" and len(contenders) > _REMOTE_BATCH_SIZE:
-                log.info(
-                    "[vlm] SAR tournament contenders=%d batch_size=%d",
-                    len(contenders),
-                    _REMOTE_BATCH_SIZE,
-                )
-                winners = []
-                for offset in range(0, len(contenders), _REMOTE_BATCH_SIZE):
-                    batch = contenders[offset : offset + _REMOTE_BATCH_SIZE]
-                    if len(batch) == 1:
-                        winners.append(batch[0])
-                        continue
-                    batch_board = _assemble_board(
-                        command_text, command, round_, batch, len(batch)
-                    )
-                    try:
-                        (batch_parsed, _) = call_verifier(
-                            verifier,
-                            batch_board,
-                            lambda text, batch=batch: parse_verifier_output(
-                                text, tuple(item.person.candidate_id for item in batch)
-                            ),
-                        )
-                        candidate_id, _ = batch_parsed
-                        winners.append(
-                            next(
-                                item
-                                for item in batch
-                                if item.person.candidate_id == candidate_id
-                            )
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "[vlm] SAR batch failed offset=%d size=%d error=%s; "
-                            "advancing geometry winner",
-                            offset,
-                            len(batch),
-                            type(exc).__name__,
-                        )
-                        winners.append(batch[0])
-                contenders = tuple(winners)
             board = _assemble_board(
                 command_text,
                 command,
                 round_,
                 contenders,
                 len(contenders) if method == "molmo_remote" else None,
+                pack_cameras=method == "molmo_remote",
             )
             (parsed, raw_output) = call_verifier(
                 verifier,
