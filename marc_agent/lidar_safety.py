@@ -23,7 +23,7 @@ STOP_X_MAX = 0.80
 CORRIDOR_Y = 0.55
 CLEAR_FAR = 2.50
 NUDGE_Y = 0.80
-DISC_R = 0.40
+DISC_R = BODY_R
 _BIN_M = 0.25
 
 
@@ -99,10 +99,11 @@ def _usable(xyz) -> Optional[np.ndarray]:
 
 
 def overlay_discs(xyz, pose, radius: float = DISC_R) -> list[tuple[float, float, float]]:
-    """Cluster body-height hits into world ``(x, y, r)`` discs for ``stamp_overlay``.
+    """Cluster corridor body-height hits into world discs for ``stamp_overlay``.
 
-    Points are quantized in world XY so a bumper cloud becomes a handful of discs
-    rather than one stamp per return. Empty or unusable clouds yield ``[]``.
+    Only the bumper / nudge window is stamped (same as ``advise``), with a chassis
+    pad rather than a car radius. Hits are quantized in world XY so a bumper cloud
+    becomes a handful of discs. Empty or unusable clouds yield ``[]``.
     """
     pts = _usable(xyz)
     if pts is None or pose is None or len(pose) < 3:
@@ -111,8 +112,11 @@ def overlay_discs(xyz, pose, radius: float = DISC_R) -> list[tuple[float, float,
     cc, ss = math.cos(yaw), math.sin(yaw)
     bins: dict[tuple[int, int], list[tuple[float, float]]] = {}
     for px, py, _pz in pts:
-        wx = x + float(px) * cc - float(py) * ss
-        wy = y + float(px) * ss + float(py) * cc
+        fx, fy = float(px), float(py)
+        if fx < STOP_X_MIN or fx > CLEAR_FAR or abs(fy) > NUDGE_Y:
+            continue
+        wx = x + fx * cc - fy * ss
+        wy = y + fx * ss + fy * cc
         key = (int(round(wx / _BIN_M)), int(round(wy / _BIN_M)))
         bins.setdefault(key, []).append((wx, wy))
     rad = float(radius)

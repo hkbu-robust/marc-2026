@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 
 from marc_agent.lidar_safety import (
+    BODY_R,
     CLEAR_FAR,
     DISC_R,
     STOP_X_MAX,
@@ -120,7 +121,12 @@ class LidarSafetyTests(unittest.TestCase):
         wx, wy, rad = discs[0]
         self.assertAlmostEqual(11.0, wx, places=2)
         self.assertAlmostEqual(20.0, wy, places=2)
+        self.assertAlmostEqual(BODY_R, DISC_R, places=3)
         self.assertAlmostEqual(DISC_R, rad, places=3)
+
+    def test_overlay_discs_ignore_side_hits(self):
+        pose = (0.0, 0.0, 0.0)
+        self.assertEqual([], overlay_discs(_xyz([0.4, 2.0, 0.4]), pose))
 
     def test_overlay_discs_ignore_ground_and_self(self):
         pose = (0.0, 0.0, 0.0)
