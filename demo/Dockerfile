@@ -50,14 +50,16 @@ RUN --network=host --mount=type=cache,target=/root/.cache/pip \
         "huggingface_hub>=0.30.0,<1.0" "safetensors==0.6.2" \
     && pip3 install --no-deps urdfpy \
     && pip3 install --upgrade "packaging>=26.2" "setuptools>=64,<78" wheel setuptools-scm \
-    && python3 -c "import setuptools; v=tuple(map(int, setuptools.__version__.split('.')[:2])); assert v >= (64, 0), setuptools.__version__" \
-    && git init /tmp/GraspGenX \
-    && git -C /tmp/GraspGenX remote add origin https://github.com/NVlabs/GraspGenX.git \
-    && git -C /tmp/GraspGenX fetch --depth 1 origin b9429097728cb1c430dd78b92edf17ba318aad03 \
-    && git -C /tmp/GraspGenX checkout --detach FETCH_HEAD \
-    && pip3 install --no-deps --no-build-isolation /tmp/GraspGenX \
-    && python3 -c "from graspgenx.grasp_server import GraspGenXSampler; print('graspgenx import ok')" \
-    && rm -rf /tmp/GraspGenX
+    && python3 -c "import setuptools; v=tuple(map(int, setuptools.__version__.split('.')[:2])); assert v >= (64, 0), setuptools.__version__"
+# Fast-iteration branch: do not fetch or install GraspGenX.
+# RUN --network=host --mount=type=cache,target=/root/.cache/pip \
+#     git init /tmp/GraspGenX \
+#     && git -C /tmp/GraspGenX remote add origin https://github.com/NVlabs/GraspGenX.git \
+#     && git -C /tmp/GraspGenX fetch --depth 1 origin b9429097728cb1c430dd78b92edf17ba318aad03 \
+#     && git -C /tmp/GraspGenX checkout --detach FETCH_HEAD \
+#     && pip3 install --no-deps --no-build-isolation /tmp/GraspGenX \
+#     && python3 -c "from graspgenx.grasp_server import GraspGenXSampler; print('graspgenx import ok')" \
+#     && rm -rf /tmp/GraspGenX
 
 WORKDIR /agent
 

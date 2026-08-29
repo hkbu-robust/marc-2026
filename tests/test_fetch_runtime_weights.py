@@ -212,6 +212,27 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
         downloader.assert_not_called()
         hub.assert_not_called()
 
+    def test_fast_build_does_not_fetch_graspgenx(self):
+        downloader = Mock(side_effect=AssertionError("must not download GraspGenX"))
+        hub = Mock(side_effect=AssertionError("must not download YOLO"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(_FETCH_MOD, "yolo11x_ready", return_value=True):
+                lines = fetch_all(
+                    paths={
+                        "qwen": root / "qwen",
+                        "graspgenx": root / "graspgenx",
+                        "grippers": root / "grippers",
+                        "yolo11x": root / "yolo11x.pt",
+                    },
+                    snapshot_download=downloader,
+                    hub_download=hub,
+                    bake_qwen=False,
+                )
+        self.assertEqual(2, len(lines))
+        downloader.assert_not_called()
+        hub.assert_not_called()
+
     def test_remote_compose_passes_backend_as_build_arg(self):
         text = Path("demo/docker-compose.qwen-remote.yml").read_text(encoding="utf-8")
         self.assertIn("MARC_QWEN_BACKEND: remote", text)
@@ -338,28 +359,21 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
 
 
 class AgentDockerfileTests(unittest.TestCase):
-    def test_graspgenx_installs_from_checkout_and_imports_before_fetch(self):
+    def test_fast_build_does_not_install_graspgenx(self):
         text = Path("demo/Dockerfile").read_text(encoding="utf-8")
-        pip_run, fetch_run = text.split("WORKDIR /agent", 1)
+        active = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
         self.assertIn(
             'pip3 install --upgrade "packaging>=26.2" "setuptools>=64,<78"',
-            pip_run,
+            active,
         )
-        self.assertIn("setuptools>=64,<78", pip_run)
-        self.assertNotIn("setuptools>=45,<78", text)
-        self.assertIn("pip3 install --no-deps --no-build-isolation /tmp/GraspGenX", text)
+        self.assertNotIn("/tmp/GraspGenX", active)
+        self.assertNotIn("from graspgenx", active)
         self.assertNotIn(
             "pip3 install --no-deps --no-build-isolation \\\n"
             "        git+https://github.com/NVlabs/GraspGenX.git",
             text,
-        )
-        self.assertIn(
-            'python3 -c "from graspgenx.grasp_server import GraspGenXSampler',
-            pip_run,
-        )
-        self.assertNotIn(
-            'python3 -c "from graspgenx.grasp_server import GraspGenXSampler',
-            fetch_run,
         )
         self.assertIn("ARG MARC_QWEN_BACKEND=local", text)
         self.assertIn("MARC_QWEN_BACKEND=\"$MARC_QWEN_BACKEND\"", text)

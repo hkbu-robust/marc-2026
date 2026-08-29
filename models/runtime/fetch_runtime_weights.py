@@ -315,16 +315,17 @@ def fetch_all(
         lines.append("skip qwen (MARC_QWEN_BACKEND is not local)")
     lines.extend(
         [
-            fetch_graspgenx(
-                dests["graspgenx"],
-                snapshot_download=snapshot_download,
-                skip_if_complete=skip_if_complete,
-            ),
-            fetch_grippers(
-                dests["grippers"],
-                snapshot_download=snapshot_download,
-                skip_if_complete=skip_if_complete,
-            ),
+            # Fast-iteration branch: do not fetch GraspGenX checkpoints or grippers.
+            # fetch_graspgenx(
+            #     dests["graspgenx"],
+            #     snapshot_download=snapshot_download,
+            #     skip_if_complete=skip_if_complete,
+            # ),
+            # fetch_grippers(
+            #     dests["grippers"],
+            #     snapshot_download=snapshot_download,
+            #     skip_if_complete=skip_if_complete,
+            # ),
             fetch_yolo11x(
                 dests["yolo11x"],
                 hub_download=hub_download,
