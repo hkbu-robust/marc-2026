@@ -51,6 +51,13 @@ FINAL_PARAMS = {
 }
 _PARAMS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pnp_params.json")
 
+# Cart DLS must not take centimetre-scale steps even if json move_speed is high.
+POS_STEP_MAX_M = 0.006
+WRIST_DEPTH_MIN_M = 0.08
+WRIST_DEPTH_MAX_M = 0.40
+WRIST_CENTER_FRAC = 0.20
+_CAMERA_DEPTH_FRAME = "camera_depth_frame"
+
 # placo kinematics has a URDF-load cost, so cache it once per process.
 _KIN = None
 
@@ -80,6 +87,143 @@ def load_params():
     except Exception:
         pass
     return p
+
+
+def median_center_depth(depth, frac: float = WRIST_CENTER_FRAC):
+    """Median metres in a central window, or None if the crop is empty."""
+    if depth is None:
+        return None
+    arr = np.asarray(depth, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if arr.ndim != 2 or arr.size == 0:
+        return None
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    frac = float(np.clip(frac, 0.05, 1.0))
+    fh = max(1, int(h * frac))
+    fw = max(1, int(w * frac))
+    y0 = (h - fh) // 2
+    x0 = (w - fw) // 2
+    roi = arr[y0:y0 + fh, x0:x0 + fw]
+    valid = roi[np.isfinite(roi) & (roi > WRIST_DEPTH_MIN_M) & (roi < WRIST_DEPTH_MAX_M)]
+    if valid.size == 0:
+        return None
+    return float(np.median(valid))
+
+
+def grasp_z_from_wrist_depth(cam_T, depth_m, floor_z, k=None, uv=None):
+    """Arm-base z of a wrist-depth sample, raised to ``floor_z`` if needed."""
+    if cam_T is None or depth_m is None:
+        return None
+    T = np.asarray(cam_T, dtype=np.float64)
+    d = float(depth_m)
+    if T.shape != (4, 4) or not np.isfinite(d):
+        return None
+    if k is not None and uv is not None:
+        km = np.asarray(k, dtype=np.float64).reshape(-1)
+        if km.size >= 9:
+            fx, fy, cx, cy = float(km[0]), float(km[4]), float(km[2]), float(km[5])
+        elif km.size >= 4:
+            fx, fy, cx, cy = float(km[0]), float(km[1]), float(km[2]), float(km[3])
+        else:
+            fx = fy = cx = cy = 0.0
+        if fx > 1.0 and fy > 1.0:
+            u, v = float(uv[0]), float(uv[1])
+            x = (u - cx) * d / fx
+            y = (v - cy) * d / fy
+            pnt = T @ np.array([x, y, d, 1.0], dtype=np.float64)
+            return max(float(pnt[2]), float(floor_z))
+    pnt = T[:3, 3] + d * T[:3, 2]
+    return max(float(pnt[2]), float(floor_z))
+
+
+def _camera_depth_T(kin, q):
+    setter = getattr(kin, "_set_q", None)
+    robot = getattr(kin, "_robot", None)
+    if not callable(setter) or robot is None:
+        return None
+    try:
+        setter(q)
+        return np.asarray(robot.get_T_world_frame(_CAMERA_DEPTH_FRAME), dtype=np.float64)
+    except Exception:
+        return None
+
+
+def _gripper_depth_array(client):
+    getter = getattr(client, "get_robot_depth", None)
+    if not callable(getter):
+        return None
+    try:
+        msg = getter("gripper")
+    except Exception:
+        return None
+    try:
+        from manip_dataset.images import image_to_depth
+        return image_to_depth(msg)
+    except Exception:
+        pass
+    try:
+        from nearfield import _image_to_depth
+        return _image_to_depth(msg)
+    except Exception:
+        return None
+
+
+def _gripper_camera_k(client):
+    getter = getattr(client, "get_robot_info", None)
+    if not callable(getter):
+        return None
+    try:
+        info = getter("gripper_left")
+    except Exception:
+        return None
+    k = getattr(info, "k", None)
+    if k is None:
+        return None
+    return np.asarray(k, dtype=np.float64)
+
+
+def _rewrite_grasp_z(seq, z) -> None:
+    z = float(z)
+    for i, wp in enumerate(seq._waypoints):
+        label, ee, grip, hold, mode = wp
+        if label in ("descend", "grasp"):
+            ee = np.asarray(ee, dtype=np.float64).copy()
+            ee[2] = z
+            seq._waypoints[i] = (label, ee, grip, hold, mode)
+
+
+def refine_grasp_z_from_wrist(client, kin, arm_q, p, log):
+    """Lower descend/grasp z from wrist depth at ``pre``. None if unusable."""
+    def _skip(why):
+        if callable(log):
+            log("[pick] wrist z skipped (%s)" % why)
+        return None
+
+    depth = _gripper_depth_array(client)
+    if depth is None:
+        return _skip("no gripper depth")
+    d = median_center_depth(depth)
+    if d is None:
+        return _skip("no center depth")
+    cam_T = _camera_depth_T(kin, arm_q)
+    if cam_T is None:
+        return _skip("no cam_T")
+    k = _gripper_camera_k(client)
+    uv = None
+    if depth is not None:
+        h, w = np.asarray(depth).shape[:2]
+        uv = (0.5 * float(w), 0.5 * float(h))
+    floor_z = float(load_params().get("grasp_down", -0.28))
+    z = grasp_z_from_wrist_depth(cam_T, d, floor_z, k=k, uv=uv)
+    if z is None:
+        return _skip("no z")
+    if callable(log):
+        log(
+            "[pick] wrist z=%.3f d=%.3f (floor=%.3f ggx=%.3f)"
+            % (float(z), float(d), floor_z, float(p.get("grasp_down", float("nan"))))
+        )
+    return float(z)
 
 
 def _make_js(arm_q, grip):
@@ -225,6 +369,18 @@ def _env_bool(name, default):
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+def descend_should_stop(label, phase, is_grasping) -> bool:
+    """True when Cartesian descend should halt because a hold is already reported."""
+    if str(label) != "descend" or str(phase) != "move":
+        return False
+    if not callable(is_grasping):
+        return False
+    try:
+        return is_grasping() is True
+    except Exception:
+        return False
+
+
 def grip_stop_on_grasp():
     """True unless MARC_GRIP_STOP_ON_GRASP is an explicit off value."""
     return _env_bool("MARC_GRIP_STOP_ON_GRASP", DEFAULT_GRIP_STOP_ON_GRASP)
@@ -366,7 +522,7 @@ def grip_holding(client, grip_close, log, samples=6):
     return holding
 
 
-def run_motion(client, log, p, phase="full"):
+def run_motion(client, log, p, phase="full", on_pre=None):
     """Publish pick-and-place via the closed-loop DLS servo (blocking).
 
     Returns: gripper hold decision (True/False/None) - computed from gripper feedback right after reaching lift.
@@ -389,8 +545,12 @@ def run_motion(client, log, p, phase="full"):
     waypoints = build_waypoints(p, phase)  # (label, ee, grip, hold, mode)
 
     rate, dt = 20.0, 1.0 / 20.0
-    # Scale the base cart step (0.006 m/tick @20Hz) by move_speed. 0.35 -> ~0.006.
-    pos_step = max(0.004, float(p.get("move_speed", 0.35)) * 0.017)
+    # Scale the base cart step (0.006 m/tick @20Hz) by move_speed, then cap so
+    # a high json move_speed cannot take centimetre-scale DLS bites.
+    pos_step = min(
+        POS_STEP_MAX_M,
+        max(0.004, float(p.get("move_speed", 0.35)) * 0.017),
+    )
     # joint-mode rotation speed (rad/tick) = carry_speed(rad/s) / rate.
     joint_step = max(0.003, float(p.get("carry_speed", 0.18)) / rate)
 
@@ -416,6 +576,8 @@ def run_motion(client, log, p, phase="full"):
     tick_i = 0
     stale = 0
     no_fb = 0
+    last_cmd = None
+    wrist_done = False
     while seq.active:
         arm_q = _read_arm_q(client)
         if arm_q is None:
@@ -424,7 +586,35 @@ def run_motion(client, log, p, phase="full"):
                 dbg.write(f"  [wait] no arm_state x{no_fb}\n"); dbg.flush()
             _sleep(client, dt)
             continue
+        fresh = prev_q is None or not np.array_equal(arm_q, prev_q)
+        if not fresh and last_cmd is not None:
+            stale += 1
+            client.send_arm_command(_make_js(last_cmd[0], last_cmd[1]))
+            if dbg is not None and tick_i % 5 == 0:
+                dbg.write(f"  t={tick_i:4d} stale skip dls\n")
+                dbg.flush()
+            tick_i += 1
+            _sleep(client, dt)
+            continue
+        if descend_should_stop(
+            seq.label, seq._phase, getattr(client, "is_grasping", None),
+        ):
+            seq._reach(time.monotonic())
+            _log("  [pick] descend stopped on is_grasping")
         cmd = seq.tick(arm_q)
+        if (
+            not wrist_done
+            and seq.label == "pre"
+            and seq._phase == "dwell"
+        ):
+            wrist_done = True
+            if callable(on_pre):
+                on_pre(seq, client, kin, p)
+                cmd = None
+            else:
+                z_w = refine_grasp_z_from_wrist(client, kin, arm_q, p, _log)
+                if z_w is not None:
+                    _rewrite_grasp_z(seq, z_w)
         if cmd is not None:
             q, grip = cmd   # grip = gripper command value (0.0 open ~ grip_close)
             if (not grasp_closed
@@ -460,19 +650,16 @@ def run_motion(client, log, p, phase="full"):
                 latch_closed_grip(seq, latched)
                 seq._dwell_until = time.monotonic()
                 grasp_closed = True
+                last_cmd = (hold_q.copy(), float(latched))
             else:
                 if seq.label == "grasp" and seq._phase == "dwell":
                     grasp_closed = True
                 client.send_arm_command(_make_js(q, grip))
+                last_cmd = (np.asarray(q, dtype=np.float64).copy(), float(grip))
         if dbg is not None:
             now = time.monotonic()
             loop_dt = now - prev_t
             prev_t = now
-            fresh = prev_q is None or not np.array_equal(arm_q, prev_q)
-            if not fresh:
-                stale += 1
-            # act_dq = how much the actual joints moved since the last tick (rad). Repeated 0 -> stuck /
-            # stale feedback; a large jump -> over-command / oscillation. cmd_dq = the command increment given this tick.
             act_dq = 0.0 if prev_q is None else float(np.linalg.norm(arm_q - prev_q))
             lbl, ph, idx = seq.label, seq._phase, seq._idx
             ee_err = float("nan")
@@ -489,10 +676,10 @@ def run_motion(client, log, p, phase="full"):
             if tick_i % 5 == 0:
                 dbg.write(f"  t={tick_i:4d} dt={loop_dt*1000:5.1f}ms {str(ph):11s} "
                           f"wp={str(lbl):9s} ee_err={ee_err:.4f} cmd_dq={cmd_dq:.4f} "
-                          f"act_dq={act_dq:.4f} fresh={int(fresh)}\n")
+                          f"act_dq={act_dq:.4f} fresh=1\n")
                 dbg.flush()
-            prev_q = arm_q.copy()
-            tick_i += 1
+        tick_i += 1
+        prev_q = np.asarray(arm_q, dtype=np.float64).copy()
         # At each waypoint where an object is held/moved with the gripper closed (lift/over/place),
         # measure holding once. lift = did it grab (empty hand -> abort early as grasp failure),
         # over/place = was it dropped in transit (a prior True flipping to False means it fell, abort).

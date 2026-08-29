@@ -50,8 +50,12 @@ RADIUS_SLACK_M = 0.20
 FWD_MIN_M = 0.15
 FWD_MAX_M = 1.00
 LAT_MAX_M = 0.45
+# Calibrated chassis depth on the multiplexed base topic (not a 480 gripper-like frame).
+CHASSIS_DEPTH_HW = (360, 640)
 MIN_CONF = 0.12
 STALE_STOP_S = 0.8
+PEEK_RANGE_PAD_M = 4.0
+PEEK_PERIOD_S = 0.5
 
 def _wrap_pi(a: float) -> float:
     while a > math.pi:
@@ -265,6 +269,32 @@ def car_to_world_xy(pose, fwd, lat):
     return (x + fwd * cc - lat * ss, y + fwd * ss + lat * cc)
 
 
+def choose_lock_depth(depth_shapes, lock_rgb=None):
+    """Pick the chassis depth shape, not a taller multiplexed close-up.
+
+    Prefer the calibrated 360×640 base depth when it appeared in the lock
+    window. Otherwise match the locked RGB, then same height, then tallest.
+    """
+    shapes = []
+    for raw in depth_shapes or ():
+        if raw is None or len(raw) < 2:
+            continue
+        shapes.append((int(raw[0]), int(raw[1])))
+    if not shapes:
+        return None
+    unique = list(dict.fromkeys(shapes))
+    if CHASSIS_DEPTH_HW in unique:
+        return CHASSIS_DEPTH_HW
+    if lock_rgb is not None and len(lock_rgb) >= 2:
+        rgb = (int(lock_rgb[0]), int(lock_rgb[1]))
+        if rgb in unique:
+            return rgb
+        same_h = [s for s in unique if s[0] == rgb[0]]
+        if same_h:
+            return max(same_h, key=lambda s: (s[1], s[0]))
+    return max(unique, key=lambda s: (s[0], s[1]))
+
+
 def k_from_info(info, rgb_shape):
     """(fx, fy, cx, cy) from CameraInfo, or a pinhole guess from image size."""
     if info is not None:
@@ -428,6 +458,52 @@ def _hint_from_reveal(reveal):
     return hint_xy, radius, ttype
 
 
+def peek_yolo_handoff(
+    client, detector, pose, hint_xy, hint_radius, target_type="",
+) -> bool:
+    """True when chassis RGB-D already sees the tumbler at pick range.
+
+    Skips campus-wide inference: only runs inside the reveal disc plus
+    ``PEEK_RANGE_PAD_M``. One ``detect_candidates`` + bbox depth; no GraspGenX.
+    """
+    if client is None or detector is None or pose is None or hint_xy is None:
+        return False
+    if len(pose) < 2 or len(hint_xy) < 2:
+        return False
+    dist = math.hypot(
+        float(pose[0]) - float(hint_xy[0]),
+        float(pose[1]) - float(hint_xy[1]),
+    )
+    if dist > float(hint_radius or 0.0) + PEEK_RANGE_PAD_M:
+        return False
+    load = getattr(detector, "load", None)
+    if callable(load) and not load():
+        return False
+    setter = getattr(detector, "set_target", None)
+    if callable(setter):
+        setter(target_type or None)
+    getter = getattr(client, "get_robot_image", None)
+    rgb_msg = getter(CAMERA) if callable(getter) else None
+    dgetter = getattr(client, "get_robot_depth", None)
+    depth_msg = dgetter(DEPTH_WHICH) if callable(dgetter) else None
+    rgb = _image_to_rgb(rgb_msg)
+    depth = _image_to_depth(depth_msg)
+    if rgb is None:
+        return False
+    try:
+        result = detector.detect_candidates(rgb, target_type)
+    except Exception:
+        log.warning("[nearfield] peek detect failed", exc_info=True)
+        return False
+    cands = (result or {}).get("candidates") or ()
+    if not cands:
+        return False
+    d_obj = None
+    if depth is not None:
+        d_obj = depth_in_bbox(depth, cands[0]["xyxy"], rgb.shape)
+    return yolo_may_center(True, pose, hint_xy, hint_radius, d_obj)
+
+
 def _yaw_for_err(err: float) -> float:
     ang = -YAW_GAIN * float(err)
     mag = min(abs(ang), YAW_MAX)
@@ -522,6 +598,54 @@ class NearFieldAcquire:
         self._scan_sign = 1.0
         self._tf = {}          # child -> (parent, t(3,), R(3,3))
         self._tf_ready = False
+
+    def snapshot(self, target_type: str = "") -> LocalizedTarget:
+        """One RGB-D localize of ``target_type``. Does not crawl or search a disc."""
+        ttype = str(target_type or "")
+        if not self.detector.load():
+            reason = getattr(self.detector, "reason", "no_detector")
+            log.warning("[nearfield] snapshot detector unavailable (%s)", reason)
+            return LocalizedTarget(valid=False, reason=str(reason))
+        self.detector.set_target(ttype or None)
+        self._ensure_tf()
+        if not self._lock_streams():
+            log.warning("[nearfield] snapshot no chassis RGB/depth -- fail closed")
+            return LocalizedTarget(valid=False, reason="no_camera")
+        rgb, depth, info, rgb_msg = self._read_locked()
+        if rgb is None:
+            return LocalizedTarget(valid=False, reason="no_camera")
+        if depth is None:
+            return LocalizedTarget(valid=False, reason="no_depth")
+        result = self.detector.detect_candidates(rgb, ttype)
+        status = result.get("status")
+        if status == "unsupported_target":
+            return LocalizedTarget(valid=False, reason="unsupported_target")
+        if status not in {"ok", "not_detected"}:
+            return LocalizedTarget(valid=False, reason=str(status or "detector_error"))
+        pose = None
+        getter = getattr(self.client, "get_world_pose", None)
+        if callable(getter):
+            try:
+                pose = getter()
+            except Exception:
+                pose = None
+        if pose is None:
+            pose = (0.0, 0.0, 0.0)
+        k = k_from_info(info, rgb.shape[:2])
+        R, tvec = self._cam_to_car(rgb_msg)
+        det = _candidate_detection(
+            result, depth, k, pose, None, 0.0, R=R, t=tvec,
+            people_xy=self._people_xy,
+        )
+        if det is None or det.get("bbox") is None:
+            return LocalizedTarget(valid=False, reason="not_detected")
+        return localize_detection(
+            det["bbox"], depth, det.get("rgb_shape") or rgb.shape[:2], k, pose,
+            None, 0.0,
+            conf=det.get("conf") or 0.0,
+            name=det.get("name") or ttype,
+            R=R, t=tvec,
+        )
 
     def acquire(self, reveal, deadline) -> LocalizedTarget:
         c = self.client
@@ -726,8 +850,13 @@ class NearFieldAcquire:
             return False
         # Prefer the taller frame (chassis 480x640 over 360x640 close-up).
         self._lock_rgb = max(rgb_shapes, key=lambda s: (int(s[0]), int(s[1])))
-        self._lock_depth = max(depth_shapes, key=lambda s: (int(s[0]), int(s[1]))) if depth_shapes else None
-        log.info("[nearfield] locked rgb=%s depth=%s", self._lock_rgb, self._lock_depth)
+        self._lock_depth = choose_lock_depth(depth_shapes, self._lock_rgb)
+        log.info(
+            "[nearfield] locked rgb=%s depth=%s candidates=%s",
+            self._lock_rgb,
+            self._lock_depth,
+            sorted(set(depth_shapes)),
+        )
         return True
 
     def _read_locked(self):

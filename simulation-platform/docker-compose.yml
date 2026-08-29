@@ -55,15 +55,21 @@ x-marc-common: &marc-common
             count: all
             capabilities: [gpu]
 
+x-marc-build: &marc-build
+  context: ..                      # starter-kit repo root = build context
+  dockerfile: simulation-platform/Dockerfile.practice
+  network: host                    # pip must see the host resolver (BuildKit default DNS fails here)
+  entitlements:
+    - network.host
+  args:
+    CONTENT_IMAGE: "${MARC_CONTENT_IMAGE:-ghcr.io/marc-challenge/marc-platform-content:2026.R03}"
+
 services:
   platform:                            # <- marc.sh platform / make platform
     <<: *marc-common
     profiles: ["platform"]
     build:
-      context: ..                      # starter-kit repo root = build context
-      dockerfile: simulation-platform/Dockerfile.practice
-      args:
-        CONTENT_IMAGE: "${MARC_CONTENT_IMAGE:-ghcr.io/marc-challenge/marc-platform-content:2026.R03}"
+      <<: *marc-build
     image: marc-platform:practice      # local build output (do not redistribute)
     environment:
       <<: *marc-env
@@ -101,11 +107,7 @@ services:
     <<: *marc-common
     profiles: ["dataset-gen"]
     build:
-      context: ..
-      # Same unified image as the platform.
-      dockerfile: simulation-platform/Dockerfile.practice
-      args:
-        CONTENT_IMAGE: "${MARC_CONTENT_IMAGE:-ghcr.io/marc-challenge/marc-platform-content:2026.R03}"
+      <<: *marc-build
     image: marc-platform:practice
     environment:
       <<: *marc-env
@@ -192,10 +194,7 @@ services:
     <<: *marc-common
     profiles: ["manip-trainer"]
     build:
-      context: ..
-      dockerfile: simulation-platform/Dockerfile.practice
-      args:
-        CONTENT_IMAGE: "${MARC_CONTENT_IMAGE:-ghcr.io/marc-challenge/marc-platform-content:2026.R03}"
+      <<: *marc-build
     image: marc-platform:practice
     # Boot wrapper (same asset patches as the platform), then the manipulation trainer entry.
     command: ["/marc-patches/boot.py", "/metacom2026/simulation_app/marc2026/manipulation_trainer.py"]
@@ -221,10 +220,7 @@ services:
     <<: *marc-common
     profiles: ["ego-dataset-gen"]
     build:
-      context: ..
-      dockerfile: simulation-platform/Dockerfile.practice
-      args:
-        CONTENT_IMAGE: "${MARC_CONTENT_IMAGE:-ghcr.io/marc-challenge/marc-platform-content:2026.R03}"
+      <<: *marc-build
     image: marc-platform:practice
     environment:
       <<: *marc-env
