@@ -68,7 +68,7 @@ class QwenRemoteConfig:
     model_name: str
     timeout_s: float
     max_new_tokens: int
-    jpeg_quality: int
+    wall_timeout_s: float = 12.0
 
     @property
     def chat_completions_url(self) -> str:
@@ -102,27 +102,25 @@ class QwenRemoteConfig:
             raise QwenConfigurationError("MARC_QWEN_MODEL must not be empty")
         try:
             timeout_s = float(env.get("MARC_QWEN_TIMEOUT_S") or 90.0)
+            wall_timeout_s = float(env.get("MARC_QWEN_WALL_TIMEOUT_S") or 12.0)
             max_new_tokens = int(env.get("MARC_QWEN_MAX_NEW_TOKENS") or 48)
-            jpeg_quality = int(env.get("MARC_QWEN_JPEG_QUALITY") or 85)
         except (TypeError, ValueError) as exc:
             raise QwenConfigurationError(
-                "Qwen timeout, token limit, and JPEG quality must be numeric"
+                "Qwen timeout and token limit must be numeric"
             ) from exc
         if timeout_s <= 0:
             raise QwenConfigurationError("MARC_QWEN_TIMEOUT_S must be positive")
+        if wall_timeout_s <= 0:
+            raise QwenConfigurationError("MARC_QWEN_WALL_TIMEOUT_S must be positive")
         if max_new_tokens <= 0:
             raise QwenConfigurationError("MARC_QWEN_MAX_NEW_TOKENS must be positive")
-        if not 1 <= jpeg_quality <= 95:
-            raise QwenConfigurationError(
-                "MARC_QWEN_JPEG_QUALITY must be between 1 and 95"
-            )
         return cls(
             base_url=base_url,
             api_key=api_key,
             model_name=model_name,
             timeout_s=timeout_s,
             max_new_tokens=max_new_tokens,
-            jpeg_quality=jpeg_quality,
+            wall_timeout_s=wall_timeout_s,
         )
 
 

@@ -117,6 +117,7 @@ VEHICLE_LANDMARKS = frozenset(
         "suv",
     }
 )
+PARKED_VEHICLE_LANDMARKS = VEHICLE_LANDMARKS - {"taxi"}
 PARKING_SCENES = frozenset({"parking", "parking_space"})
 
 _SCENE_HINTS = (
@@ -553,8 +554,6 @@ def implicit_anchor_classes(parsed: ParsedCommand, text: str = "") -> frozenset[
     if parsed.landmark is not None:
         return frozenset({parsed.landmark})
     if uses_vehicle_anchor(parsed, text):
-        return VEHICLE_LANDMARKS
-    if parsed.scene_hint == "parking_space":
         return VEHICLE_LANDMARKS
     if parsed.scene_hint == "park":
         return SEATING_LANDMARKS
@@ -1015,6 +1014,7 @@ __all__ = [
     "Intent",
     "LANDMARK_TYPES",
     "MISSION_OBJECT_TYPES",
+    "PARKED_VEHICLE_LANDMARKS",
     "PARKING_SCENES",
     "ParseErrorCode",
     "ParsedCommand",

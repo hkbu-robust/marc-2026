@@ -90,6 +90,17 @@ class RoundDumpTests(unittest.TestCase):
             self.assertIsNone(path)
             self.assertFalse(out.exists())
 
+    def test_deletes_stale_qwen_transcript_when_verifier_skipped(self):
+        round_result = _round_result()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "stage1_001"
+            out.mkdir()
+            leftover = out / "qwen.txt"
+            leftover.write_text("stale leftover\n", encoding="utf-8")
+            with patch.dict(os.environ, {"MARC_ROUND_DUMP": "1"}, clear=False):
+                dump_stage_round(out, round_result)
+            self.assertFalse(leftover.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

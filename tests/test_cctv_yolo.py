@@ -182,6 +182,106 @@ class CctvYoloTests(unittest.TestCase):
         self.assertEqual("rig_3_b", extra[0].camera_id)
         self.assertGreaterEqual(extra[0].bbox_xyxy[0], 5.0)
 
+    def test_object_refine_crops_every_bench_on_cameras_missing_target(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.model = object()
+        detector.names = {8: "tumbler"}
+        detector._predict_frame = Mock(return_value=[])
+        frames = {
+            "rig_has": CctvFrame(
+                "rig_has", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)
+            ),
+            "rig_miss": CctvFrame(
+                "rig_miss", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)
+            ),
+        }
+        objects = [
+            ObjectCandidate(
+                "rig_has:tumbler:0",
+                "tumbler",
+                (40.0, 40.0, 80.0, 90.0),
+                0.8,
+                "rig_has",
+                (640, 480),
+            ),
+            ObjectCandidate(
+                "rig_has:bench:0",
+                "bench",
+                (20.0, 20.0, 200.0, 180.0),
+                0.9,
+                "rig_has",
+                (640, 480),
+            ),
+            ObjectCandidate(
+                "rig_miss:bench:0",
+                "bench",
+                (30.0, 40.0, 120.0, 160.0),
+                0.4,
+                "rig_miss",
+                (640, 480),
+            ),
+            ObjectCandidate(
+                "rig_miss:bench:1",
+                "bench",
+                (300.0, 80.0, 500.0, 260.0),
+                0.9,
+                "rig_miss",
+                (640, 480),
+            ),
+        ]
+        extra = detector.refine_around_landmarks(
+            frames, objects, "tumbler", frozenset({"bench"})
+        )
+        self.assertEqual([], extra)
+        self.assertEqual(2, detector._predict_frame.call_count)
+
+    def test_object_refine_runs_when_another_camera_already_has_target(self):
+        parsed = parse_command("Find the tumbler on the bench.")
+        missed = ObjectCandidate(
+            "rig_1:tumbler:0",
+            "tumbler",
+            (200.0, 200.0, 240.0, 250.0),
+            0.2,
+            "rig_1",
+            (640, 480),
+        )
+        round_ = CctvDetectionRound(
+            objects=[
+                ObjectCandidate(
+                    "rig_3:tumbler:0",
+                    "tumbler",
+                    (10.0, 300.0, 40.0, 340.0),
+                    0.9,
+                    "rig_3",
+                    (640, 480),
+                ),
+                ObjectCandidate(
+                    "rig_3:bench:0",
+                    "bench",
+                    (200.0, 300.0, 400.0, 420.0),
+                    0.9,
+                    "rig_3",
+                    (640, 480),
+                ),
+                ObjectCandidate(
+                    "rig_1:bench:0",
+                    "bench",
+                    (180.0, 180.0, 400.0, 360.0),
+                    0.9,
+                    "rig_1",
+                    (640, 480),
+                ),
+            ],
+            camera_ids=["rig_3", "rig_1"],
+        )
+        detector = Mock()
+        detector.refine_around_landmarks.return_value = [missed]
+        with patch("marc_agent.perception.cctv_yolo._detector", detector):
+            refined = refine_detection_round(parsed, round_)
+        detector.refine_around_landmarks.assert_called_once()
+        self.assertEqual(missed, refined.objects[-1])
+
     def test_landmark_crop_recovers_a_missed_person(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
         detector.contract = RuntimeContract.load()

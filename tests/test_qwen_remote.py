@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import threading
 import unittest
@@ -30,7 +31,6 @@ def _config() -> QwenRemoteConfig:
         model_name="qwen3-vl-8b",
         timeout_s=5.0,
         max_new_tokens=8,
-        jpeg_quality=80,
     )
 
 
@@ -44,16 +44,26 @@ def _board() -> CandidateBoard:
 
 
 class QwenRemoteTests(unittest.TestCase):
-    def test_payload_contains_base64_image_and_deterministic_generation(self):
-        payload = json.loads(build_remote_payload(_board(), _config()))
+    def test_payload_contains_lossless_png_image_and_deterministic_generation(self):
+        image = Image.new("RGB", (32, 24), color=(20, 40, 60))
+        board = CandidateBoard(
+            images=(image,),
+            prompt="Reply exactly rig_a:person_prone:0|emergency",
+            evidence=(),
+        )
+        payload = json.loads(build_remote_payload(board, _config()))
         self.assertEqual("qwen3-vl-8b", payload["model"])
         self.assertEqual(0, payload["temperature"])
         self.assertFalse(payload["stream"])
         self.assertEqual({"enable_thinking": False}, payload["chat_template_kwargs"])
         content = payload["messages"][0]["content"]
         url = content[0]["image_url"]["url"]
-        self.assertTrue(url.startswith("data:image/jpeg;base64,"))
-        self.assertTrue(base64.b64decode(url.split(",", 1)[1]).startswith(b"\xff\xd8"))
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+        raw = base64.b64decode(url.split(",", 1)[1])
+        self.assertTrue(raw.startswith(b"\x89PNG"))
+        decoded = Image.open(io.BytesIO(raw)).convert("RGB")
+        self.assertEqual(image.size, decoded.size)
+        self.assertEqual(image.tobytes(), decoded.tobytes())
         self.assertEqual("text", content[-1]["type"])
 
     def test_verifier_posts_with_auth_and_returns_message_text(self):
@@ -167,7 +177,6 @@ class QwenRemoteTests(unittest.TestCase):
                 model_name="qwen3-vl-8b",
                 timeout_s=2.0,
                 max_new_tokens=8,
-                jpeg_quality=80,
             )
             output = RemoteQwenSarVerifier(config)(_board())
         finally:
@@ -196,6 +205,34 @@ class QwenRemoteTests(unittest.TestCase):
             self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
         self.assertEqual(2, len(calls))
         output = "\n".join(captured.output)
+        self.assertIn("deadline=5.0s", output)
+        self.assertIn("budget=none", output)
+        self.assertIn("attempt=1/2", output)
+        self.assertIn("attempt=2/2", output)
+
+    def test_wall_timeout_caps_deadline_and_retries_when_budget_allows(self):
+        calls = []
+
+        def post(_url, _body, _headers, timeout):
+            calls.append(timeout)
+            raise QwenRemoteTimeout(f"vLLM did not respond within {timeout:.1f}s")
+
+        config = QwenRemoteConfig(
+            base_url="http://workstation:8000/v1",
+            api_key="test-secret",
+            model_name="qwen3-vl-8b",
+            timeout_s=90.0,
+            max_new_tokens=8,
+        )
+        verifier = RemoteQwenSarVerifier(config, post=post)
+        verifier.set_budget_timeout(27.9)
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
+            with self.assertRaises(QwenRemoteTimeout):
+                verifier(_board())
+        self.assertEqual([12.0, 12.0], calls)
+        output = "\n".join(captured.output)
+        self.assertIn("deadline=12.0s", output)
+        self.assertIn("budget=27.9s", output)
         self.assertIn("attempt=1/2", output)
         self.assertIn("attempt=2/2", output)
 

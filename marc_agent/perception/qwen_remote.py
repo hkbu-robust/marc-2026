@@ -133,16 +133,16 @@ def check_remote_health(
     return model_ids
 
 
-def image_data_url(image: object, *, quality: int) -> str:
-    """Encode one PIL-compatible image as a bounded-transfer JPEG data URL."""
+def image_data_url(image: object) -> str:
+    """Encode one PIL-compatible image as a lossless PNG data URL."""
     try:
         rgb = image.convert("RGB")
         buffer = io.BytesIO()
-        rgb.save(buffer, format="JPEG", quality=quality, optimize=True)
+        rgb.save(buffer, format="PNG", compress_level=1)
     except (AttributeError, OSError, ValueError) as exc:
         raise QwenRemoteResponseError("Candidate board contains an invalid image") from exc
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/jpeg;base64,{encoded}"
+    return f"data:image/png;base64,{encoded}"
 
 
 def build_remote_payload(
@@ -154,7 +154,7 @@ def build_remote_payload(
     content = [
         {
             "type": "image_url",
-            "image_url": {"url": image_data_url(image, quality=config.jpeg_quality)},
+            "image_url": {"url": image_data_url(image)},
         }
         for image in board.images
     ]
@@ -201,12 +201,15 @@ class RemoteQwenSarVerifier:
         return self._complete(board)
 
     def _timeout_s(self) -> tuple[float, int]:
-        timeout_s = float(self.config.timeout_s)
-        capped = False
-        if self.budget_timeout_s is not None:
-            timeout_s = min(timeout_s, float(self.budget_timeout_s))
-            capped = timeout_s + 1e-9 < float(self.config.timeout_s)
-        max_attempts = 1 if capped else 2
+        timeout_s = min(
+            float(self.config.timeout_s),
+            float(self.config.wall_timeout_s),
+        )
+        budget = self.budget_timeout_s
+        if budget is not None:
+            timeout_s = min(timeout_s, float(budget))
+        retry_ok = budget is None or float(budget) >= 2.0 * timeout_s
+        max_attempts = 2 if retry_ok else 1
         return timeout_s, max_attempts
 
     def _complete(
@@ -228,14 +231,19 @@ class RemoteQwenSarVerifier:
             for attempt in range(1, max_attempts + 1):
                 log.info(
                     "[qwen-remote] dispatch endpoint=%s model=%s images=%d "
-                    "candidates=%d request=%dB timeout=%.1fs max_tokens=%d "
-                    "attempt=%d/%d",
+                    "candidates=%d request=%dB deadline=%.1fs budget=%s "
+                    "max_tokens=%d attempt=%d/%d",
                     self.config.chat_completions_url,
                     self.config.model_name,
                     len(board.images),
                     len(board.candidate_ids),
                     len(body),
                     timeout_s,
+                    (
+                        "none"
+                        if self.budget_timeout_s is None
+                        else f"{float(self.budget_timeout_s):.1f}s"
+                    ),
                     int(max_tokens if max_tokens is not None else self.config.max_new_tokens),
                     attempt,
                     max_attempts,

@@ -68,7 +68,6 @@ class QwenRuntimeTests(unittest.TestCase):
                 "MARC_QWEN_API_KEY": "secret",
                 "MARC_QWEN_MODEL": "qwen-test",
                 "MARC_QWEN_TIMEOUT_S": "4.5",
-                "MARC_QWEN_JPEG_QUALITY": "80",
             }
         )
         self.assertEqual(
@@ -78,7 +77,6 @@ class QwenRuntimeTests(unittest.TestCase):
         self.assertEqual("http://10.0.0.2:8000/v1/models", config.models_url)
         self.assertEqual("qwen-test", config.model_name)
         self.assertEqual(4.5, config.timeout_s)
-        self.assertEqual(80, config.jpeg_quality)
 
     def test_remote_timeout_defaults_to_ninety_seconds(self):
         config = QwenRemoteConfig.load(
@@ -88,6 +86,17 @@ class QwenRuntimeTests(unittest.TestCase):
             }
         )
         self.assertEqual(90.0, config.timeout_s)
+        self.assertEqual(12.0, config.wall_timeout_s)
+
+    def test_remote_wall_timeout_is_configurable(self):
+        config = QwenRemoteConfig.load(
+            environ={
+                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1",
+                "MARC_QWEN_API_KEY": "secret",
+                "MARC_QWEN_WALL_TIMEOUT_S": "8.5",
+            }
+        )
+        self.assertEqual(8.5, config.wall_timeout_s)
 
     def test_remote_generation_defaults_to_forty_eight_tokens(self):
         config = QwenRemoteConfig.load(

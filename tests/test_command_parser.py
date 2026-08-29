@@ -433,6 +433,38 @@ class CommandFixtureTests(unittest.TestCase):
             )
         )
 
+        empty = parse_command(
+            "Find the tumbler dropped in the empty parking space.",
+            expected_intent=Intent.FIND,
+        )
+        self.assertIsNone(empty.landmark)
+        self.assertEqual("parking_space", empty.scene_hint)
+        self.assertFalse(
+            uses_vehicle_anchor(
+                empty,
+                "Find the tumbler dropped in the empty parking space.",
+            )
+        )
+        from marc_agent.command_parser import implicit_anchor_classes
+
+        self.assertEqual(
+            frozenset(),
+            implicit_anchor_classes(
+                empty, "Find the tumbler dropped in the empty parking space."
+            ),
+        )
+
+    def test_parked_vehicle_landmarks_exclude_taxi(self):
+        from marc_agent.command_parser import (
+            PARKED_VEHICLE_LANDMARKS,
+            VEHICLE_LANDMARKS,
+        )
+
+        self.assertIn("taxi", VEHICLE_LANDMARKS)
+        self.assertNotIn("taxi", PARKED_VEHICLE_LANDMARKS)
+        self.assertIn("suv", PARKED_VEHICLE_LANDMARKS)
+        self.assertIn("police_car", PARKED_VEHICLE_LANDMARKS)
+
 
 class PlaceCueAndFallenOffTests(unittest.TestCase):
     def test_taxi_is_a_place_cue_when_bench_is_the_support(self):

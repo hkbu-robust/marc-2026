@@ -75,6 +75,11 @@ class LidarSafetyTests(unittest.TestCase):
         self.assertEqual(got.speed_scale, 1.0)
         self.assertTrue(math.isinf(got.clearance_m))
 
+    def test_offset_bumper_in_corridor_stops(self):
+        got = advise(_xyz([0.6, 0.4, 0.4]))
+        self.assertTrue(got.stop)
+        self.assertEqual(got.speed_scale, 0.0)
+
     def test_far_corridor_slows(self):
         got = advise(_xyz([2.0, 0.0, 0.4]))
         self.assertFalse(got.stop)
@@ -93,10 +98,10 @@ class LidarSafetyTests(unittest.TestCase):
         self.assertEqual(got.speed_scale, 1.0)
 
     def test_nudge_away_from_nearer_side(self):
-        left = advise(_xyz([1.0, 0.5, 0.4]))
+        left = advise(_xyz([1.0, 0.7, 0.4]))
         self.assertFalse(left.stop)
         self.assertLess(left.yaw_bias, 0.0)
-        right = advise(_xyz([1.0, -0.5, 0.4]))
+        right = advise(_xyz([1.0, -0.7, 0.4]))
         self.assertGreater(right.yaw_bias, 0.0)
 
     def test_pointcloud2_roundtrip(self):

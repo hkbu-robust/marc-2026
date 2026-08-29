@@ -36,6 +36,7 @@ CROP_PAD_FRAC = 0.15
 REFINE_DEDUP_IOU = 0.45
 REFINE_IMGSZ = 640
 REFINE_IMGSZ_STRIDE = 32
+REFINE_CROP_CAP = 8
 
 
 def _pad_box(
@@ -357,12 +358,25 @@ class CctvYoloDetector:
             return []
         extra: list[ObjectCandidate] = []
         counts: dict[tuple[str, str], int] = defaultdict(int)
+        occupied: dict[str, list[tuple[float, float, float, float]]] = defaultdict(list)
         for item in objects:
             counts[(item.camera_id, item.class_name)] += 1
+            if item.class_name == target_type:
+                occupied[item.camera_id].append(item.bbox_xyxy)
+        missing = self._landmarks_missing_target(
+            objects, landmark_classes, target_type
+        )
         for camera_id, class_name, confidence, mapped, image_size in (
-            self._predict_around_landmarks(frames, objects, landmark_classes)
+            self._predict_around_landmarks(
+                frames, objects, landmark_classes, landmarks=missing
+            )
         ):
             if class_name != target_type:
+                continue
+            if any(
+                _box_iou(mapped, existing) >= REFINE_DEDUP_IOU
+                for existing in occupied[camera_id]
+            ):
                 continue
             key = (camera_id, class_name)
             idx = counts[key]
@@ -377,6 +391,7 @@ class CctvYoloDetector:
                     image_size=image_size,
                 )
             )
+            occupied[camera_id].append(mapped)
         return extra
 
     def _landmarks_for_refine(
@@ -400,11 +415,30 @@ class CctvYoloDetector:
                 best[item.camera_id] = item
         return [best[camera_id] for camera_id in sorted(best)]
 
+    def _landmarks_missing_target(
+        self,
+        objects: list[ObjectCandidate],
+        landmark_classes: frozenset[str],
+        target_type: str,
+    ) -> list[ObjectCandidate]:
+        """Every matching landmark on cameras that still lack the target class."""
+        have_target = {
+            item.camera_id for item in objects if item.class_name == target_type
+        }
+        picked = [
+            item for item in objects
+            if item.class_name in landmark_classes
+            and item.camera_id not in have_target
+        ]
+        picked.sort(key=lambda item: (-float(item.confidence), item.candidate_id))
+        return picked[:REFINE_CROP_CAP]
+
     def _predict_around_landmarks(
         self,
         frames: dict[str, CctvFrame],
         objects: list[ObjectCandidate],
         landmark_classes: frozenset[str],
+        landmarks: Optional[list[ObjectCandidate]] = None,
     ) -> list[
         tuple[
             str,
@@ -416,7 +450,12 @@ class CctvYoloDetector:
     ]:
         """Map low-threshold crop detections back into their full camera frames."""
         mapped_detections = []
-        for landmark in self._landmarks_for_refine(objects, landmark_classes):
+        crops = (
+            landmarks
+            if landmarks is not None
+            else self._landmarks_for_refine(objects, landmark_classes)
+        )
+        for landmark in crops:
             frame = frames.get(landmark.camera_id)
             rgb = None if frame is None else getattr(frame, "rgb", None)
             if rgb is None:
@@ -597,18 +636,25 @@ def _refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetection
             camera_ids=list(round_.camera_ids),
             metrics=round_.metrics,
         )
-    if any(item.class_name == parsed.target_type for item in round_.objects):
-        return round_
     names = set()
     if parsed.landmark:
         names.add(parsed.landmark)
     elif parsed.scene_hint == "park":
         names.update({"picnic_table", "bench"})
+    if not names:
+        return round_
     extra = _detector.refine_around_landmarks(
         round_.frames,
         round_.objects,
         parsed.target_type,
         frozenset(names),
+    )
+    log.info(
+        "[cctv-yolo] object-refine target=%s landmark=%s added=%d ids=%s",
+        parsed.target_type,
+        parsed.landmark,
+        len(extra),
+        ",".join(item.candidate_id for item in extra) or "-",
     )
     if not extra:
         return round_

@@ -91,6 +91,7 @@ class RetrievalState:
     basket_occupied: bool = False
     pick_attempts: int = 0
     pick_reason: str = ""
+    people_xy: tuple = ()
 
     @property
     def hint_center_xy(self) -> Optional[tuple]:
@@ -126,6 +127,17 @@ class RetrievalState:
         xy = _xy(target_coord)
         if xy is not None:
             self.grounding_xy = xy
+
+    def adopt_people_xy(self, points) -> None:
+        if not points:
+            self.people_xy = ()
+            return
+        cleaned = []
+        for item in points:
+            xy = _xy(item)
+            if xy is not None:
+                cleaned.append(xy)
+        self.people_xy = tuple(cleaned)
 
     def adopt_reveal(self, reveal) -> None:
         if reveal is None:

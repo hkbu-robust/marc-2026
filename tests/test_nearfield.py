@@ -16,7 +16,13 @@ _DEMO = os.path.join(_ROOT, "demo")
 if _DEMO not in sys.path:
     sys.path.insert(0, _DEMO)
 
-from nearfield import gated_cmd_vel, localize_detection  # noqa: E402
+from nearfield import (  # noqa: E402
+    NearFieldAcquire,
+    apply_lidar_gate,
+    gated_cmd_vel,
+    localize_detection,
+    pick_nearfield_candidate,
+)
 
 
 class NearFieldHandoffTests(unittest.TestCase):
@@ -59,6 +65,62 @@ class NearFieldHandoffTests(unittest.TestCase):
         self.assertIsNotNone(target.depth)
         self.assertEqual(k, target.k)
         self.assertEqual((48, 64), target.rgb_shape)
+
+    def test_single_in_radius_box_wins_beside_person(self):
+        localized = type("L", (), {"world_xy": (0.1, 0.0)})()
+        candidate = {"confidence": 0.3, "xyxy": (1, 1, 2, 2)}
+        picked = pick_nearfield_candidate(
+            [(1, candidate, localized, 0.4)],
+            people_xy=((0.0, 0.0),),
+        )
+        self.assertIs(candidate, picked[1])
+
+    def test_two_boxes_prefer_closer_depth(self):
+        near = type("L", (), {"world_xy": (1.0, 0.0)})()
+        far = type("L", (), {"world_xy": (3.0, 0.0)})()
+        close_box = {
+            "confidence": 0.2,
+            "xyxy": (1, 1, 2, 2),
+            "class_id": 0,
+            "class_name": "tumbler",
+        }
+        far_box = {
+            "confidence": 0.99,
+            "xyxy": (3, 3, 4, 4),
+            "class_id": 0,
+            "class_name": "tumbler",
+        }
+        picked = pick_nearfield_candidate(
+            [
+                (1, far_box, far, 2.5),
+                (2, close_box, near, 0.35),
+            ],
+            people_xy=(),
+            hint_xy=(0.0, 0.0),
+        )
+        self.assertIs(close_box, picked[1])
+
+    def test_drive_does_not_stop_on_a_distance_quota(self):
+        acquire = NearFieldAcquire(object(), detector=object())
+        acquire._phase = "drive"
+        acquire._phase_t0 = 0.0
+        lin, _ang = acquire._command(2.0, 1, 0.0, 1.0)
+        self.assertGreater(lin, 0.0)
+        acquire._phase = "drive"
+        acquire._phase_t0 = 0.0
+        lin, _ang = acquire._command(0.2, 1, 0.4, 1.0)
+        self.assertEqual(0.0, lin)
+        self.assertEqual("align", acquire._phase)
+
+    def test_lidar_gate_zeros_forward_on_frontal_stop(self):
+        from marc_agent.lidar_safety import advise
+
+        stop = advise(np.array([[0.5, 0.0, 0.4]], dtype=np.float32))
+        lin, _ang = apply_lidar_gate(0.15, 0.0, stop)
+        self.assertEqual(0.0, lin)
+        clear = advise(None)
+        lin, _ang = apply_lidar_gate(0.15, 0.0, clear)
+        self.assertGreater(lin, 0.0)
 
 
 if __name__ == "__main__":

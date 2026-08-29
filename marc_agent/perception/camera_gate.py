@@ -11,9 +11,9 @@ from __future__ import annotations
 from typing import Optional
 
 from marc_agent.command_parser import (
+    PARKED_VEHICLE_LANDMARKS,
     PARKING_SCENES,
     SEATING_LANDMARKS,
-    VEHICLE_LANDMARKS,
     ParsedCommand,
 )
 from marc_agent.types import CctvDetectionRound
@@ -22,7 +22,7 @@ from marc_agent.types import CctvDetectionRound
 def scene_classes(scene_hint: Optional[str]) -> frozenset[str]:
     """YOLO classes that typically appear in a parsed scene."""
     if scene_hint in PARKING_SCENES:
-        return VEHICLE_LANDMARKS
+        return PARKED_VEHICLE_LANDMARKS
     if scene_hint == "park":
         return SEATING_LANDMARKS
     if scene_hint == "road":

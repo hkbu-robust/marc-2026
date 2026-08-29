@@ -15,7 +15,7 @@ _DEMO = os.path.join(_ROOT, "demo")
 if _DEMO not in sys.path:
     sys.path.insert(0, _DEMO)
 
-from marc_agent.navigation_runtime import NavStatus, Stage2Navigator
+from marc_agent.navigation_runtime import NavStatus, Stage2Navigator, _plan_attempts
 from marc_agent.retrieval_state import search_area_approach_goal
 
 
@@ -268,23 +268,144 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual("no_path", result.status.value)
         self.assertLessEqual(result.replan_count, 1)
 
-    def test_inflation_fallback_opens_narrow_corridor(self):
+    def test_plan_attempts_keep_configured_inflation(self):
+        attempts = _plan_attempts(0.25)
+        self.assertTrue(all(abs(infl - 0.25) < 1e-9 for infl, _margin in attempts))
+        self.assertTrue(all(infl > 0.0 for infl, _margin in attempts))
+        zero = _plan_attempts(0.0)
+        self.assertTrue(all(abs(infl) < 1e-9 for infl, _margin in zero))
+
+    def test_free_approach_does_not_sit_in_occupied_cell(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        grid[:, 20:25] = 100
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        start = (2.0, 5.0)
+        goal = (12.0, 5.0)
+        xy = planner.free_approach_xy(start, goal, inflation_m=0.25)
+        self.assertIsNotNone(xy)
+        self.assertTrue(planner.cell_free(xy[0], xy[1], 0.25))
+        self.assertLess(xy[0], 10.0)
+        occupied = planner.nearest_free_xy(goal, inflation_m=0.25)
+        self.assertIsNotNone(occupied)
+        self.assertTrue(planner.cell_free(occupied[0], occupied[1], 0.25))
+
+    def test_plan_path_keeps_inflation_floor(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
         res = 0.1
         h, w = 30, 80
         grid = np.full((h, w), 100, dtype=np.int8)
         grid[15, :] = 0
-        occ = _Occ(grid, res, 0.0, 0.0)
-        client = FakeClient([0.5, 1.55, 0.0], occ=occ)
-        nav = Stage2Navigator(
-            client,
-            dt=0.10,
-            inflation_m=0.25,
-            exclude_m=0.4,
-            stuck_time_s=30.0,
-            replan_cap=5,
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, res, 0.0, 0.0)
+        start, goal = (0.5, 1.55), (7.0, 1.55)
+        nav = Stage2Navigator(FakeClient([0.5, 1.55, 0.0]), inflation_m=0.25)
+        self.assertIsNone(nav._plan_path(planner, start, goal, allow_thin=True))
+        self.assertIsNotNone(
+            planner.plan(start, goal, inflation_m=0.0, snap_m=8.0, margin_m=12.0)
         )
-        result = nav.navigate_to((7.0, 1.55), 40.0, leg="search", tol=0.7)
-        self.assertEqual("reached", result.status.value)
+
+    def test_body_inflation_plans_wide_corridor(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        res = 0.1
+        h, w = 30, 80
+        grid = np.full((h, w), 100, dtype=np.int8)
+        grid[10:21, :] = 0
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, res, 0.0, 0.0)
+        start, goal = (0.5, 1.55), (7.0, 1.55)
+        nav = Stage2Navigator(FakeClient([0.5, 1.55, 0.0]), inflation_m=0.25)
+        path = nav._plan_path(planner, start, goal, allow_thin=True)
+        self.assertIsNotNone(path)
+
+    def test_inflate_cells_never_rounds_positive_pad_to_zero(self):
+        from mock_agent_navigation import inflate_cells
+
+        self.assertEqual(0, inflate_cells(0.0, 0.5))
+        self.assertEqual(1, inflate_cells(0.25, 0.5))
+        self.assertEqual(1, inflate_cells(0.45, 0.5))
+        self.assertEqual(9, inflate_cells(0.45, 0.05))
+
+    def test_coarse_grid_inflation_keeps_path_off_the_curb(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.full((20, 40), 100, dtype=np.int8)
+        grid[8:12, :] = 0
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        start = planner._c2w(8, 4)
+        goal = planner._c2w(8, 32)
+        padded = planner.plan(start, goal, inflation_m=0.25, snap_m=8.0, margin_m=12.0)
+        self.assertIsNotNone(padded)
+        for wx, wy in padded:
+            row, col = planner._w2c(wx, wy)
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = row + dr, col + dc
+                if planner._in_bounds(nr, nc):
+                    self.assertNotEqual(
+                        100,
+                        int(planner._grid[nr, nc]),
+                        "padded path %s sits on the curb" % ((row, col),),
+                    )
+        raw = planner.plan(start, goal, inflation_m=0.0, snap_m=8.0, margin_m=12.0)
+        self.assertIsNotNone(raw)
+        hugged = False
+        for wx, wy in raw:
+            row, col = planner._w2c(wx, wy)
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = row + dr, col + dc
+                if planner._in_bounds(nr, nc) and int(planner._grid[nr, nc]) == 100:
+                    hugged = True
+        self.assertTrue(hugged, "0.0 inflation should still use the last free cell")
+
+    def test_path_follower_does_not_skip_a_metre_ahead(self):
+        from mock_agent_navigation import PathFollower
+
+        follower = PathFollower([(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)])
+        _lin, _ang, _done, info = follower.compute((0.9, 0.0, 0.0))
+        self.assertEqual(0, info["idx"])
+
+    def test_path_follower_keeps_moving_inside_goal_tolerance(self):
+        from mock_agent_navigation import PathFollower
+
+        follower = PathFollower([(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)])
+        linear, angular, done, info = follower.compute((0.55, 0.0, 0.0))
+        self.assertEqual(0, info["idx"])
+        self.assertFalse(done)
+        self.assertGreater(abs(linear) + abs(angular), 1e-6)
+
+    def test_path_follower_advances_inside_waypoint_tolerance(self):
+        from mock_agent_navigation import PathFollower
+
+        follower = PathFollower([(0.0, 0.0), (2.0, 0.0), (4.0, 0.0)])
+        _lin, _ang, _done, info = follower.compute((0.35, 0.0, 0.0))
+        self.assertEqual(1, info["idx"])
+        self.assertEqual((2.0, 0.0), info["waypoint"])
+
+    def test_path_follower_stops_on_final_inside_goal_tolerance(self):
+        from mock_agent_navigation import PathFollower
+
+        follower = PathFollower([(2.0, 0.0)])
+        linear, angular, done, info = follower.compute((1.45, 0.0, 0.0))
+        self.assertEqual(0, info["idx"])
+        self.assertTrue(done)
+        self.assertEqual(0.0, linear)
+        self.assertEqual(0.0, angular)
+
+    def test_goal_hole_does_not_erase_occupancy_cars(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        grid[10, 20] = 100
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        before = planner._grid.copy()
+        planner.clear_goal_hole(planner._c2w(10, 20), exclude_m=2.5)
+        np.testing.assert_array_equal(before, planner._grid)
 
     def test_start_hole_clears_lidar_overlay(self):
         from mock_agent_navigation import OccupancyGridPlanner
@@ -520,9 +641,9 @@ class NavigationRuntimeTests(unittest.TestCase):
         planner.update_from_array(grid, res, 0.0, 0.0)
         planner.stamp_overlay([disc], now_s=1.0)
         planner.clear_start_hole(start, exclude_m=0.20)
-        dstar = planner.plan(start, goal, inflation_m=0.25, snap_m=8.0, margin_m=12.0)
-        self.assertIsNotNone(dstar)
-        chord = [start] + list(dstar)
+        hug = planner.plan(start, goal, inflation_m=0.0, snap_m=8.0, margin_m=12.0)
+        self.assertIsNotNone(hug)
+        chord = [start] + list(hug)
         self.assertTrue(
             path_is_blocked(planner, chord, inflation_m=0.25, ignore_overlay=True),
             "0.25 m occupancy inflation should reject the curb-hugging overlay detour",
@@ -531,6 +652,8 @@ class NavigationRuntimeTests(unittest.TestCase):
             path_is_blocked(planner, chord, inflation_m=0.0, ignore_overlay=True),
             "inflation-0 occupancy must still see the on-road detour",
         )
+        live = OccupancyGridPlanner()
+        live.update_from_array(grid, res, 0.0, 0.0)
         nav = Stage2Navigator(
             FakeClient([start[0], start[1], 0.0], occ=occ),
             dt=0.10,
@@ -539,7 +662,7 @@ class NavigationRuntimeTests(unittest.TestCase):
             stuck_time_s=30.0,
             replan_cap=20,
         )
-        self.assertIsNotNone(nav._plan_path(planner, start, goal))
+        self.assertIsNotNone(nav._plan_path(live, start, goal))
         client = FakeClient([start[0], start[1], 0.0], occ=occ)
         result = Stage2Navigator(
             client,
@@ -552,11 +675,11 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual("reached", result.status.value)
         self.assertTrue(any(v > 1e-6 for v, _w in client.cmds))
 
-    def test_side_lidar_does_not_block_narrow_corridor(self):
+    def test_side_lidar_does_not_block_body_corridor(self):
         res = 0.1
         h, w = 30, 80
         grid = np.full((h, w), 100, dtype=np.int8)
-        grid[15, :] = 0
+        grid[10:21, :] = 0
         occ = _Occ(grid, res, 0.0, 0.0)
         client = FakeClient(
             [0.5, 1.55, 0.0],
@@ -571,7 +694,7 @@ class NavigationRuntimeTests(unittest.TestCase):
             stuck_time_s=30.0,
             replan_cap=5,
         )
-        result = nav.navigate_to((7.0, 1.55), 40.0, leg="search", tol=0.7)
+        result = nav.navigate_to((7.0, 1.55), 8.0, leg="search", tol=0.7)
         self.assertEqual("reached", result.status.value)
         self.assertTrue(any(v > 1e-6 for v, _w in client.cmds))
 

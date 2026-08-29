@@ -88,9 +88,10 @@ class GoalSeekController:
         Args:
             pose: (x, y, yaw_radians) -- world coordinates (client.get_world_pose()).
             goal: (gx, gy)           -- target XY coordinates (m).
-            cruise: if True, skip the near-goal proportional deceleration (K_LINEAR*dist)
-                and cruise at MAX_LINEAR -- for intermediate pass-through waypoints; only
-                the final goal (cruise=False) decelerates on approach.
+            cruise: if True, skip the near-goal stop and proportional deceleration
+                (K_LINEAR*dist) and cruise at MAX_LINEAR -- for intermediate
+                pass-through waypoints; only the final goal (cruise=False) stops
+                and decelerates on approach.
 
         Returns:
             (linear_x, angular_z, reached: bool)
@@ -101,7 +102,10 @@ class GoalSeekController:
         dy = gy - y
         dist = math.hypot(dx, dy)
 
-        if dist < self.GOAL_TOLERANCE:
+        # Intermediate (cruise) waypoints must keep moving through the 0.40–0.70 m
+        # band so PathFollower can skip at WAYPOINT_TOLERANCE. Stopping here deadlocks
+        # at D* corners. The final goal still stops at GOAL_TOLERANCE.
+        if dist < self.GOAL_TOLERANCE and not cruise:
             return 0.0, 0.0, True
 
         target_yaw = math.atan2(dy, dx)
@@ -135,9 +139,9 @@ class PathFollower:
     to the next, and it is done once it reaches the last waypoint (= goal).
     """
 
-    # Distance to consider an intermediate waypoint passed (m). Looser than the goal
-    # tolerance to smooth out corners.
-    WAYPOINT_TOLERANCE = 1.0
+    # Distance to consider an intermediate waypoint passed (m). Tighter than the
+    # 0.7 m goal stop so D* corners are driven, not skipped onto the curb.
+    WAYPOINT_TOLERANCE = 0.40
 
     def __init__(self, path, controller: GoalSeekController = None,
                  passthrough: bool = False):
@@ -340,7 +344,7 @@ def run_nav_leg(
     goal,
     deadline,
     tol=0.7,
-    inflation_m=0.25,
+    inflation_m=0.45,
     exclude_m=0.6,
     cruise=False,
     extra_obstacles=None,
@@ -367,6 +371,13 @@ def run_nav_leg(
     result = nav.navigate_to(
         goal, deadline, leg="search", tol=tol, extra_obstacles=extra_obstacles)
     return result.reached
+
+
+def inflate_cells(inflation_m, res) -> int:
+    """Cells to erode so a positive inflation never rounds to zero pad."""
+    if float(inflation_m) <= 0.0 or not res:
+        return 0
+    return max(1, int(math.ceil(float(inflation_m) / float(res) - 1e-9)))
 
 
 def path_is_blocked(
@@ -397,7 +408,7 @@ def path_is_blocked(
             trav, np.logical_not(planner._overlay[rmin:rmax, cmin:cmax]))
     if extra_obstacles:
         planner._block_obstacles(trav, extra_obstacles, rmin, cmin)
-    infl_c = int(round(float(inflation_m) / planner._res)) if planner._res else 0
+    infl_c = inflate_cells(inflation_m, planner._res)
     if infl_c > 0:
         trav = OccupancyGridPlanner._erode(trav, infl_c)
     H, W = trav.shape
@@ -671,6 +682,77 @@ class OccupancyGridPlanner:
         wy = self._oy + (row + 0.5) * self._res
         return wx, wy
 
+    def cell_free(self, wx, wy, inflation_m=0.0) -> bool:
+        """True when occupancy is 0 at (wx, wy) with a square inflation radius."""
+        if not self.ready:
+            return False
+        row, col = self._w2c(wx, wy)
+        if not self._in_bounds(row, col):
+            return False
+        rad = inflate_cells(inflation_m, self._res)
+        for dr in range(-rad, rad + 1):
+            for dc in range(-rad, rad + 1):
+                nr, nc = row + dr, col + dc
+                if not self._in_bounds(nr, nc):
+                    return False
+                if int(self._grid[nr, nc]) != 0:
+                    return False
+        return True
+
+    def nearest_free_xy(self, xy, inflation_m=0.25, max_radius_m=25.0):
+        """World XY of the nearest inflated-free cell, or None if none exist."""
+        if not self.ready or xy is None or len(xy) < 2:
+            return None
+        wx, wy = float(xy[0]), float(xy[1])
+        if self.cell_free(wx, wy, inflation_m):
+            return (wx, wy)
+        r0, c0 = self._w2c(wx, wy)
+        cell_m = float(self._res) if self._res else 0.05
+        max_rad = int(max(1, round(float(max_radius_m) / max(cell_m, 1e-6))))
+        for rad in range(1, max_rad + 1):
+            for dr in range(-rad, rad + 1):
+                for dc in range(-rad, rad + 1):
+                    if max(abs(dr), abs(dc)) != rad:
+                        continue
+                    nr, nc = r0 + dr, c0 + dc
+                    if not self._in_bounds(nr, nc):
+                        continue
+                    gx, gy = self._c2w(nr, nc)
+                    if self.cell_free(gx, gy, inflation_m):
+                        return (gx, gy)
+        return None
+
+    def free_approach_xy(self, start_xy, goal_xy, inflation_m=0.25):
+        """Last free cell on the start→goal ray, else nearest free to the goal.
+
+        Stops before an occupied or unknown blob so the chassis does not stand
+        on the far side of a parked car. Does not punch occupancy holes.
+        """
+        if not self.ready or start_xy is None or goal_xy is None:
+            return None
+        if len(start_xy) < 2 or len(goal_xy) < 2:
+            return None
+        sx, sy = float(start_xy[0]), float(start_xy[1])
+        gx, gy = float(goal_xy[0]), float(goal_xy[1])
+        dx, dy = gx - sx, gy - sy
+        dist = math.hypot(dx, dy)
+        step = max(float(self._res) if self._res else 0.05, 0.05)
+        last_free = None
+        n = max(1, int(math.ceil(dist / step)))
+        for i in range(n + 1):
+            t = i / n
+            x = sx + t * dx
+            y = sy + t * dy
+            if self.cell_free(x, y, inflation_m):
+                last_free = (x, y)
+                continue
+            if last_free is not None:
+                return last_free
+            break
+        if last_free is not None:
+            return last_free
+        return self.nearest_free_xy(goal_xy, inflation_m=inflation_m)
+
     def plan(self, start_xy, goal_xy, inflation_m=0.25, margin_m=12.0,
              snap_m=1.5, extra_obstacles=None, snap_goal_m=None):
         """Return a detour path from start_xy -> goal_xy as a list of world waypoints.
@@ -710,7 +792,7 @@ class OccupancyGridPlanner:
         rmax = min(self._h, max(sr, gr) + margin_c + 1)
         cmin = max(0, min(sc, gc) - margin_c)
         cmax = min(self._w, max(sc, gc) + margin_c + 1)
-        infl_c = int(round(inflation_m / self._res))
+        infl_c = inflate_cells(inflation_m, self._res)
 
         reuse = (
             self._dstar is not None
@@ -844,7 +926,7 @@ class OccupancyGridPlanner:
         self._overlay[stale] = False
 
     def clear_goal_hole(self, goal_xy, exclude_m=0.6):
-        """Keep the goal reachable: drop overlay inside exclude_m of goal_xy."""
+        """Drop lidar overlay near the goal. Never edits occupancy cars or unknown."""
         if not self.ready or self._overlay is None or exclude_m <= 0:
             return
         sl = self._disc_mask(float(goal_xy[0]), float(goal_xy[1]), float(exclude_m))

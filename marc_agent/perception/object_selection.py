@@ -1,11 +1,9 @@
 """Query-conditioned object ranking from YOLO candidates.
 
-Selects one lost-item instance (and an optional same-camera landmark) using
-image-space geometry for the eight official relations, then optional world-metre
-rerank. Place-only commands (no landmark pair) rank by occupancy and floor
-language instead of YOLO confidence. An optional zero-shot verifier may pick
-among two or more ranked pairs; geometry remains the fallback. A one-pair board
-is not sent to the verifier.
+Selects one lost-item instance (and an optional same-camera landmark) using a
+strict-then-loose scene ladder: relation geometry, then co-presence with the
+named landmark, then any target instance. Place language ranks empty bays,
+not camera proximity. A unique instance is submitted even beside a person.
 """
 
 from __future__ import annotations
@@ -17,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
 from marc_agent.command_parser import (
+    LANDMARK_TYPES,
     PARKING_SCENES,
     ParsedCommand,
     Relation,
@@ -24,9 +23,16 @@ from marc_agent.command_parser import (
 )
 from marc_agent.perception.camera_gate import apply_camera_gate
 from marc_agent.perception.cctv_project import pair_alignment_score
+from marc_agent.perception.lost_item_priors import (
+    distinct_target_count,
+    evidence_for_candidate,
+    parked_vehicle_count,
+    prior_key,
+    stall_is_empty,
+)
 from marc_agent.perception.qwen_reply import call_verifier, last_parsed
 from marc_agent.perception.qwen_runtime import configured_max_crops
-from marc_agent.types import CctvDetectionRound, ObjectCandidate
+from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidate
 
 log = logging.getLogger("marc_agent.object_selection")
 
@@ -52,6 +58,7 @@ class ObjectSelection:
     method: str = "object_relation"
     raw_output: Optional[str] = None
     prompt: Optional[str] = None
+    match: str = "target"
 
 
 @dataclass(frozen=True)
@@ -138,43 +145,225 @@ def _relation_score(
     return -dist + conf
 
 
+def _relation_compatible(
+    target: ObjectCandidate,
+    anchor: ObjectCandidate,
+    relation: Optional[Relation],
+) -> bool:
+    """True when image geometry actually matches the parsed relation."""
+    overlap = _horizontal_overlap(target.bbox_xyxy, anchor.bbox_xyxy)
+    tcx, tcy = _center(target.bbox_xyxy)
+    acx, acy = _center(anchor.bbox_xyxy)
+    img_w = max(1.0, float(target.image_size[0]))
+    img_h = max(1.0, float(target.image_size[1]))
+    nx = (tcx - acx) / img_w
+    ny = (tcy - acy) / img_h
+    dist = math.hypot(nx, ny)
+    t_bottom = target.bbox_xyxy[3]
+    a_top = anchor.bbox_xyxy[1]
+    contact = (t_bottom - a_top) / img_h
+
+    if relation in (Relation.ON, Relation.ABOVE):
+        if overlap < 0.2 or tcy >= acy:
+            return False
+        if relation is Relation.ON:
+            return abs(contact) <= 0.25
+        gap = (a_top - t_bottom) / img_h
+        return gap > 0.0
+    if relation in (Relation.NEAR, Relation.BESIDE, None):
+        return dist <= 0.55
+    if relation is Relation.LEFT:
+        return nx < 0.0
+    if relation is Relation.RIGHT:
+        return nx > 0.0
+    if relation is Relation.FRONT:
+        return ny > 0.0
+    if relation is Relation.BEHIND:
+        return ny < 0.0
+    return True
+
+
 def _target_classes(parsed: ParsedCommand) -> frozenset[str]:
     return frozenset({parsed.target_type})
 
 
-def _rerank_by_world(
-    ranked: tuple[ObjectSelection, ...],
-    parsed: ParsedCommand,
-    projector,
-    command_text: str = "",
-) -> tuple[ObjectSelection, ...]:
-    relation = parsed.relation
-    if relation is None and implicit_anchor_classes(parsed, command_text):
-        relation = Relation.NEAR
+def _near_relation(parsed: ParsedCommand, command_text: str) -> Optional[Relation]:
+    del command_text
+    return parsed.relation or Relation.NEAR
 
-    def key(item: ObjectSelection) -> tuple:
+
+def _pixel_dist(left: ObjectCandidate, right: ObjectCandidate) -> float:
+    lx, ly = _center(left.bbox_xyxy)
+    rx, ry = _center(right.bbox_xyxy)
+    return math.hypot(lx - rx, ly - ry)
+
+
+def _infer_nearest_pairs(
+    targets: list[ObjectCandidate],
+    objects: Iterable[ObjectCandidate],
+) -> list[ObjectSelection]:
+    """Pair each target with the nearest same-camera landmark (any official class)."""
+    landmarks = [
+        item for item in objects
+        if item.class_name in LANDMARK_TYPES
+    ]
+    selected: list[ObjectSelection] = []
+    for target in targets:
+        same = [
+            item for item in landmarks
+            if item.camera_id == target.camera_id
+            and item.candidate_id != target.candidate_id
+        ]
+        if not same:
+            continue
+        anchor = min(same, key=lambda item: _pixel_dist(target, item))
+        selected.append(
+            ObjectSelection(
+                target=target,
+                anchor=anchor,
+                score=_relation_score(target, anchor, Relation.NEAR),
+                match="target",
+            )
+        )
+    return selected
+
+
+def _strict_pairs(
+    targets: list[ObjectCandidate],
+    landmarks: list[ObjectCandidate],
+    relation: Optional[Relation],
+) -> list[ObjectSelection]:
+    selected: list[ObjectSelection] = []
+    for target in targets:
+        same = [item for item in landmarks if item.camera_id == target.camera_id]
+        for anchor in same:
+            if not _relation_compatible(target, anchor, relation):
+                continue
+            selected.append(
+                ObjectSelection(
+                    target=target,
+                    anchor=anchor,
+                    score=_relation_score(target, anchor, relation),
+                    match="strict",
+                )
+            )
+    return selected
+
+
+def _copresent_pairs(
+    targets: list[ObjectCandidate],
+    landmarks: list[ObjectCandidate],
+) -> list[ObjectSelection]:
+    selected: list[ObjectSelection] = []
+    for target in targets:
+        same = [item for item in landmarks if item.camera_id == target.camera_id]
+        if not same:
+            continue
+        anchor = min(same, key=lambda item: _pixel_dist(target, item))
+        selected.append(
+            ObjectSelection(
+                target=target,
+                anchor=anchor,
+                score=_relation_score(target, anchor, Relation.NEAR),
+                match="copresent",
+            )
+        )
+    return selected
+
+
+def _finish_rank(
+    selected: list[ObjectSelection] | tuple[ObjectSelection, ...],
+    parsed: ParsedCommand,
+    command_text: str,
+    projector,
+    occupancy_at: Optional[OccupancyAt],
+    people: Iterable[PersonCandidate],
+    *,
+    score_first: bool,
+    use_place: bool = False,
+    objects: Iterable[ObjectCandidate] = (),
+) -> tuple[ObjectSelection, ...]:
+    ranked = list(selected)
+    apply_priors = distinct_target_count(ranked) >= 2 and not use_place
+    evidences = (
+        [evidence_for_candidate(item.target, people, projector) for item in ranked]
+        if apply_priors
+        else []
+    )
+    demote = apply_priors and any(not item.owned for item in evidences)
+    by_id = {id(item): evidence for item, evidence in zip(ranked, evidences)}
+    object_list = list(objects)
+    people_list = list(people)
+
+    def prior(item: ObjectSelection) -> tuple:
+        if not apply_priors:
+            return (0, 0.0, 0.0)
+        return prior_key(by_id[id(item)], demote_owned=demote)
+
+    def ids(item: ObjectSelection) -> tuple:
+        return (
+            item.target.candidate_id,
+            item.anchor.candidate_id if item.anchor else "",
+        )
+
+    def place_parts(item: ObjectSelection) -> tuple[float, float]:
+        place, floor, _, _ = _place_features(
+            item, parsed, command_text, projector, occupancy_at
+        )
+        return place, floor
+
+    def stall_rank(item: ObjectSelection) -> int:
+        return 0 if stall_is_empty(
+            item.target, people_list, object_list, projector
+        ) else 1
+
+    def lot_rank(item: ObjectSelection) -> int:
+        return -parked_vehicle_count(item.target.camera_id, object_list)
+
+    def world_parts(item: ObjectSelection) -> tuple:
         if item.anchor is None:
-            return (1, 0.0, -item.score, item.target.candidate_id)
+            return (1, 0.0)
         world = pair_alignment_score(
             projector,
             item.target.camera_id,
             item.target.bbox_xyxy,
             item.anchor.bbox_xyxy,
-            relation,
+            parsed.relation or Relation.NEAR,
             item.anchor.class_name,
         )
         if world is None:
-            return (1, 0.0, -item.score, item.target.candidate_id)
-        return (0, -world, -item.score, item.target.candidate_id)
+            return (1, 0.0)
+        return (0, -world)
 
-    return tuple(sorted(ranked, key=key))
-
-
-def _near_relation(parsed: ParsedCommand, command_text: str) -> Optional[Relation]:
-    relation = parsed.relation
-    if relation is None and implicit_anchor_classes(parsed, command_text):
-        return Relation.NEAR
-    return relation
+    if use_place:
+        ranked.sort(
+            key=lambda item: (
+                stall_rank(item),
+                -place_parts(item)[0],
+                lot_rank(item),
+                -place_parts(item)[1],
+                -item.score,
+                *ids(item),
+            )
+        )
+    elif projector is not None and any(item.anchor is not None for item in ranked):
+        ranked.sort(
+            key=lambda item: (
+                *world_parts(item),
+                prior(item),
+                -item.score,
+                *ids(item),
+            )
+        )
+    elif score_first:
+        ranked.sort(
+            key=lambda item: (-item.score, prior(item), *ids(item))
+        )
+    else:
+        ranked.sort(
+            key=lambda item: (prior(item), -item.score, *ids(item))
+        )
+    return tuple(ranked)[:OBJECT_BOARD_LIMIT]
 
 
 def _world_unique_near(
@@ -244,6 +433,29 @@ def _floor_place_request(command_text: str) -> bool:
     return bool(_FLOOR_PLACE_RE.search(command_text or ""))
 
 
+def _place_only_request(parsed: ParsedCommand, command_text: str) -> bool:
+    """True when ranking should stay on occupancy/floor, not a guessed landmark."""
+    return parsed.scene_hint is not None or _floor_place_request(command_text)
+
+
+def _place_board_ranked(
+    ranked: tuple[ObjectSelection, ...],
+    parsed: ParsedCommand,
+    command_text: str,
+    round_: CctvDetectionRound,
+    projector,
+) -> tuple[ObjectSelection, ...]:
+    """Keep occupied bays off the verifier board when a vacant stall exists."""
+    if not _place_only_request(parsed, command_text):
+        return ranked
+    empty = tuple(
+        item
+        for item in ranked
+        if stall_is_empty(item.target, round_.people, round_.objects, projector)
+    )
+    return empty if empty else ranked
+
+
 def _image_floor_frac(target: ObjectCandidate) -> float:
     height = max(1.0, float(target.image_size[1]))
     return float(target.bbox_xyxy[3]) / height
@@ -301,20 +513,28 @@ def _rank_unanchored(
     command_text: str,
     projector,
     occupancy_at: Optional[OccupancyAt],
+    people: Iterable[PersonCandidate] = (),
+    objects: Iterable[ObjectCandidate] = (),
+    *,
+    use_place: bool = False,
 ) -> tuple[ObjectSelection, ...]:
     ranked = [
-        ObjectSelection(target=item, anchor=None, score=item.confidence)
+        ObjectSelection(
+            target=item, anchor=None, score=item.confidence, match="target"
+        )
         for item in targets
     ]
-
-    def key(item: ObjectSelection) -> tuple:
-        place, floor, _, _ = _place_features(
-            item, parsed, command_text, projector, occupancy_at
-        )
-        return (-place, -floor, -item.target.confidence, item.target.candidate_id)
-
-    ranked.sort(key=key)
-    return tuple(ranked)[:OBJECT_BOARD_LIMIT]
+    return _finish_rank(
+        ranked,
+        parsed,
+        command_text,
+        projector,
+        occupancy_at,
+        people,
+        score_first=False,
+        use_place=use_place,
+        objects=objects,
+    )
 
 
 def _place_unique(
@@ -357,51 +577,100 @@ def rank_object_candidates(
     ]
     if not targets:
         return ()
+    people = list(gated.people)
+    place_only = _place_only_request(parsed, command_text) and parsed.landmark is None
+
+    def unanchored(subset: list[ObjectCandidate]) -> tuple[ObjectSelection, ...]:
+        return _rank_unanchored(
+            subset,
+            parsed,
+            command_text,
+            projector,
+            occupancy_at,
+            people,
+            gated.objects,
+            use_place=place_only,
+        )
+
+    if place_only:
+        return unanchored(targets)
 
     anchor_names = implicit_anchor_classes(parsed, command_text)
     if not anchor_names:
-        return _rank_unanchored(
-            targets, parsed, command_text, projector, occupancy_at
+        if _place_only_request(parsed, command_text):
+            return _rank_unanchored(
+                targets,
+                parsed,
+                command_text,
+                projector,
+                occupancy_at,
+                people,
+                gated.objects,
+                use_place=True,
+            )
+        inferred = _infer_nearest_pairs(targets, gated.objects)
+        if not inferred:
+            return unanchored(targets)
+        anchored_ids = {item.target.candidate_id for item in inferred}
+        leftover = [item for item in targets if item.candidate_id not in anchored_ids]
+        selected = list(inferred)
+        if leftover:
+            selected.extend(unanchored(leftover))
+        selected.sort(
+            key=lambda item: (
+                0 if item.anchor is not None else 1,
+                -item.score,
+                item.target.candidate_id,
+                item.anchor.candidate_id if item.anchor else "",
+            )
+        )
+        return _finish_rank(
+            selected,
+            parsed,
+            command_text,
+            projector,
+            occupancy_at,
+            people,
+            score_first=False,
+            objects=gated.objects,
         )
 
-    relation = parsed.relation
-    if relation is None and implicit_anchor_classes(parsed, command_text):
-        relation = Relation.NEAR
+    relation = parsed.relation or Relation.NEAR
     landmarks = [
         item for item in gated.objects if item.class_name in anchor_names
     ]
-    selected: list[ObjectSelection] = []
-    for target in targets:
-        same_camera = [
-            item for item in landmarks if item.camera_id == target.camera_id
-        ]
-        for anchor in same_camera:
-            selected.append(
-                ObjectSelection(
-                    target=target,
-                    anchor=anchor,
-                    score=_relation_score(target, anchor, relation),
-                )
+    strict = _strict_pairs(targets, landmarks, relation)
+    if strict:
+        strict.sort(
+            key=lambda item: (
+                -item.score,
+                item.target.candidate_id,
+                item.anchor.candidate_id if item.anchor else "",
             )
-    if not selected:
-        if parsed.landmark is not None:
-            return ()
-        return _rank_unanchored(
-            targets, parsed, command_text, projector, occupancy_at
         )
-    selected.sort(
-        key=lambda item: (
-            -item.score,
-            item.target.candidate_id,
-            item.anchor.candidate_id if item.anchor else "",
+        return _finish_rank(
+            strict,
+            parsed,
+            command_text,
+            projector,
+            occupancy_at,
+            people,
+            score_first=True,
+            objects=gated.objects,
         )
-    )
-    ranked = tuple(selected)
-    if projector is not None:
-        ranked = _rerank_by_world(
-            ranked, parsed, projector, command_text=command_text
+    copresent = _copresent_pairs(targets, landmarks)
+    if copresent:
+        return _finish_rank(
+            copresent,
+            parsed,
+            command_text,
+            projector,
+            occupancy_at,
+            people,
+            score_first=False,
+            objects=gated.objects,
         )
-    return ranked[:OBJECT_BOARD_LIMIT]
+    return unanchored(targets)
 
 
 def _pair_key(item: ObjectSelection) -> tuple[str, Optional[str]]:
@@ -494,10 +763,18 @@ def format_object_verifier_prompt(
         "Select the single object candidate that best matches the spatial request. "
         "The request is language to satisfy, not visual ground truth. Use the images and "
         "detector metadata together. Do not prefer higher confidence or the first listed "
-        "id. When the request names a place (floor, parking lot, park, road, walkway), "
-        "pick the instance in that place. Occupancy 0 is drivable road; -1 is off-road "
-        "(lot, grass, curb). NEAR and BESIDE "
-        "mean beside the landmark, not sitting on top of it. Reply with exactly "
+        "id. When the request names a place (floor, parking lot, empty space, stall, park, "
+        "road, walkway), pick the instance in that place. If it names an empty space, lot, "
+        "floor, or stall, pick the instance whose stall is vacant (no person and no car "
+        "parked in that bay). A closer, larger, or higher-confidence box in an occupied "
+        "stall is wrong. Occupancy 0 is drivable road; -1 is off-road "
+        "(lot, grass, curb). Parked cars (not a distant taxi) mark a parking-lot "
+        "camera. NEAR and BESIDE "
+        "mean beside the landmark, not sitting on top of it. When several instances "
+        "exist and the request is not a place, prefer an unattended one; items next to "
+        "a person are usually theirs. A unique instance is enough even beside a person. "
+        "If the object is not on the named support, still pick it when it shares the "
+        "landmark's camera. Reply with exactly "
         "TARGET_ID|ANCHOR_ID and nothing else. ANCHOR_ID must be none when the request "
         "has no landmark.\n"
         f"Original request: {command_text}\n"
@@ -543,7 +820,18 @@ def build_object_board(
             f"anchor={anchor.class_name if anchor else 'none'}",
             f"anchor_id={anchor.candidate_id if anchor else 'none'}",
             f"score={item.score:.4f}",
+            f"match={item.match}",
         ]
+        evidence = evidence_for_candidate(item.target, round_.people, projector)
+        fields.append(f"owned={'true' if evidence.owned else 'false'}")
+        gap = evidence.person_gap
+        gap_text = "inf" if not math.isfinite(gap) else f"{gap:.1f}"
+        fields.append(f"person_gap={gap_text}")
+        fields.append(f"camera_prox={evidence.camera_prox:.4f}")
+        empty = stall_is_empty(
+            item.target, round_.people, round_.objects, projector
+        )
+        fields.append(f"stall={'empty' if empty else 'occupied'}")
         _, _, cell, world = _place_features(
             item, parsed, command_text, projector, occupancy_at
         )
@@ -553,10 +841,13 @@ def build_object_board(
             occ = "missing" if cell is None else str(int(cell))
             fields.append(f"occupancy={occ}")
         rows.append(" | ".join(fields))
+    relation = parsed.relation.value if parsed.relation else None
+    if relation is None and any(item.anchor is not None for item in ranked):
+        relation = Relation.NEAR.value
     prompt = format_object_verifier_prompt(
         command_text,
         parsed.target_type,
-        parsed.relation.value if parsed.relation else None,
+        relation,
         parsed.landmark,
         rows,
         scene_hint=parsed.scene_hint,
@@ -641,13 +932,32 @@ def select_object_candidate(
     geometry = ranked[0]
     skip_reason = "ok"
     should_verify = False
+    inferred = parsed.relation is None
+    place = _place_only_request(parsed, command_text)
+    board_ranked = ranked
     if verifier is None:
         skip_reason = "no_verifier"
+    elif place:
+        board_ranked = _place_board_ranked(
+            ranked, parsed, command_text, round_, projector
+        )
+        if distinct_target_count(board_ranked) >= 2:
+            should_verify = True
+        elif distinct_target_count(ranked) >= 2:
+            skip_reason = "unique_empty_stall"
+        else:
+            skip_reason = "single_pair"
+    elif inferred and (
+        len(ranked) >= 2 or geometry.anchor is not None
+    ):
+        should_verify = True
     elif len(ranked) < 2:
         skip_reason = "single_pair"
     elif _world_unique_near(ranked, parsed, projector, command_text):
         skip_reason = "world_unique_near"
-    elif _place_unique(ranked, parsed, command_text, projector, occupancy_at):
+    elif _place_unique(
+        ranked, parsed, command_text, projector, occupancy_at
+    ):
         skip_reason = "place_unique"
     else:
         should_verify = True
@@ -668,7 +978,7 @@ def select_object_candidate(
         command_text,
         parsed,
         round_,
-        ranked,
+        board_ranked,
         projector=projector,
         occupancy_at=occupancy_at,
     )
@@ -677,11 +987,11 @@ def select_object_candidate(
         (target_id, anchor_id), raw_output = call_verifier(
             verifier,
             board,
-            lambda text: parse_object_verifier_output(text, ranked),
+            lambda text: parse_object_verifier_output(text, board_ranked),
         )
         selected = next(
             item
-            for item in ranked
+            for item in board_ranked
             if _pair_key(item) == (target_id, anchor_id)
         )
         log.info(
@@ -698,6 +1008,7 @@ def select_object_candidate(
             method,
             raw_output,
             board.prompt,
+            selected.match,
         )
     except Exception as exc:
         raw_output = locals().get("raw_output")

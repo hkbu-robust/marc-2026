@@ -204,8 +204,11 @@ def dump_stage_round(
             "selected_id": sar.selected.candidate_id if sar.selected else None,
         }
     qwen_bits = _qwen_transcript(object_sel, sar)
+    qwen_path = out_dir / "qwen.txt"
     if qwen_bits:
-        _write_text(out_dir / "qwen.txt", qwen_bits)
+        _write_text(qwen_path, qwen_bits)
+    elif qwen_path.exists():
+        qwen_path.unlink()
     if extra:
         selection["extra"] = extra
     _write_json(out_dir / "summary.json", selection)

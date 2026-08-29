@@ -103,12 +103,9 @@ def _frontal_escape(planner, pose, follower, bumper_hot, escape_turn):
 
 
 def _plan_attempts(inflation_m: float, allow_thin: bool = True):
-    """Configured inflation first, then optional thinner inflation, then a wider crop."""
+    """Configured inflation first, then a wider crop. Never thin the chassis radius."""
+    del allow_thin
     attempts = [(float(inflation_m), 12.0)]
-    if allow_thin:
-        for infl in (0.10, 0.0):
-            if infl < float(inflation_m) - 1e-9:
-                attempts.append((infl, 12.0))
     for margin in (40.0, 80.0):
         attempts.append((float(inflation_m), margin))
     return attempts
@@ -160,7 +157,7 @@ class Stage2Navigator:
         self,
         client,
         dt: float = 0.10,
-        inflation_m: float = 0.25,
+        inflation_m: float = 0.45,
         exclude_m: float = 0.6,
         stuck_time_s: float = 8.0,
         stuck_move_m: float = 0.05,
@@ -194,13 +191,26 @@ class Stage2Navigator:
     def _plan_path(self, planner, start_xy, goal_xy, allow_thin: bool = True):
         """Plan with inflation then crop-margin fallbacks.
 
-        Reject a path whose occupancy-only start chord cuts 100 / unknown.
+        Snap an occupied/unknown goal onto the nearest free inflated cell.
+        A free goal behind a wall stays put so D* can fail closed or go around.
+        Never thin inflation below the configured chassis radius.
         Lidar never enters the grid; the live corridor handles close hits.
         """
+        plan_goal = goal_xy
+        free = getattr(planner, "cell_free", None)
+        snap = getattr(planner, "nearest_free_xy", None)
+        if (
+            callable(free)
+            and callable(snap)
+            and not free(float(goal_xy[0]), float(goal_xy[1]), self.inflation_m)
+        ):
+            snapped = snap(goal_xy, inflation_m=self.inflation_m)
+            if snapped is not None:
+                plan_goal = snapped
         for inflation, margin in _plan_attempts(self.inflation_m, allow_thin=allow_thin):
             path = planner.plan(
                 start_xy,
-                goal_xy,
+                plan_goal,
                 inflation_m=inflation,
                 snap_m=8.0,
                 snap_goal_m=25.0,

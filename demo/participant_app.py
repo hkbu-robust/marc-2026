@@ -40,6 +40,7 @@ from marc_agent.perception.round_dump import (
     stage2_dir,
 )
 from marc_agent.perception.cctv_project import CctvProjector
+from marc_agent.perception.lost_item_priors import people_world_xy
 from marc_agent.perception.cctv_round import discovery_timeout_from_limit
 from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
@@ -67,7 +68,7 @@ log = logging.getLogger("participant_app")
 STAGE2_NAV_TIMEOUT_S = 1800.0
 STAGE2_NAV_RATE_HZ = 10.0
 STAGE2_NAV_DT = 1.0 / STAGE2_NAV_RATE_HZ
-STAGE2_INFLATION_M = 0.25      # erode free by the robot radius (avoids road<->grass step stalls)
+STAGE2_INFLATION_M = 0.45      # body radius plus curb pad (keeps wheels off the grass)
 STAGE2_STUCK_TIME_S = 8.0      # if movement < threshold for this long, replan from the current pose
 STAGE2_STUCK_MOVE_M = 0.05
 STAGE2_REPLAN_CAP = 50         # fail closed if the crop stays sealed
@@ -260,6 +261,10 @@ class DemoParticipant:
             return
         self.client.submit_stage2_grounding(grounding)
         self._state.adopt_grounding(grounding.target_coord)
+        detections = round_result.candidates.detections
+        self._state.adopt_people_xy(
+            people_world_xy(detections.people, self._stage1_projector)
+        )
         log.info(
             "[Stage2] submitted grounding camera=%s target_id=%s method=%s "
             "target_xyz=%s landmark=%s relation=%s",
@@ -364,7 +369,9 @@ class DemoParticipant:
         else:
             log.info("[Stage2] starting near-field YOLO (%s)", handoff)
             reveal = self._reveal if self._reveal is not None else c.stage2_reveal
-            target = NearFieldAcquire(c, detector, dump_dir=dump).acquire(reveal, deadline)
+            target = NearFieldAcquire(
+                c, detector, dump_dir=dump, people_xy=self._state.people_xy,
+            ).acquire(reveal, deadline)
             for _ in range(5):
                 c.send_cmd_vel(0.0, 0.0)
                 c.sleep(0.1)
@@ -384,7 +391,9 @@ class DemoParticipant:
 
                 def _reacquire():
                     before_reacquire(pick_rt, detector)
-                    nxt = NearFieldAcquire(c, detector, dump_dir=dump).acquire(
+                    nxt = NearFieldAcquire(
+                        c, detector, dump_dir=dump, people_xy=self._state.people_xy,
+                    ).acquire(
                         reveal, deadline)
                     for _ in range(3):
                         c.send_cmd_vel(0.0, 0.0)

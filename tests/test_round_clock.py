@@ -121,7 +121,6 @@ def _remote_config() -> QwenRemoteConfig:
         model_name="qwen3-vl-8b",
         timeout_s=5.0,
         max_new_tokens=8,
-        jpeg_quality=80,
     )
 
 

@@ -18,6 +18,8 @@ from typing import Optional, Protocol
 
 import numpy as np
 
+from marc_agent.lidar_safety import advise, pointcloud2_xyz
+
 log = logging.getLogger("participant_app")
 
 ARM_BASE_FWD = 0.18
@@ -33,7 +35,6 @@ CENTER_TOL = 0.05
 REALIGN = 0.12
 ALIGN_HOLD = 2
 ALIGN_SETTLE_S = 0.15
-BURST_M = 0.15
 YAW_GAIN = 1.2
 YAW_MAX = 0.35
 YAW_MIN = 0.10
@@ -203,6 +204,31 @@ def gated_cmd_vel(pose, linear, angular, hint_xy, hint_radius, dt=TICK_S,
             return lin, ang
         return 0.0, ang
     return lin, ang
+
+
+def apply_lidar_gate(lin, ang, advice) -> tuple:
+    """Zero forward speed on a body-height stop; yaw around a clear side if any.
+
+    Missing advice cruises. Speed_scale still slows a far corridor hit.
+    """
+    linear = float(lin)
+    angular = float(ang)
+    if advice is None:
+        return linear, angular
+    if advice.stop:
+        yaw = 0.0
+        bias = float(advice.yaw_bias)
+        if abs(bias) > 1e-9:
+            yaw = _clamp(YAW_GAIN * bias, -YAW_MAX, YAW_MAX)
+            if abs(yaw) < YAW_MIN:
+                yaw = math.copysign(YAW_MIN, yaw)
+        return 0.0, yaw
+    scale = float(advice.speed_scale)
+    linear *= scale
+    bias = float(advice.yaw_bias)
+    if abs(bias) > 1e-9:
+        angular += _clamp(0.5 * bias, -YAW_MAX, YAW_MAX)
+    return linear, angular
 
 
 def optical_xyz(u, v, z, fx, fy, cx, cy):
@@ -408,8 +434,41 @@ def _yaw_for_err(err: float) -> float:
     return math.copysign(mag, ang)
 
 
-def _candidate_detection(result, depth, k, pose, hint_xy, radius, R=None, t=None):
-    """Choose the exact-target candidate nearest the reveal hint with usable depth."""
+def pick_nearfield_candidate(eligible, people_xy=(), hint_xy=None):
+    """Pick among in-radius boxes. One box wins even beside a person."""
+    if not eligible:
+        return None
+    if len(eligible) == 1:
+        return eligible[0]
+    from marc_agent.perception.lost_item_priors import evidence_nearfield, prior_key
+
+    rows = []
+    for item in eligible:
+        _rank, candidate, localized, depth_m = item
+        evidence = evidence_nearfield(localized.world_xy, depth_m, people_xy)
+        rows.append((item, evidence))
+    demote = any(not evidence.owned for _item, evidence in rows)
+
+    def hint_dist(localized) -> float:
+        if localized.world_xy is None or hint_xy is None:
+            return 0.0
+        return math.dist(localized.world_xy, hint_xy)
+
+    rows.sort(
+        key=lambda pair: (
+            prior_key(pair[1], demote_owned=demote),
+            hint_dist(pair[0][2]),
+            -float(pair[0][1]["confidence"]),
+            pair[0][0],
+        )
+    )
+    return rows[0][0]
+
+
+def _candidate_detection(
+    result, depth, k, pose, hint_xy, radius, R=None, t=None, people_xy=(),
+):
+    """Choose the unattended, closer in-radius target; unique boxes skip person priors."""
     shape = result.get("rgb_shape")
     if shape is None or depth is None or pose is None:
         return None
@@ -423,32 +482,36 @@ def _candidate_detection(result, depth, k, pose, hint_xy, radius, R=None, t=None
         )
         if localized.reason in {"no_depth", "outside_radius"}:
             continue
-        hint_distance = (
-            math.dist(localized.world_xy, hint_xy)
-            if localized.world_xy is not None and hint_xy is not None else 0.0
-        )
-        eligible.append((hint_distance, -candidate["confidence"], rank, candidate))
-    if not eligible:
+        depth_m = depth_in_bbox(depth, bbox, shape)
+        eligible.append((rank, candidate, localized, depth_m))
+    picked = pick_nearfield_candidate(
+        eligible, people_xy=people_xy, hint_xy=hint_xy
+    )
+    if picked is None:
         return None
-    _, _, rank, candidate = min(eligible)
+    rank, candidate, localized, depth_m = picked
     bbox = candidate["xyxy"]
     x1, y1, x2, y2 = bbox
     cx = 0.5 * (x1 + x2)
     return {
         "status": "ok", "n_obj": 1, "bbox": bbox,
         "conf": candidate["confidence"], "cls": candidate["class_id"],
-        "name": candidate["class_name"], "rank": candidate.get("rank", rank), "rgb_shape": shape,
+        "name": candidate["class_name"], "rank": candidate.get("rank", rank),
+        "rgb_shape": shape,
         "error": float(np.clip((cx - 0.5 * (w - 1)) / (0.5 * (w - 1)), -1.0, 1.0)),
+        "depth": depth_m,
+        "world_xy": localized.world_xy,
     }
 
 
 class NearFieldAcquire:
     """Search inside the reveal disc, close on bbox depth, emit arm_base 3D."""
 
-    def __init__(self, client, detector: Optional[Detector] = None, dump_dir=None):
+    def __init__(self, client, detector: Optional[Detector] = None, dump_dir=None, people_xy=()):
         self.client = client
         self.detector = detector if detector is not None else make_detector()
         self._dump_dir = dump_dir
+        self._people_xy = tuple(people_xy or ())
         self._dumped_phases: set[str] = set()
         self._lock_rgb = None
         self._lock_depth = None
@@ -498,7 +561,8 @@ class NearFieldAcquire:
                 k = k_from_info(info, rgb.shape[:2])
                 R, tvec = self._cam_to_car(rgb_msg)
                 det = _candidate_detection(
-                    result, depth, k, pose, hint_xy, radius, R=R, t=tvec
+                    result, depth, k, pose, hint_xy, radius, R=R, t=tvec,
+                    people_xy=self._people_xy,
                 )
                 last_good_t = now
 
@@ -538,6 +602,11 @@ class NearFieldAcquire:
             if self._phase != prev_phase:
                 self._dump_frame(self._phase, rgb, bbox, "" if det is None else (det.get("name") or ""))
             lin, ang = gated_cmd_vel(pose, lin, ang, hint_xy, radius, dt=dt)
+            cloud = None
+            getter = getattr(c, "get_lidar", None)
+            if callable(getter):
+                cloud = getter()
+            lin, ang = apply_lidar_gate(lin, ang, advise(pointcloud2_xyz(cloud)))
             c.send_cmd_vel(linear_x=lin, angular_z=ang)
             if now - last_good_t > STALE_STOP_S:
                 c.send_cmd_vel(0.0, 0.0)
@@ -608,11 +677,7 @@ class NearFieldAcquire:
             return 0.0, _yaw_for_err(err)
 
         # drive
-        drive_m = since * CRAWL_MPS
         if abs(float(err)) > REALIGN:
-            self._enter("align", now)
-            return 0.0, 0.0
-        if BURST_M > 0.0 and drive_m >= BURST_M:
             self._enter("align", now)
             return 0.0, 0.0
         return min(CRAWL_MPS, MAX_STEP_M / TICK_S), 0.0

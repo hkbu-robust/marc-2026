@@ -41,6 +41,8 @@ class RetrievalStateTests(unittest.TestCase):
         state.adopt_grounding([1.0, 2.0, 3.0])
         self.assertEqual((1.0, 2.0), state.grounding_xy)
         self.assertEqual((1.0, 2.0), state.search_xy())
+        state.adopt_people_xy([(4.0, 5.0, 1.0), [6.0, 7.0]])
+        self.assertEqual(((4.0, 5.0), (6.0, 7.0)), state.people_xy)
 
         state.adopt_reveal(SimpleNamespace(
             hint_center=[10.0, 4.0],
