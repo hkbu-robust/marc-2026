@@ -217,12 +217,28 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
         self.assertIn("MARC_QWEN_BACKEND: remote", text)
         self.assertIn("args:", text)
 
-    def test_base_compose_files_pin_local_qwen(self):
-        for path in (Path("docker-compose.yml"), Path("demo/docker-compose.yml")):
-            text = path.read_text(encoding="utf-8")
-            self.assertIn('MARC_SAR_DETECTOR: "qwen"', text)
-            self.assertIn('MARC_QWEN_BACKEND: "local"', text)
-            self.assertNotIn("MARC_QWEN_BACKEND:-local", text)
+    def test_root_compose_pins_local_qwen(self):
+        text = Path("docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn('MARC_SAR_DETECTOR: "qwen"', text)
+        self.assertIn('MARC_QWEN_BACKEND: "local"', text)
+
+    def test_demo_compose_uses_host_molmo(self):
+        text = Path("demo/docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn('MARC_SAR_DETECTOR: "molmo"', text)
+        self.assertIn("MARC_QWEN_BACKEND: remote", text)
+        self.assertIn("http://127.0.0.1:8002/v1", text)
+        self.assertIn("stage1-sar-molmo2-er", text)
+        self.assertIn("runtime: nvidia", text)
+        self.assertIn('NVIDIA_VISIBLE_DEVICES: "all"', text)
+        self.assertIn('NVIDIA_DRIVER_CAPABILITIES: "compute,utility"', text)
+        self.assertIn('MARC_CCTV_YOLO_DEVICE: "0"', text)
+        self.assertIn('MARC_YOLO_DEVICE: "0"', text)
+
+    def test_agent_image_uses_blackwell_capable_torch(self):
+        text = Path("demo/Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("torch==2.7.1 torchvision==0.22.1", text)
+        self.assertIn("https://download.pytorch.org/whl/cu128", text)
+        self.assertNotIn("https://download.pytorch.org/whl/cu121", text)
 
     def test_local_mount_skips_bake_but_runs_local_backend(self):
         text = Path("demo/docker-compose.qwen-local.yml").read_text(encoding="utf-8")

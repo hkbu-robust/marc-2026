@@ -22,6 +22,7 @@ from marc_agent.perception.qwen_remote import (
 )
 from marc_agent.perception.qwen_runtime import QwenRemoteConfig
 from marc_agent.perception.sar_selection import CandidateBoard
+from marc_agent.types import CctvDetectionRound, CctvFrame
 
 
 def _config() -> QwenRemoteConfig:
@@ -44,6 +45,71 @@ def _board() -> CandidateBoard:
 
 
 class QwenRemoteTests(unittest.TestCase):
+    def test_all_camera_scene_description_is_cached_and_used_for_selection(self):
+        prompts = []
+        max_tokens = []
+
+        def post(_url, body, _headers, _timeout):
+            payload = json.loads(body)
+            prompt = payload["messages"][0]["content"][-1]["text"]
+            prompts.append(prompt)
+            max_tokens.append(payload["max_tokens"])
+            output = (
+                "rig_a: a park with a seated person; rig_b: an empty road"
+                if "Inspect every supplied camera" in prompt
+                else "rig_a:person_prone:0|emergency"
+            )
+            return json.dumps(
+                {"choices": [{"message": {"content": output}}]}
+            ).encode("utf-8")
+
+        verifier = RemoteQwenSarVerifier(_config(), post=post)
+        scene = CctvDetectionRound(
+            frames={
+                "rig_b": CctvFrame(
+                    "rig_b", 32, 24, Image.new("RGB", (32, 24), "blue")
+                ),
+                "rig_a": CctvFrame(
+                    "rig_a", 32, 24, Image.new("RGB", (32, 24), "green")
+                ),
+            }
+        )
+
+        verifier.prepare_scene(scene, "Find the collapsed person in the park.")
+        self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
+        verifier.prepare_scene(scene, "Find the collapsed person in the park.")
+        self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
+
+        self.assertEqual(3, len(prompts))
+        self.assertIn("IMAGE_1=rig_a, IMAGE_2=rig_b", prompts[0])
+        self.assertIn("Mission: Find the collapsed person", prompts[0])
+        self.assertIn("Cached all-camera scene reference", prompts[1])
+        self.assertIn("rig_b: an empty road", prompts[1])
+        self.assertEqual(192, max_tokens[0])
+
+    def test_verifier_caps_multimodal_requests_at_eight_images(self):
+        captured = {}
+
+        def post(_url, body, _headers, _timeout):
+            captured.update(json.loads(body))
+            return json.dumps(
+                {"choices": [{"message": {"content": "rig_a:person_prone:0|emergency"}}]}
+            ).encode("utf-8")
+
+        image = Image.new("RGB", (8, 8))
+        board = CandidateBoard(
+            images=(image,) * 13,
+            prompt="choose",
+            evidence=(),
+        )
+        verifier = RemoteQwenSarVerifier(_config(), post=post)
+        with self.assertLogs("marc_agent.molmo_remote", level="WARNING") as logged:
+            verifier(board)
+        content = captured["messages"][0]["content"]
+        self.assertEqual(8, sum(item["type"] == "image_url" for item in content))
+        self.assertEqual(8, verifier.last_metrics.image_count)
+        self.assertIn("image-limit requested=13 sent=8", "\n".join(logged.output))
+
     def test_payload_contains_lossless_png_image_and_deterministic_generation(self):
         image = Image.new("RGB", (32, 24), color=(20, 40, 60))
         board = CandidateBoard(
@@ -76,7 +142,7 @@ class QwenRemoteTests(unittest.TestCase):
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as logged:
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as logged:
             self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
         self.assertIn("text=rig_a:person_prone:0|emergency", "\n".join(logged.output))
         self.assertEqual(
@@ -97,12 +163,12 @@ class QwenRemoteTests(unittest.TestCase):
             raise QwenRemoteConnectionError("connection refused")
 
         verifier = RemoteQwenSarVerifier(_config(), post=fail)
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as captured:
             with self.assertRaises(QwenRemoteConnectionError):
                 verifier(_board())
         output = "\n".join(captured.output)
         self.assertIn("dispatch endpoint=", output)
-        self.assertIn("error=QwenRemoteConnectionError", output)
+        self.assertIn("error=MolmoRemoteConnectionError", output)
         self.assertIn("attempt=1/2", output)
         self.assertIn("attempt=2/2", output)
         self.assertNotIn("test-secret", output)
@@ -119,7 +185,7 @@ class QwenRemoteTests(unittest.TestCase):
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
             self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
         self.assertEqual(2, len(calls))
 
@@ -201,7 +267,7 @@ class QwenRemoteTests(unittest.TestCase):
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as captured:
             self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
         self.assertEqual(2, len(calls))
         output = "\n".join(captured.output)
@@ -226,7 +292,7 @@ class QwenRemoteTests(unittest.TestCase):
         )
         verifier = RemoteQwenSarVerifier(config, post=post)
         verifier.set_budget_timeout(27.9)
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as captured:
             with self.assertRaises(QwenRemoteTimeout):
                 verifier(_board())
         self.assertEqual([12.0, 12.0], calls)
@@ -244,7 +310,7 @@ class QwenRemoteTests(unittest.TestCase):
             raise QwenRemoteTimeout("vLLM did not respond within 5.0s")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
             with self.assertRaises(QwenRemoteTimeout):
                 verifier(_board())
         self.assertEqual(2, len(calls))
@@ -257,7 +323,7 @@ class QwenRemoteTests(unittest.TestCase):
             raise QwenRemoteAuthenticationError("vLLM rejected the configured API key (HTTP 401)")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
             with self.assertRaises(QwenRemoteAuthenticationError):
                 verifier(_board())
         self.assertEqual(1, len(calls))
@@ -279,7 +345,7 @@ class QwenRemoteTests(unittest.TestCase):
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as logged:
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as logged:
             self.assertEqual("P01", verifier(_board()))
         self.assertEqual("stop", verifier.last_finish_reason)
         self.assertIn("finish_reason=stop", "\n".join(logged.output))
@@ -317,7 +383,7 @@ class QwenRemoteTests(unittest.TestCase):
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
         ids = ("rig_a:person_bending:0", "rig_a:person_walking:0")
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
             parsed, raw = call_verifier(
                 verifier,
                 _board(),

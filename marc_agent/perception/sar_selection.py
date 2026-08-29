@@ -10,7 +10,13 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Iterable, Optional
 
-from marc_agent.command_parser import ParsedCommand, Relation, SEATING_LANDMARKS
+from marc_agent.command_parser import (
+    PARKING_SCENES,
+    SEATING_LANDMARKS,
+    VEHICLE_LANDMARKS,
+    ParsedCommand,
+    Relation,
+)
 from marc_agent.perception.camera_gate import scene_classes
 from marc_agent.perception.pose_to_situation import situation_for_pose
 from marc_agent.perception.qwen_reply import call_verifier, last_parsed
@@ -25,7 +31,6 @@ from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidat
 _SITUATIONS = frozenset({"normal", "abnormal", "emergency", "accident"})
 _P_ID_RE = re.compile(r"^P(\d+)$", re.IGNORECASE)
 SHORTLIST_CAP = 8
-WORLD_NEAR_FLOOR_M = 0.0
 _FACE_DOWN_POSES = frozenset({"person_prone", "person_lying_down"})
 _SEATING_LYING_POSES = (
     (POSE_GROUPS["prostrate"] - frozenset({"person_bending"}))
@@ -166,7 +171,11 @@ def resolve_sar_anchor(
     classes = (
         frozenset({command.landmark})
         if command.landmark
-        else scene_classes(command.scene_hint)
+        else (
+            VEHICLE_LANDMARKS
+            if command.scene_hint in PARKING_SCENES
+            else scene_classes(command.scene_hint)
+        )
     )
     anchor, _ = _nearest_anchor(person, round_.objects, classes)
     return anchor
@@ -266,7 +275,7 @@ def _soft_camera_evidence(
     matches = sorted(visible & scene_classes(command.scene_hint))
     if matches:
         evidence.extend(f"scene:{item}" for item in matches)
-        score += 0.5
+        score += min(1.0, 0.25 * len(matches))
     return tuple(evidence), score
 
 
@@ -407,29 +416,7 @@ def _with_world(item: CandidateEvidence, projector) -> CandidateEvidence:
 
 
 def _cap_and_order(items: list[CandidateEvidence]) -> tuple[CandidateEvidence, ...]:
-    if len(items) > SHORTLIST_CAP:
-        has_world = any(item.world_dist_m is not None for item in items)
-        if has_world:
-            items = sorted(
-                items,
-                key=lambda item: (
-                    item.world_dist_m is None,
-                    item.world_dist_m if item.world_dist_m is not None else 0.0,
-                    item.person.camera_id,
-                    item.person.candidate_id,
-                ),
-            )[:SHORTLIST_CAP]
-        else:
-            items = sorted(
-                items,
-                key=lambda item: (item.person.camera_id, item.person.candidate_id),
-            )[:SHORTLIST_CAP]
-    return tuple(
-        sorted(
-            items,
-            key=lambda item: (item.person.camera_id, item.person.candidate_id),
-        )
-    )
+    return tuple(items[:SHORTLIST_CAP])
 
 
 def shortlist_for_verifier(
@@ -438,25 +425,9 @@ def shortlist_for_verifier(
     command_text: str = "",
     projector=None,
 ) -> tuple[CandidateEvidence, ...]:
-    """Command-conditioned people for the Qwen board, in score-neutral order."""
-    items = list(evidence)
-    poses = _named_pose_classes(command_text, command)
-    if poses:
-        posed = [item for item in items if item.person.pose_class in poses]
-        if posed:
-            items = posed
-    if command.landmark:
-        items = [item for item in items if item.anchor is not None]
-    items = [_with_world(item, projector) for item in items]
-    dists = [item.world_dist_m for item in items if item.world_dist_m is not None]
-    if projector is not None and dists:
-        limit = max(WORLD_NEAR_FLOOR_M, 2.0 * min(dists))
-        items = [
-            item
-            for item in items
-            if item.world_dist_m is None or item.world_dist_m <= limit
-        ]
-    return _cap_and_order(items)
+    """Keep the strongest evidence without treating detector labels as truth."""
+    del command, command_text
+    return _cap_and_order([_with_world(item, projector) for item in evidence])
 
 
 def _fallback_pick(
@@ -582,8 +553,8 @@ def format_sar_verifier_prompt(
     req = requested or "unspecified"
     return (
         "Select the single numbered person candidate that best matches the request. "
-        "Compare these listed people against the original request. Do not prefer P01, "
-        "list order, or higher detector confidence. Pose and landmark proximity named "
+        "Compare these listed people against the original request. Candidates are ordered "
+        "by weak detector and scene evidence, but you must verify them visually. Pose and landmark proximity named "
         "in the request beat list order. world_dist_m is metres on the ground to the "
         "parsed landmark when known; it is geometry, not the answer by itself. The "
         "request is language to satisfy, not visual ground truth. Use the images and "
@@ -866,7 +837,7 @@ def select_sar_candidate(
     requested = command.situation.value if command.situation else None
     if command.target_type != "person" or requested is None:
         log.info(
-            "[qwen] skipped reason=incomplete_sar_request target_type=%s situation=%s",
+            "[vlm] skipped reason=incomplete_sar_request target_type=%s situation=%s",
             command.target_type,
             requested,
         )
@@ -879,7 +850,7 @@ def select_sar_candidate(
             "not_a_complete_sar_request",
         )
     if not round_.people:
-        log.info("[qwen] skipped reason=no_person_candidates")
+        log.info("[vlm] skipped reason=no_person_candidates")
         return SarSelectionResult(
             SelectionStatus.NO_MATCH,
             None,
@@ -893,17 +864,17 @@ def select_sar_candidate(
     shortlist = shortlist_for_verifier(ranked, command, command_text, projector)
     poses = _named_pose_classes(command_text, command)
     log.info(
-        "[qwen] shortlist n=%d of %d poses=%s landmark=%s",
+        "[vlm] shortlist n=%d of %d poses=%s landmark=%s",
         len(shortlist),
         len(ranked),
         ",".join(sorted(poses)) or "all",
         command.landmark or "none",
     )
-    if len(shortlist) <= 1:
+    if verifier is None and len(shortlist) <= 1:
         item = shortlist[0] if shortlist else ranked[0]
         reason = "unique_shortlist" if shortlist else "empty_shortlist"
         log.info(
-            "[qwen] skipped reason=%s candidate=%s",
+            "[vlm] skipped reason=%s candidate=%s",
             reason,
             item.person.candidate_id,
         )
@@ -920,7 +891,13 @@ def select_sar_candidate(
             prompt=board.prompt if board is not None else None,
         )
 
-    board = _assemble_board(command_text, command, round_, shortlist, None)
+    board = _assemble_board(
+        command_text,
+        command,
+        round_,
+        shortlist if shortlist else ranked,
+        None,
+    )
     metrics = None
     if verifier is not None:
         try:
@@ -937,7 +914,7 @@ def select_sar_candidate(
                 if item.person.candidate_id == candidate_id
             )
             log.info(
-                "[qwen] validated output candidate=%s situation=%s backend=%s output=%s",
+                "[vlm] validated output candidate=%s situation=%s backend=%s output=%s",
                 candidate_id,
                 evidence_situation,
                 str(getattr(verifier, "method", "qwen")),
@@ -964,7 +941,7 @@ def select_sar_candidate(
                 " ".join(raw_output.split()) if isinstance(raw_output, str) else None
             )
             log.warning(
-                "[qwen] verifier failed backend=%s error=%s detail=%s output=%s; "
+                "[vlm] verifier failed backend=%s error=%s detail=%s output=%s; "
                 "using deterministic fallback",
                 str(getattr(verifier, "method", "qwen")),
                 type(exc).__name__,
@@ -974,7 +951,7 @@ def select_sar_candidate(
     else:
         fallback_reason = "verifier_not_configured"
         raw_output = None
-        log.info("[qwen] verifier not configured; using deterministic fallback")
+        log.info("[vlm] verifier not configured; using deterministic fallback")
 
     best = _fallback_pick(shortlist, ranked)
     return _selected_from_item(

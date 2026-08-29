@@ -9,13 +9,14 @@ import logging
 import os
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from marc_agent.command_parser import (
     CommandParseError,
     Intent,
+    ParseErrorCode,
     ParsedCommand,
     Relation,
     parse_command,
@@ -23,8 +24,10 @@ from marc_agent.command_parser import (
 from marc_agent.perception.cctv_project import (
     CctvProjector,
 )
-from marc_agent.perception.cctv_yolo import refine_detection_round
-from marc_agent.perception.camera_gate import apply_camera_gate
+from marc_agent.perception.cctv_yolo import (
+    refine_detection_round,
+    refresh_detection_camera,
+)
 from marc_agent.perception.object_selection import (
     ObjectSelection,
     occupancy_lookup,
@@ -41,7 +44,7 @@ from marc_agent.perception.sar_selection import (
     select_sar_candidate,
 )
 from marc_agent.perception.qwen_remote import (
-    RemoteQwenSarVerifier,
+    RemoteMolmoVerifier,
     check_remote_health,
 )
 from marc_agent.perception.qwen_runtime import (
@@ -107,11 +110,15 @@ def get_default_verifier() -> Optional[Verifier]:
 def log_qwen_startup_status() -> None:
     """Log configured Qwen mode; warmup local weights or probe remote vLLM."""
     mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
-    if mode not in {"qwen", "qwen-remote"}:
-        log.info("[qwen-startup] disabled mode=%s", mode)
+    if mode not in {"qwen", "qwen-remote", "molmo"}:
+        log.info("[vlm-startup] disabled mode=%s", mode)
         return
     try:
-        backend = QwenBackend.REMOTE if mode == "qwen-remote" else configured_backend()
+        backend = (
+            QwenBackend.REMOTE
+            if mode in {"qwen-remote", "molmo"}
+            else configured_backend()
+        )
         if backend is QwenBackend.LOCAL:
             verifier = _default_verifier()
             if verifier is not None:
@@ -119,14 +126,14 @@ def log_qwen_startup_status() -> None:
                 if callable(warmup):
                     warmup()
                 log.info(
-                    "[qwen-startup] configured backend=local model_dir=%s warmed=%s",
+                    "[vlm-startup] configured backend=local model_dir=%s warmed=%s",
                     verifier.config.model_dir,
                     getattr(verifier, "_model", None) is not None,
                 )
             return
         config = QwenRemoteConfig.load()
         log.info(
-            "[qwen-startup] configured backend=remote models_url=%s model=%s "
+            "[molmo-startup] configured backend=remote models_url=%s model=%s "
             "timeout=%.1fs",
             config.models_url,
             config.model_name,
@@ -135,14 +142,14 @@ def log_qwen_startup_status() -> None:
         started = time.perf_counter()
         model_ids = check_remote_health(config)
         log.info(
-            "[qwen-startup] health=ok model=%s available=%s latency=%.0fms",
+            "[molmo-startup] health=ok model=%s available=%s latency=%.0fms",
             config.model_name,
             ",".join(model_ids),
             (time.perf_counter() - started) * 1000.0,
         )
     except Exception as exc:
         log.warning(
-            "[qwen-startup] health=failed error=%s detail=%s; "
+            "[molmo-startup] health=failed error=%s detail=%s; "
             "SAR rounds will use deterministic fallback if the failure persists",
             type(exc).__name__,
             exc,
@@ -209,14 +216,18 @@ def _default_verifier() -> Optional[Verifier]:
     if _CACHED_VERIFIER is not None:
         return _CACHED_VERIFIER
     mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
-    if mode not in {"qwen", "qwen-remote"}:
-        log.info("[qwen] verifier disabled mode=%s", mode)
+    if mode not in {"qwen", "qwen-remote", "molmo"}:
+        log.info("[vlm] verifier disabled mode=%s", mode)
         return None
-    backend = QwenBackend.REMOTE if mode == "qwen-remote" else configured_backend()
+    backend = (
+        QwenBackend.REMOTE
+        if mode in {"qwen-remote", "molmo"}
+        else configured_backend()
+    )
     if backend is QwenBackend.REMOTE:
-        verifier = RemoteQwenSarVerifier()
+        verifier = RemoteMolmoVerifier()
         log.info(
-            "[qwen] verifier configured backend=remote endpoint=%s model=%s "
+            "[molmo] verifier configured backend=remote endpoint=%s model=%s "
             "timeout=%.1fs",
             verifier.config.chat_completions_url,
             verifier.config.model_name,
@@ -226,7 +237,7 @@ def _default_verifier() -> Optional[Verifier]:
         return verifier
     verifier = QwenSarVerifier()
     log.info(
-        "[qwen] verifier configured backend=local model_dir=%s",
+        "[vlm] verifier configured backend=local model_dir=%s",
         verifier.config.model_dir,
     )
     _CACHED_VERIFIER = verifier
@@ -314,14 +325,14 @@ def _select_verifier(
     )
     if budget.skip:
         log.info(
-            "[qwen] skipped reason=time_budget remaining=%.1fs",
+            "[vlm] skipped reason=time_budget remaining=%.1fs",
             budget.remaining if budget.remaining is not None else -1.0,
         )
         return None
     _apply_budget(selected, budget)
     if budget.remaining is not None and budget.timeout_s is not None:
         log.info(
-            "[qwen] time-budget remaining=%.1fs timeout=%.1fs capped=%s",
+            "[vlm] time-budget remaining=%.1fs timeout=%.1fs capped=%s",
             budget.remaining,
             budget.timeout_s,
             budget.capped,
@@ -346,14 +357,17 @@ def run_stage1_candidate_pipeline(
     try:
         parsed = parse_command(command_text, expected_intent=expected_intent)
     except CommandParseError as exc:
-        return Stage1CandidateResult(
-            command_text,
-            None,
-            CctvDetectionRound(),
-            None,
-            f"command_parse:{exc.code.value}",
-            (time.perf_counter() - started) * 1000.0,
-        )
+        if exc.code is ParseErrorCode.INTENT_MISMATCH and expected_intent is Intent.FIND:
+            parsed = parse_command(command_text)
+        else:
+            return Stage1CandidateResult(
+                command_text,
+                None,
+                CctvDetectionRound(),
+                None,
+                f"command_parse:{exc.code.value}",
+                (time.perf_counter() - started) * 1000.0,
+            )
 
     log.info(
         "[stage1-pipeline] parsed target_type=%s situation=%s landmark=%s relation=%s",
@@ -379,16 +393,29 @@ def run_stage1_candidate_pipeline(
         )
 
     detections = refine_detection_round(parsed, detections)
-    if parsed.target_type != "person":
-        detections = apply_camera_gate(parsed, detections)
+    selected_verifier = _select_verifier(verifier, clock, client)
+    prepare_scene = getattr(selected_verifier, "prepare_scene", None)
+    if callable(prepare_scene):
+        try:
+            try:
+                prepare_scene(detections, command_text)
+            except TypeError:
+                prepare_scene(detections)
+            selected_verifier = _select_verifier(selected_verifier, clock, client)
+        except Exception as exc:
+            log.warning(
+                "[vlm] scene description failed error=%s detail=%s; "
+                "continuing with candidate images",
+                type(exc).__name__,
+                exc,
+            )
     selection = None
     object_selection = None
     failure_reason = None
-    selected_verifier = _select_verifier(verifier, clock, client)
 
     if parsed.target_type == "person":
         log.info(
-            "[qwen] SAR request situation=%s people=%d cameras=%d",
+            "[vlm] SAR request situation=%s people=%d cameras=%d",
             parsed.situation.value if parsed.situation else None,
             len(detections.people),
             len(detections.camera_ids),
@@ -404,7 +431,7 @@ def run_stage1_candidate_pipeline(
             failure_reason = f"sar_selection:{selection.reason}"
         metrics = selection.verifier_metrics
         log.info(
-            "[qwen] selection method=%s status=%s selected=%s reason=%s "
+            "[vlm] selection method=%s status=%s selected=%s reason=%s "
             "images=%s latency_ms=%s request_bytes=%s",
             selection.method,
             selection.status.value,
@@ -430,7 +457,7 @@ def run_stage1_candidate_pipeline(
         if object_selection is None:
             failure_reason = "object_selection:no_match"
         log.info(
-            "[qwen] object request target_type=%s relation=%s landmark=%s "
+            "[vlm] object request target_type=%s relation=%s landmark=%s "
             "method=%s selected=%s",
             parsed.target_type,
             parsed.relation.value if parsed.relation else None,
@@ -446,6 +473,54 @@ def run_stage1_candidate_pipeline(
         selection,
         failure_reason,
         (time.perf_counter() - started) * 1000.0,
+        object_selection=object_selection,
+    )
+
+
+def _refresh_selected_candidates(
+    candidates: Stage1CandidateResult,
+) -> Stage1CandidateResult:
+    """Refresh Molmo's target camera and carry new boxes into projection."""
+    camera_id = None
+    if candidates.sar_selection and candidates.sar_selection.selected:
+        camera_id = candidates.sar_selection.selected.camera_id
+    elif candidates.object_selection is not None:
+        camera_id = candidates.object_selection.target.camera_id
+    if camera_id is None:
+        return candidates
+
+    detections = refresh_detection_camera(candidates.detections, camera_id)
+    if detections is candidates.detections:
+        return candidates
+    objects = {item.candidate_id: item for item in detections.objects}
+    people = {item.candidate_id: item for item in detections.people}
+    sar_selection = candidates.sar_selection
+    if sar_selection is not None and sar_selection.selected is not None:
+        sar_selection = replace(
+            sar_selection,
+            selected=people.get(
+                sar_selection.selected.candidate_id,
+                sar_selection.selected,
+            ),
+        )
+    object_selection = candidates.object_selection
+    if object_selection is not None:
+        object_selection = replace(
+            object_selection,
+            target=objects.get(
+                object_selection.target.candidate_id,
+                object_selection.target,
+            ),
+            anchor=(
+                objects.get(object_selection.anchor.candidate_id, object_selection.anchor)
+                if object_selection.anchor is not None
+                else None
+            ),
+        )
+    return replace(
+        candidates,
+        detections=detections,
+        sar_selection=sar_selection,
         object_selection=object_selection,
     )
 
@@ -504,9 +579,20 @@ def _grounding_payload(
     fallback_class: Optional[str] = None,
     relation: Optional[Relation] = None,
 ) -> GroundingResult:
-    del selection, fallback_class
-    landmark = parsed.landmark or ""
+    del fallback_class
+    implied_anchor = (
+        selection is not None
+        and selection.anchor is not None
+        and (parsed.landmark is not None or parsed.scene_hint is not None)
+    )
+    landmark = parsed.landmark or (
+        selection.anchor.class_name
+        if implied_anchor
+        else ""
+    )
     submitted_relation = relation if relation is not None else parsed.relation
+    if submitted_relation is None and implied_anchor:
+        submitted_relation = Relation.NEAR
     return _grounding_result_cls()(
         camera_id=camera_id,
         target_type=parsed.target_type,
@@ -591,7 +677,12 @@ def _project_selection(
         selection.target.camera_id,
         selection.target.bbox_xyxy,
         selection.anchor.bbox_xyxy if selection.anchor is not None else None,
-        relation=parsed.relation,
+        relation=parsed.relation or (
+            Relation.NEAR
+            if selection.anchor is not None
+            and (parsed.landmark is not None or parsed.scene_hint is not None)
+            else None
+        ),
         support_class=(
             selection.anchor.class_name if selection.anchor is not None else None
         ),
@@ -768,6 +859,7 @@ def run_stage1_round(
         expected_intent=expected_intent,
         clock=clock,
     )
+    candidates = _refresh_selected_candidates(candidates)
     return compose_stage1_grounding(candidates, projector)
 
 

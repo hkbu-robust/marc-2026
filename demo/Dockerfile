@@ -34,7 +34,8 @@ RUN --network=host --mount=type=cache,target=/root/.cache/pip \
         python3-numpy python3-yaml python3-pip git libgl1 libglib2.0-0 \
         ros-humble-tf2-ros ros-humble-tf2-ros-py \
     && pip3 install placo h5py \
-    && pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
+    && pip3 install torch==2.7.1 torchvision==0.22.1 \
+        --index-url https://download.pytorch.org/whl/cu128 \
     && pip3 install "ultralytics-opencv-headless==8.4.118" \
     && pip3 install \
         "transformers==4.57.1" "accelerate==1.10.1" "safetensors==0.6.2" \

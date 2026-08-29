@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 
-from demo.manip_dataset.yolo_detect import MAX_CANDIDATES, YoloConfig, YoloTracker
+from demo.manip_dataset.yolo_detect import (
+    MAX_CANDIDATES,
+    YoloConfig,
+    YoloTracker,
+    _resolve_device,
+)
 
 
 class _Array:
@@ -48,6 +55,13 @@ class _Model:
 
 
 class NearfieldDetectorContractTests(unittest.TestCase):
+    def test_requested_cuda_never_falls_back_to_cpu(self):
+        torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
+        with patch.dict(sys.modules, {"torch": torch}):
+            with self.assertRaisesRegex(RuntimeError, "CUDA is unavailable"):
+                _resolve_device("0")
+        self.assertEqual("cpu", _resolve_device("cpu"))
+
     def _tracker(self, boxes) -> YoloTracker:
         tracker = YoloTracker(YoloConfig(device="cpu", candidate_limit=MAX_CANDIDATES))
         tracker.model = _Model(boxes)

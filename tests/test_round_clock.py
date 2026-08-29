@@ -18,9 +18,11 @@ from marc_agent.types import (
 )
 
 
-def _clock(limit: float, t0: float = 0.0) -> RoundClock:
-    clock = RoundClock()
-    clock.begin(limit, t0)
+def _clock(limit: float, elapsed: float = 0.0) -> RoundClock:
+    source = _Now(0.0)
+    clock = RoundClock(source.now_s)
+    clock.begin(limit, 0.0)
+    source.value = elapsed
     return clock
 
 
@@ -126,23 +128,31 @@ def _remote_config() -> QwenRemoteConfig:
 
 class RoundClockTests(unittest.TestCase):
     def test_remaining_decreases_with_now(self):
-        clock = _clock(30.0, 100.0)
+        source = _Now(100.0)
+        clock = RoundClock(source.now_s)
+        clock.begin(30.0, 100.0)
         self.assertAlmostEqual(30.0, clock.remaining(100.0))
+        source.value = 103.0
         self.assertAlmostEqual(27.0, clock.remaining(103.0))
+        source.value = 140.0
         self.assertEqual(0.0, clock.remaining(140.0))
 
     def test_begin_drops_stale_platform_remaining(self):
-        clock = RoundClock()
+        source = _Now(100.0)
+        clock = RoundClock(source.now_s)
         clock.note(2.0, 50.0)
         clock.begin(30.0, 100.0)
         self.assertAlmostEqual(30.0, clock.remaining(100.0))
 
-    def test_later_platform_update_can_only_shrink(self):
-        clock = _clock(30.0, 100.0)
+    def test_unscoped_platform_update_cannot_poison_current_round(self):
+        clock = _clock(30.0, 3.0)
         clock.note(10.0, 101.0)
-        self.assertAlmostEqual(8.0, clock.remaining(103.0))
-        clock.note(40.0, 103.0)
         self.assertAlmostEqual(27.0, clock.remaining(103.0))
+
+    def test_simulation_clock_jump_cannot_change_remaining(self):
+        clock = _clock(30.0, 3.0)
+        self.assertAlmostEqual(27.0, clock.remaining(-3500.0))
+        self.assertAlmostEqual(27.0, clock.remaining(3500.0))
 
     def test_unknown_clock_does_not_skip(self):
         budget = qwen_budget(None, 0.0, default_timeout=90.0)
@@ -161,7 +171,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
             calls.append(1)
             return "rig_a:person_bending:0|emergency"
 
-        clock = _clock(30.0, 0.0)
+        clock = _clock(30.0, 27.0)
         client = _Now(27.0)
         with patch.dict(
             os.environ,
@@ -200,6 +210,31 @@ class QwenTimeBudgetTests(unittest.TestCase):
         self.assertEqual([1], calls)
         self.assertEqual("qwen", result.sar_selection.method)
 
+    def test_stale_zero_during_scene_description_does_not_skip_selection(self):
+        calls = []
+        clock = _clock(30.0, 0.0)
+
+        class Verifier:
+            method = "molmo_remote"
+
+            def prepare_scene(self, _round):
+                calls.append("scene")
+                clock.note(0.0, 1.0)
+
+            def __call__(self, _board):
+                calls.append("selection")
+                return "rig_a:mug:1|rig_a:picnic_table:1"
+
+        result = run_stage1_candidate_pipeline(
+            _Now(1.0),
+            "Find the mug on the picnic table.",
+            detector=lambda _client, **_kwargs: _object_round(),
+            verifier=Verifier(),
+            clock=clock,
+        )
+        self.assertEqual(["scene", "selection"], calls)
+        self.assertEqual("molmo_remote", result.object_selection.method)
+
     def test_remaining_three_seconds_skips_object_verifier(self):
         calls = []
 
@@ -210,7 +245,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
             calls.append(1)
             return "rig_a:mug:1|rig_a:picnic_table:1"
 
-        clock = _clock(30.0, 0.0)
+        clock = _clock(30.0, 27.0)
         with patch.dict(os.environ, {"MARC_QWEN_MIN_REMAINING_S": "4"}, clear=False):
             result = run_stage1_candidate_pipeline(
                 _Now(27.0),
@@ -233,7 +268,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
             calls.append(1)
             return "rig_a:person_bending:0|emergency"
 
-        clock = _clock(30.0, 0.0)
+        clock = _clock(30.0, 27.0)
         with patch.dict(os.environ, {"MARC_QWEN_MIN_REMAINING_S": "0"}, clear=False):
             self.assertEqual(0.0, min_remaining_s())
             result = run_stage1_candidate_pipeline(
@@ -256,7 +291,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
         verifier = RemoteQwenSarVerifier(_remote_config(), post=post)
         verifier.set_budget_timeout(2.0)
         board = CandidateBoard(images=(), prompt="x", evidence=())
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
+        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
             with self.assertRaises(QwenRemoteTimeout):
                 verifier(board)
         self.assertEqual([2.0], calls)

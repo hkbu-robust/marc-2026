@@ -24,10 +24,11 @@ services:
       target: agent
       network: host
       args:
-        # Base demo runs Qwen in-process. The explicit remote overlay can replace this.
-        MARC_QWEN_BACKEND: local
+        # Molmo runs in the host vLLM process, so do not bake Qwen into this image.
+        MARC_QWEN_BACKEND: remote
     image: marc-agent:local       # local build artifact (do not redistribute)
     network_mode: host            # DDS discovery over the LAN via the participant machine NIC
+    runtime: nvidia               # this host uses the NVIDIA runtime rather than CDI device requests
     environment:
       # Two ways to set your credentials (both work):
       #   1) export MARC_TEAM_ID=... MARC_TOKEN=... before `docker compose up` (host env passes through), or
@@ -40,31 +41,27 @@ services:
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent:/agent/demo"
       PYTHONUNBUFFERED: "1"
-      # Local Qwen is baked at image build. Overlay demo/docker-compose.qwen-remote.yml for vLLM
-      # (that overlay also skips the Qwen Hub pull during --build).
-      MARC_SAR_DETECTOR: "qwen"
-      MARC_QWEN_BACKEND: "local"
-      MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
+      # The existing adapter is OpenAI-compatible and works with the host Molmo vLLM.
+      MARC_SAR_DETECTOR: "molmo"
+      MARC_QWEN_BACKEND: "remote"
+      MARC_QWEN_BASE_URL: "http://127.0.0.1:8002/v1"
+      MARC_QWEN_API_KEY: "marc-qwen-secret"
+      MARC_QWEN_MODEL: "stage1-sar-molmo2-er"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
       MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"
       MARC_CCTV_YOLO_CONF: "${MARC_CCTV_YOLO_CONF:-0.15}"
+      MARC_CCTV_YOLO_DEVICE: "0"
       MARC_GRASPGENX_WEIGHTS: "/agent/models/runtime/graspgenx"
       GRASPGENX_CHECKPOINT_DIR: "/agent/models/runtime/graspgenx"
       GRASPGENX_GRIPPER_CFG_DIR: "/agent/models/runtime/graspgenx/grippers"
       MARC_GRASPGENX_GRIPPER: "${MARC_GRASPGENX_GRIPPER:-robotiq_2f_140}"
       MARC_YOLO_WEIGHTS: "/agent/models/runtime/stage2-nearfield-detector/model.pt"
+      MARC_YOLO_DEVICE: "0"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       YOLO_OFFLINE: "1"
-    # GPU for VLA inference (uses the participant machine's GPU). If no GPU is needed, the deploy block can be removed.
-    # Requires: nvidia-container-toolkit installed on the participant machine.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     volumes:
       - "${MARC_ARTIFACTS_DIR:-../artifacts}:/agent/demo/artifacts"
     # (Optional) To use a scenario file for obstacle injection, mount it and set MARC_SCENARIO_FILE:

@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -37,6 +37,7 @@ REFINE_DEDUP_IOU = 0.45
 REFINE_IMGSZ = 640
 REFINE_IMGSZ_STRIDE = 32
 REFINE_CROP_CAP = 8
+POST_SELECT_IOU = 0.25
 
 
 def _pad_box(
@@ -118,13 +119,21 @@ def _resolve_device(requested: str) -> str:
         return "cpu"
     try:
         import torch
-
-        if torch.cuda.is_available():
-            return req
-        log.warning("[cctv-yolo] CUDA unavailable — using CPU")
-    except ImportError:
-        log.warning("[cctv-yolo] torch not installed — using CPU")
-    return "cpu"
+    except ImportError as exc:
+        raise RuntimeError(
+            f"CCTV YOLO requested CUDA device {req}, but torch is not installed"
+        ) from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"CCTV YOLO requested CUDA device {req}, but CUDA is unavailable"
+        )
+    index = int(req.removeprefix("cuda:"))
+    log.info(
+        "[cctv-yolo] selected CUDA device=%s name=%s",
+        req,
+        torch.cuda.get_device_name(index),
+    )
+    return req
 
 
 @dataclass(frozen=True)
@@ -609,6 +618,86 @@ def refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetectionR
         )
         _release_cuda()
         return round_
+
+
+def _refresh_candidates(existing, fresh, class_attr: str):
+    """Update same-class boxes while preserving the IDs selected by Molmo."""
+    unused = list(fresh)
+    refreshed = []
+    matched = 0
+    for old in existing:
+        compatible = [
+            item
+            for item in unused
+            if getattr(item, class_attr) == getattr(old, class_attr)
+        ]
+        if not compatible:
+            refreshed.append(old)
+            continue
+        best = max(compatible, key=lambda item: _box_iou(old.bbox_xyxy, item.bbox_xyxy))
+        if _box_iou(old.bbox_xyxy, best.bbox_xyxy) < POST_SELECT_IOU:
+            refreshed.append(old)
+            continue
+        unused.remove(best)
+        refreshed.append(replace(best, candidate_id=old.candidate_id))
+        matched += 1
+    return refreshed, matched
+
+
+def refresh_detection_camera(
+    round_: CctvDetectionRound,
+    camera_id: str,
+) -> CctvDetectionRound:
+    """Re-run GPU YOLO on Molmo's winning camera before projection."""
+    global _detector
+    frame = round_.frames.get(camera_id)
+    if _detector is None or frame is None or frame.rgb is None:
+        return round_
+    try:
+        raw = _detector._predict_frame(np.asarray(frame.rgb))
+        fresh_objects, fresh_people = detections_to_candidates(
+            camera_id,
+            (int(frame.width), int(frame.height)),
+            raw,
+        )
+    except Exception as exc:
+        log.warning(
+            "[cctv-yolo] post-select refresh failed camera=%s error=%s detail=%s; "
+            "keeping initial GPU detections",
+            camera_id,
+            type(exc).__name__,
+            exc,
+        )
+        return round_
+    finally:
+        _release_cuda()
+
+    old_objects = [item for item in round_.objects if item.camera_id == camera_id]
+    old_people = [item for item in round_.people if item.camera_id == camera_id]
+    new_objects, object_matches = _refresh_candidates(
+        old_objects, fresh_objects, "class_name"
+    )
+    new_people, person_matches = _refresh_candidates(
+        old_people, fresh_people, "pose_class"
+    )
+    object_by_id = {item.candidate_id: item for item in new_objects}
+    person_by_id = {item.candidate_id: item for item in new_people}
+    log.info(
+        "[cctv-yolo] post-select refresh camera=%s objects=%d/%d people=%d/%d",
+        camera_id,
+        object_matches,
+        len(old_objects),
+        person_matches,
+        len(old_people),
+    )
+    return CctvDetectionRound(
+        objects=[object_by_id.get(item.candidate_id, item) for item in round_.objects],
+        people=[person_by_id.get(item.candidate_id, item) for item in round_.people],
+        sar=list(round_.sar),
+        frames=round_.frames,
+        camera_ids=list(round_.camera_ids),
+        metrics=round_.metrics,
+    )
 
 
 def _refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetectionRound:

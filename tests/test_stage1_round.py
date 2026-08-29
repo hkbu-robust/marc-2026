@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from marc_agent.perception.cctv_project import (
     CameraGeometry,
@@ -10,7 +11,7 @@ from marc_agent.perception.cctv_project import (
     static_lookup,
 )
 from marc_agent.perception.stage1_pipeline import run_stage1_round, IGNORED_CLASS_DUMMY_XYZ
-from marc_agent.command_parser import Intent
+from marc_agent.command_parser import Intent, Relation
 from marc_agent.types import (
     CctvDetectionRound,
     ObjectCandidate,
@@ -142,6 +143,61 @@ def _object_round() -> CctvDetectionRound:
 
 
 class Stage1RoundTests(unittest.TestCase):
+    def test_post_molmo_yolo_boxes_drive_target_and_anchor_projection(self):
+        def detector(client, *, stub_path=None):
+            return _object_round()
+
+        initial = _object_round()
+        target = ObjectCandidate(
+            "rig_a:mug:0", "mug", (300.0, 210.0, 360.0, 265.0), 0.95,
+            "rig_a", (640, 480),
+        )
+        anchor = ObjectCandidate(
+            "rig_a:picnic_table:0", "picnic_table",
+            (220.0, 265.0, 470.0, 415.0), 0.96, "rig_a", (640, 480),
+        )
+        refreshed = CctvDetectionRound(
+            objects=[target, anchor] + initial.objects[2:],
+            people=initial.people,
+            frames=initial.frames,
+            camera_ids=initial.camera_ids,
+        )
+        projector = _geometry()
+        with patch(
+            "marc_agent.perception.stage1_pipeline.refresh_detection_camera",
+            return_value=refreshed,
+        ) as refresh:
+            result = run_stage1_round(
+                object(),
+                "Find the mug on the picnic table.",
+                detector=detector,
+                verifier=lambda board: "rig_a:mug:0|rig_a:picnic_table:0",
+                projector=projector,
+            )
+
+        refresh.assert_called_once()
+        self.assertEqual("rig_a", refresh.call_args.args[1])
+        self.assertEqual(
+            target.bbox_xyxy,
+            result.candidates.object_selection.target.bbox_xyxy,
+        )
+        self.assertEqual(
+            anchor.bbox_xyxy,
+            result.candidates.object_selection.anchor.bbox_xyxy,
+        )
+        expected_target = projector.project_contact(
+            "rig_a",
+            target.bbox_xyxy,
+            relation=Relation.ON,
+            support_class="picnic_table",
+            support_box=anchor.bbox_xyxy,
+        )
+        expected_anchor = projector.project_contact("rig_a", anchor.bbox_xyxy)
+        self.assertIsNotNone(expected_target)
+        self.assertIsNotNone(expected_anchor)
+        self.assertEqual(list(expected_target), result.grounding.target_coord)
+        self.assertEqual(list(expected_anchor), result.grounding.anchor_coord)
+
     def test_sar_payload_keeps_parser_situation(self):
         def detector(client, *, stub_path=None):
             return _person_round()
@@ -290,6 +346,56 @@ class Stage1RoundTests(unittest.TestCase):
         )
         self.assertIsNotNone(result.grounding)
         self.assertEqual("bring", result.candidates.parsed.intent.value)
+        self.assertEqual("picnic_table", result.grounding.landmark)
+
+    def test_stage1_accepts_an_explicit_bring_worded_grounding_round(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:tumbler:0", "tumbler", (40, 300, 80, 380),
+                        0.7, "rig_a", (640, 480),
+                    )
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "Pick up the tumbler on the parking lot floor and bring it to the owner.",
+            detector=detector,
+            verifier=lambda _board: "rig_a:tumbler:0|none",
+            projector=_geometry(),
+        )
+        self.assertIsNotNone(result.grounding)
+        self.assertEqual("bring", result.candidates.parsed.intent.value)
+
+    def test_relationless_named_landmark_submits_inferred_near_relation(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:pencilcase:0", "pencilcase", (260, 180, 310, 230),
+                        0.7, "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:picnic_table:0", "picnic_table", (180, 230, 470, 410),
+                        0.9, "rig_a", (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "I was taking notes at an outdoor table and left my pencil case behind.",
+            detector=detector,
+            verifier=lambda _board: (
+                "rig_a:pencilcase:0|rig_a:picnic_table:0"
+            ),
+            projector=_geometry(),
+        )
+        self.assertEqual("near", result.grounding.relation)
         self.assertEqual("picnic_table", result.grounding.landmark)
 
     def test_parking_floor_drop_submits_empty_landmark(self):

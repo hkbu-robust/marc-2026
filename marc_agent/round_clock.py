@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 
 DEFAULT_MIN_REMAINING_S = 4.0
@@ -30,36 +31,23 @@ def submit_margin_s() -> float:
 
 
 class RoundClock:
-    """Mission time_limit plus optional msg 203, counted down with ``now``."""
+    """The current mission's time limit, counted down with a monotonic clock."""
 
-    def __init__(self):
-        self._limit: Optional[float] = None
-        self._t0: Optional[float] = None
-        self._platform_remaining: Optional[float] = None
-        self._platform_stamp: Optional[float] = None
+    def __init__(self, monotonic: Callable[[], float] = time.monotonic):
+        self._monotonic = monotonic
+        self._deadline: Optional[float] = None
 
     def begin(self, time_limit, now) -> None:
-        """Start a round. Drops any leftover platform remaining from the last round."""
-        self._limit = float(time_limit or 0.0)
-        self._t0 = float(now)
-        self._platform_remaining = None
-        self._platform_stamp = None
+        """Start a round independently of simulation-clock jumps."""
+        self._deadline = self._monotonic() + float(time_limit or 0.0)
 
     def note(self, remaining, now) -> None:
-        """Record a pushed remaining-time update. Ignored before ``begin``."""
-        if self._t0 is None:
-            return
-        self._platform_remaining = float(remaining)
-        self._platform_stamp = float(now)
+        """Ignore unscoped msg 203 updates, which can arrive from the prior round."""
 
     def remaining(self, now) -> Optional[float]:
-        if self._t0 is None or self._limit is None:
+        if self._deadline is None:
             return None
-        local = self._limit - (float(now) - self._t0)
-        if self._platform_remaining is not None and self._platform_stamp is not None:
-            platform = self._platform_remaining - (float(now) - self._platform_stamp)
-            return max(0.0, min(local, platform))
-        return max(0.0, local)
+        return max(0.0, self._deadline - self._monotonic())
 
 
 @dataclass(frozen=True)

@@ -1,14 +1,15 @@
-"""Remote vLLM adapter for Stage 1 Qwen SAR verification."""
+"""Remote vLLM adapter for Stage 1 Molmo verification."""
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Mapping, TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -18,32 +19,45 @@ from marc_agent.perception.qwen_runtime import QwenRemoteConfig
 
 if TYPE_CHECKING:
     from marc_agent.perception.sar_selection import CandidateBoard
+    from marc_agent.types import CctvDetectionRound
 
-log = logging.getLogger("marc_agent.qwen_remote")
+log = logging.getLogger("marc_agent.molmo_remote")
+
+MAX_REMOTE_IMAGES = 8
+SCENE_MAX_TOKENS = 192
 
 
-class QwenRemoteError(RuntimeError):
+class MolmoRemoteError(RuntimeError):
     """Base class for failures talking to the configured vLLM server."""
 
 
-class QwenRemoteTimeout(QwenRemoteError):
+class MolmoRemoteTimeout(MolmoRemoteError):
     pass
 
 
-class QwenRemoteAuthenticationError(QwenRemoteError):
+class MolmoRemoteAuthenticationError(MolmoRemoteError):
     pass
 
 
-class QwenRemoteServerError(QwenRemoteError):
+class MolmoRemoteServerError(MolmoRemoteError):
     pass
 
 
-class QwenRemoteConnectionError(QwenRemoteError):
+class MolmoRemoteConnectionError(MolmoRemoteError):
     pass
 
 
-class QwenRemoteResponseError(QwenRemoteError):
+class MolmoRemoteResponseError(MolmoRemoteError):
     pass
+
+
+# Backward-compatible imports for integrations using the old adapter names.
+QwenRemoteError = MolmoRemoteError
+QwenRemoteTimeout = MolmoRemoteTimeout
+QwenRemoteAuthenticationError = MolmoRemoteAuthenticationError
+QwenRemoteServerError = MolmoRemoteServerError
+QwenRemoteConnectionError = MolmoRemoteConnectionError
+QwenRemoteResponseError = MolmoRemoteResponseError
 
 
 HttpPost = Callable[[str, bytes, Mapping[str, str], float], bytes]
@@ -55,6 +69,58 @@ class QwenRemoteMetrics:
     request_bytes: int
     image_count: int
     latency_ms: float
+
+
+@dataclass(frozen=True)
+class _SceneBoard:
+    images: tuple[object, ...]
+    prompt: str
+
+    @property
+    def candidate_ids(self) -> tuple[str, ...]:
+        return ()
+
+
+def _scene_board(
+    round_: "CctvDetectionRound", command_text: str = ""
+) -> tuple[str, _SceneBoard] | None:
+    """Build compact, mission-aware all-camera visual evidence."""
+    from PIL import Image
+
+    digest = hashlib.sha256()
+    images = []
+    labels = []
+    for camera_id in sorted(round_.frames):
+        frame = round_.frames[camera_id]
+        rgb = frame.rgb
+        if rgb is None:
+            continue
+        image = (
+            rgb.convert("RGB")
+            if hasattr(rgb, "convert")
+            else Image.fromarray(rgb, mode="RGB")
+        )
+        digest.update(camera_id.encode("utf-8"))
+        # ponytail: perceptual cache key; use exact frame hashes if tiny changes matter.
+        digest.update(image.resize((64, 64)).tobytes())
+        image = image.copy()
+        image.thumbnail((960, 960))
+        images.append(image)
+        labels.append(f"IMAGE_{len(images)}={camera_id}")
+    if not images:
+        return None
+    digest.update(command_text.encode("utf-8"))
+    prompt = (
+        f"Mission: {command_text or 'unspecified'}. Inspect every supplied camera for "
+        "visual evidence relevant to this mission, including small target objects, people, "
+        "places, and spatial relations. "
+        "Images map to cameras in this exact order: " + ", ".join(labels) + ". "
+        "Output exactly one line per camera in image order, starting with its exact "
+        "CAMERA_ID. After the ID use at most 14 words covering place, people/actions, "
+        "key objects/relations, and empty/occupied areas. Do not solve a mission or "
+        "invent hidden details."
+    )
+    return digest.hexdigest(), _SceneBoard(tuple(images), prompt)
 
 
 def _post(url: str, body: bytes, headers: Mapping[str, str], timeout_s: float) -> bytes:
@@ -170,10 +236,10 @@ def build_remote_payload(
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
-class RemoteQwenSarVerifier:
+class RemoteMolmoVerifier:
     """Send one candidate board to an OpenAI-compatible vLLM endpoint."""
 
-    method = "qwen_remote"
+    method = "molmo_remote"
 
     def __init__(
         self,
@@ -186,6 +252,8 @@ class RemoteQwenSarVerifier:
         self.last_metrics: QwenRemoteMetrics | None = None
         self.budget_timeout_s: float | None = None
         self.last_finish_reason: str | None = None
+        self._scene_cache: dict[str, str] = {}
+        self._scene_description: str | None = None
 
     def set_budget_timeout(self, timeout_s: float) -> None:
         self.budget_timeout_s = float(timeout_s)
@@ -193,12 +261,48 @@ class RemoteQwenSarVerifier:
     def retry_longer(self, board: "CandidateBoard") -> str:
         """Re-post with more tokens after a truncated reply failed to parse."""
         return self._complete(
-            board,
+            self._with_scene_reference(board),
             max_tokens=max(LENGTH_RETRY_TOKENS, int(self.config.max_new_tokens)),
         )
 
     def __call__(self, board: "CandidateBoard") -> str:
-        return self._complete(board)
+        return self._complete(self._with_scene_reference(board))
+
+    def prepare_scene(
+        self, round_: "CctvDetectionRound", command_text: str = ""
+    ) -> str | None:
+        """Describe mission evidence in every available camera."""
+        prepared = _scene_board(round_, command_text)
+        if prepared is None:
+            self._scene_description = None
+            return None
+        key, board = prepared
+        self._scene_description = None
+        description = self._scene_cache.get(key)
+        if description is None:
+            description = self._complete(board, max_tokens=SCENE_MAX_TOKENS)
+            self._scene_cache[key] = description
+            if len(self._scene_cache) > 8:
+                self._scene_cache.pop(next(iter(self._scene_cache)))
+            log.info("[molmo-remote] scene-cache miss cameras=%d", len(board.images))
+        else:
+            log.info("[molmo-remote] scene-cache hit cameras=%d", len(board.images))
+        self._scene_description = description
+        return description
+
+    def _with_scene_reference(self, board: "CandidateBoard") -> "CandidateBoard":
+        description = self._scene_description
+        if not description:
+            return board
+        prompt = (
+            "Cached all-camera scene reference (descriptive evidence only):\n"
+            f"{description}\n\n"
+            "Compare the original request with every camera description, identify the "
+            "best-aligned camera internally, then complete this finite-ID selection. "
+            "Do not explain your reasoning.\n\n"
+            f"{board.prompt}"
+        )
+        return replace(board, prompt=prompt)
 
     def _timeout_s(self) -> tuple[float, int]:
         timeout_s = min(
@@ -218,6 +322,13 @@ class RemoteQwenSarVerifier:
         *,
         max_tokens: int | None = None,
     ) -> str:
+        if len(board.images) > MAX_REMOTE_IMAGES:
+            log.warning(
+                "[molmo-remote] image-limit requested=%d sent=%d",
+                len(board.images),
+                MAX_REMOTE_IMAGES,
+            )
+            board = replace(board, images=board.images[:MAX_REMOTE_IMAGES])
         body = build_remote_payload(board, self.config, max_tokens=max_tokens)
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
@@ -230,7 +341,7 @@ class RemoteQwenSarVerifier:
         try:
             for attempt in range(1, max_attempts + 1):
                 log.info(
-                    "[qwen-remote] dispatch endpoint=%s model=%s images=%d "
+                    "[molmo-remote] dispatch endpoint=%s model=%s images=%d "
                     "candidates=%d request=%dB deadline=%.1fs budget=%s "
                     "max_tokens=%d attempt=%d/%d",
                     self.config.chat_completions_url,
@@ -264,7 +375,7 @@ class RemoteQwenSarVerifier:
                         else "failed"
                     )
                     log.warning(
-                        "[qwen-remote] %s endpoint=%s model=%s "
+                        "[molmo-remote] %s endpoint=%s model=%s "
                         "latency=%.0fms error=%s detail=%s attempt=%d/%d",
                         kind,
                         self.config.chat_completions_url,
@@ -280,7 +391,7 @@ class RemoteQwenSarVerifier:
                 except Exception as exc:
                     latency_ms = (time.perf_counter() - started) * 1000.0
                     log.warning(
-                        "[qwen-remote] failed endpoint=%s model=%s latency=%.0fms "
+                        "[molmo-remote] failed endpoint=%s model=%s latency=%.0fms "
                         "error=%s detail=%s attempt=%d/%d",
                         self.config.chat_completions_url,
                         self.config.model_name,
@@ -309,7 +420,7 @@ class RemoteQwenSarVerifier:
         self.last_finish_reason = finish_reason
         preview = " ".join(text.split())
         log.info(
-            "[qwen-remote] response status=ok model=%s images=%d request=%dB "
+            "[molmo-remote] response status=ok model=%s images=%d request=%dB "
             "response=%dB latency=%.0fms finish_reason=%s text=%s",
             self.config.model_name,
             len(board.images),
@@ -320,3 +431,7 @@ class RemoteQwenSarVerifier:
             preview,
         )
         return text
+
+
+# Backward-compatible import for existing integrations using the old adapter name.
+RemoteQwenSarVerifier = RemoteMolmoVerifier
