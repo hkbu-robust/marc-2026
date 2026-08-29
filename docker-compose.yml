@@ -7,7 +7,8 @@ services:
       target: agent
       network: host
       args:
-        MARC_QWEN_BACKEND: ${MARC_QWEN_BACKEND:-local}
+        # Submission is self-contained: always bake Qwen into the image.
+        MARC_QWEN_BACKEND: local
     image: marc-agent:local
     network_mode: host
     environment:
@@ -17,8 +18,8 @@ services:
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent:/agent/demo"
       PYTHONUNBUFFERED: "1"
-      MARC_SAR_DETECTOR: "${MARC_SAR_DETECTOR:-qwen}"
-      MARC_QWEN_BACKEND: "${MARC_QWEN_BACKEND:-local}"
+      MARC_SAR_DETECTOR: "qwen"
+      MARC_QWEN_BACKEND: "local"
       MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
       MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"

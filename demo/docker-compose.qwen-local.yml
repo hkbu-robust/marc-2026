@@ -5,6 +5,11 @@
 #     -f demo/docker-compose.qwen-local.yml up --build agent
 services:
   agent:
+    # The host mount supplies the local weights, so do not duplicate them in the image.
+    # This build-only value does not change the runtime backend below.
+    build:
+      args:
+        MARC_QWEN_BACKEND: remote
     environment:
       MARC_SAR_DETECTOR: "qwen"
       MARC_QWEN_BACKEND: "local"
