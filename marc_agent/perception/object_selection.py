@@ -1036,7 +1036,7 @@ def select_object_candidate(
 
     method = str(getattr(verifier, "method", "qwen"))
     try:
-        remote = method == "molmo_remote"
+        remote = method == "qwen_remote"
         contenders = ranked
 
         def verify(items: tuple[ObjectSelection, ...]):

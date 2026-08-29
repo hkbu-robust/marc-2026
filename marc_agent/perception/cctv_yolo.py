@@ -621,7 +621,7 @@ def refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetectionR
 
 
 def _refresh_candidates(existing, fresh, class_attr: str):
-    """Update same-class boxes while preserving the IDs selected by Molmo."""
+    """Update same-class boxes while preserving the IDs selected by Qwen."""
     unused = list(fresh)
     refreshed = []
     matched = 0
@@ -648,7 +648,7 @@ def refresh_detection_camera(
     round_: CctvDetectionRound,
     camera_id: str,
 ) -> CctvDetectionRound:
-    """Re-run GPU YOLO on Molmo's winning camera before projection."""
+    """Re-run GPU YOLO on Qwen's winning camera before projection."""
     global _detector
     frame = round_.frames.get(camera_id)
     if _detector is None or frame is None or frame.rgb is None:

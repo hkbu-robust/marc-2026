@@ -19,7 +19,6 @@ from marc_agent.perception.qwen_remote import (
     RemoteQwenSarVerifier,
     build_remote_payload,
     check_remote_health,
-    _parse_points,
 )
 from marc_agent.perception.qwen_runtime import QwenRemoteConfig
 from marc_agent.perception.sar_selection import CandidateBoard
@@ -46,13 +45,6 @@ def _board() -> CandidateBoard:
 
 
 class QwenRemoteTests(unittest.TestCase):
-    def test_molmo_point_coordinates_parse_by_image(self):
-        raw = '<points coords="1 1 456 532;2 2 286 081">target</points>'
-        self.assertEqual(
-            ((1, 456.0, 532.0), (2, 286.0, 81.0)),
-            _parse_points(raw),
-        )
-
     def test_all_camera_scene_description_is_cached_and_used_for_selection(self):
         prompts = []
         max_tokens = []
@@ -138,7 +130,7 @@ class QwenRemoteTests(unittest.TestCase):
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as logged:
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as logged:
             self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
         self.assertIn("text=rig_a:person_prone:0|emergency", "\n".join(logged.output))
         self.assertEqual(
@@ -159,12 +151,12 @@ class QwenRemoteTests(unittest.TestCase):
             raise QwenRemoteConnectionError("connection refused")
 
         verifier = RemoteQwenSarVerifier(_config(), post=fail)
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as captured:
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
             with self.assertRaises(QwenRemoteConnectionError):
                 verifier(_board())
         output = "\n".join(captured.output)
         self.assertIn("dispatch endpoint=", output)
-        self.assertIn("error=MolmoRemoteConnectionError", output)
+        self.assertIn("error=QwenRemoteConnectionError", output)
         self.assertIn("attempt=1/2", output)
         self.assertIn("attempt=2/2", output)
         self.assertNotIn("test-secret", output)
@@ -181,7 +173,7 @@ class QwenRemoteTests(unittest.TestCase):
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
             self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
         self.assertEqual(2, len(calls))
 
@@ -263,7 +255,7 @@ class QwenRemoteTests(unittest.TestCase):
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as captured:
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
             self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
         self.assertEqual(2, len(calls))
         output = "\n".join(captured.output)
@@ -288,7 +280,7 @@ class QwenRemoteTests(unittest.TestCase):
         )
         verifier = RemoteQwenSarVerifier(config, post=post)
         verifier.set_budget_timeout(27.9)
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as captured:
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
             with self.assertRaises(QwenRemoteTimeout):
                 verifier(_board())
         self.assertEqual([12.0, 12.0], calls)
@@ -306,7 +298,7 @@ class QwenRemoteTests(unittest.TestCase):
             raise QwenRemoteTimeout("vLLM did not respond within 5.0s")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
             with self.assertRaises(QwenRemoteTimeout):
                 verifier(_board())
         self.assertEqual(2, len(calls))
@@ -319,7 +311,7 @@ class QwenRemoteTests(unittest.TestCase):
             raise QwenRemoteAuthenticationError("vLLM rejected the configured API key (HTTP 401)")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
             with self.assertRaises(QwenRemoteAuthenticationError):
                 verifier(_board())
         self.assertEqual(1, len(calls))
@@ -341,7 +333,7 @@ class QwenRemoteTests(unittest.TestCase):
             ).encode("utf-8")
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO") as logged:
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as logged:
             self.assertEqual("P01", verifier(_board()))
         self.assertEqual("stop", verifier.last_finish_reason)
         self.assertIn("finish_reason=stop", "\n".join(logged.output))
@@ -379,7 +371,7 @@ class QwenRemoteTests(unittest.TestCase):
 
         verifier = RemoteQwenSarVerifier(_config(), post=post)
         ids = ("rig_a:person_bending:0", "rig_a:person_walking:0")
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
             parsed, raw = call_verifier(
                 verifier,
                 _board(),

@@ -215,7 +215,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
         clock = _clock(30.0, 0.0)
 
         class Verifier:
-            method = "molmo_remote"
+            method = "qwen_remote"
 
             def prepare_scene(self, _round):
                 calls.append("scene")
@@ -233,7 +233,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
             clock=clock,
         )
         self.assertEqual(["scene", "selection"], calls)
-        self.assertEqual("molmo_remote", result.object_selection.method)
+        self.assertEqual("qwen_remote", result.object_selection.method)
 
     def test_remaining_three_seconds_skips_object_verifier(self):
         calls = []
@@ -291,7 +291,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
         verifier = RemoteQwenSarVerifier(_remote_config(), post=post)
         verifier.set_budget_timeout(2.0)
         board = CandidateBoard(images=(), prompt="x", evidence=())
-        with self.assertLogs("marc_agent.molmo_remote", level="INFO"):
+        with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
             with self.assertRaises(QwenRemoteTimeout):
                 verifier(board)
         self.assertEqual([2.0], calls)

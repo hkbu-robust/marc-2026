@@ -58,7 +58,7 @@ def detect_stage1_round(
     - ``fallback`` — retain raw people; the query-conditioned selector ranks them
     - ``stub`` — explicit unit-test fixture only
     - ``yolo`` / ``pose`` — provisional YOLO person-pose mapping (legacy)
-    - ``qwen`` / ``molmo`` — raw people are verified after parsing in ``stage1_pipeline``
+    - ``qwen`` / ``qwen-remote`` — raw people are verified after parsing in ``stage1_pipeline``
     """
     t0 = time.perf_counter()
     frames, camera_ids = fetch_cctv_round(

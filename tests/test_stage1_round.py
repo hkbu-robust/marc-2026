@@ -143,7 +143,7 @@ def _object_round() -> CctvDetectionRound:
 
 
 class Stage1RoundTests(unittest.TestCase):
-    def test_post_molmo_yolo_boxes_drive_target_and_anchor_projection(self):
+    def test_post_qwen_yolo_boxes_drive_target_and_anchor_projection(self):
         def detector(client, *, stub_path=None):
             return _object_round()
 

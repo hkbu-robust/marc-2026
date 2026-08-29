@@ -513,7 +513,7 @@ class SarSelectionTests(unittest.TestCase):
 
     def test_remote_startup_health_is_visible_and_does_not_log_key(self):
         env = {
-            "MARC_SAR_DETECTOR": "molmo",
+            "MARC_SAR_DETECTOR": "qwen-remote",
             "MARC_QWEN_BACKEND": "remote",
             "MARC_QWEN_BASE_URL": "http://workstation:8000/v1",
             "MARC_QWEN_API_KEY": "private-test-key",
@@ -866,7 +866,7 @@ class SarSelectionTests(unittest.TestCase):
         calls = []
 
         class Verifier:
-            method = "molmo_remote"
+            method = "qwen_remote"
             last_metrics = None
             last_finish_reason = "stop"
 
@@ -898,7 +898,7 @@ class SarSelectionTests(unittest.TestCase):
         seen = []
 
         class Verifier:
-            method = "molmo_remote"
+            method = "qwen_remote"
             last_metrics = None
             last_finish_reason = "stop"
 

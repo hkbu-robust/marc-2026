@@ -62,7 +62,7 @@ Even without `pip install`ing `marc_sdk`, `launch.sh` adds the SDK path (the sta
 ## Behavior (non-interactive / automatic)
 
 1. **Registration** -> SESSION_ACK
-2. **Stage 1 candidate stage**: parse `voice_command` -> fetch every discovered CCTV once -> GPU YOLO objects/people -> cached all-camera Molmo scene description -> Molmo validates YOLO classes and selects the command-aligned target/anchor -> GPU YOLO refresh of the selected camera -> world projection and submission.
+2. **Stage 1 candidate stage**: parse `voice_command` -> fetch every discovered CCTV once -> GPU YOLO objects/people -> cached all-camera Qwen scene description -> Qwen validates YOLO classes and selects the command-aligned target/anchor -> GPU YOLO refresh of the selected camera -> world projection and submission.
 3. **Stage 2**: `task_description` -> mock VLA -> `submit_stage2_grounding()` -> on reveal, occupancy D* Lite + lidar to the
    target -> arm pick -> D* Lite to the owner zone -> `task_complete()`
 4. **End**: log the final score
@@ -73,21 +73,21 @@ Stage 1 candidate settings:
 |---|---|---|
 | `MARC_STAGE1_DETECTOR` | bundled YOLO when present | `yolo` for live candidates; `stub` is test-only |
 | `MARC_SAR_DETECTOR` | `qwen` | Base and submission Compose pin Qwen verification on |
-| `MARC_QWEN_BACKEND` | `remote` in demo | The demo uses the OpenAI-compatible Molmo vLLM on this host; root submission Compose remains local Qwen |
+| `MARC_QWEN_BACKEND` | `remote` in demo | The demo uses the OpenAI-compatible Qwen vLLM on this host; root submission Compose remains local Qwen |
 | `MARC_QWEN_MODEL_DIR` | `/agent/models/runtime/stage1-sar-qwen/model` | Complete pinned local Transformers snapshot |
-| `MARC_QWEN_BASE_URL` | `http://127.0.0.1:8002/v1` in demo | Remote vLLM URL including `/v1` |
+| `MARC_QWEN_BASE_URL` | `http://127.0.0.1:8000/v1` in demo | Remote vLLM URL including `/v1` |
 | `MARC_QWEN_API_KEY` | local vLLM key in demo | Bearer key configured on the vLLM server; never written to metrics |
-| `MARC_QWEN_MODEL` | `stage1-sar-molmo2-er` in demo | Name supplied through vLLM `--served-model-name` |
+| `MARC_QWEN_MODEL` | `qwen3-vl-8b` in demo | Name supplied through vLLM `--served-model-name` |
 | `MARC_QWEN_TIMEOUT_S` | `90` | Remote request budget before deterministic fallback; wall wait is also capped |
 | `MARC_QWEN_WALL_TIMEOUT_S` | `12` | Per-attempt HTTP wait cap; retries once when remaining budget covers two attempts |
 | `MARC_QWEN_MAX_NEW_TOKENS` | `48` | Local and remote generation budget; 8 tokens truncates `TARGET_ID\|ANCHOR_ID` |
 | `MARC_QWEN_MAX_CROPS` | `12` | Per-person crops; annotated camera views still cover every candidate |
 | `MARC_STAGE1_METRICS_PATH` | `artifacts/stage1_rounds.jsonl` | Per-round candidate counts, latency, selection method, and failures |
 
-### Molmo on the demo host
+### Qwen on the demo host
 
 The standard `demo/docker-compose.yml` uses the host-network vLLM endpoint at
-`http://127.0.0.1:8002/v1`, serving `stage1-sar-molmo2-er`. Start that service before
+`http://127.0.0.1:8000/v1`, serving `qwen3-vl-8b`. Start that service before
 `docker compose up`; the existing remote adapter handles the OpenAI-compatible API.
 
 ### Local Qwen override

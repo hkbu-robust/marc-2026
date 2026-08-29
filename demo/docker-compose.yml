@@ -24,7 +24,7 @@ services:
       target: agent
       network: host
       args:
-        # Molmo runs in the host vLLM process, so do not bake Qwen into this image.
+        # Qwen runs in the host vLLM process, so do not bake it into this image.
         MARC_QWEN_BACKEND: remote
     image: marc-agent:local       # local build artifact (do not redistribute)
     network_mode: host            # DDS discovery over the LAN via the participant machine NIC
@@ -41,12 +41,12 @@ services:
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent:/agent/demo"
       PYTHONUNBUFFERED: "1"
-      # The existing adapter is OpenAI-compatible and works with the host Molmo vLLM.
-      MARC_SAR_DETECTOR: "molmo"
+      # The existing adapter is OpenAI-compatible and uses the host Qwen vLLM.
+      MARC_SAR_DETECTOR: "qwen-remote"
       MARC_QWEN_BACKEND: "remote"
-      MARC_QWEN_BASE_URL: "http://127.0.0.1:8002/v1"
+      MARC_QWEN_BASE_URL: "http://127.0.0.1:8000/v1"
       MARC_QWEN_API_KEY: "marc-qwen-secret"
-      MARC_QWEN_MODEL: "stage1-sar-molmo2-er"
+      MARC_QWEN_MODEL: "qwen3-vl-8b"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
       MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"
       MARC_CCTV_YOLO_CONF: "${MARC_CCTV_YOLO_CONF:-0.15}"

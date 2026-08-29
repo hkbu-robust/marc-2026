@@ -1,4 +1,4 @@
-"""Remote vLLM adapter for Stage 1 Molmo verification."""
+"""Remote vLLM adapter for Stage 1 Qwen verification."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 import logging
-import re
 import socket
 import time
 from dataclasses import dataclass, replace
@@ -22,14 +21,10 @@ if TYPE_CHECKING:
     from marc_agent.perception.sar_selection import CandidateBoard
     from marc_agent.types import CctvDetectionRound
 
-log = logging.getLogger("marc_agent.molmo_remote")
+log = logging.getLogger("marc_agent.qwen_remote")
 
 MAX_REMOTE_IMAGES = 6
 SCENE_MAX_TOKENS = 192
-_POINT_COORDS_RE = re.compile(r"<points\b[^>]*\bcoords=[\"']([^\"']+)", re.I)
-_POINT_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
-
-
 def pack_camera_evidence(overview: object, crops: tuple[tuple[str, object], ...]):
     """Fit one camera overview and all of its labeled crops into one image."""
     from PIL import Image, ImageDraw
@@ -62,37 +57,28 @@ def pack_camera_evidence(overview: object, crops: tuple[tuple[str, object], ...]
     return canvas
 
 
-class MolmoRemoteError(RuntimeError):
+class QwenRemoteError(RuntimeError):
     """Base class for failures talking to the configured vLLM server."""
 
 
-class MolmoRemoteTimeout(MolmoRemoteError):
+class QwenRemoteTimeout(QwenRemoteError):
     pass
 
 
-class MolmoRemoteAuthenticationError(MolmoRemoteError):
+class QwenRemoteAuthenticationError(QwenRemoteError):
     pass
 
 
-class MolmoRemoteServerError(MolmoRemoteError):
+class QwenRemoteServerError(QwenRemoteError):
     pass
 
 
-class MolmoRemoteConnectionError(MolmoRemoteError):
+class QwenRemoteConnectionError(QwenRemoteError):
     pass
 
 
-class MolmoRemoteResponseError(MolmoRemoteError):
+class QwenRemoteResponseError(QwenRemoteError):
     pass
-
-
-# Backward-compatible imports for integrations using the old adapter names.
-QwenRemoteError = MolmoRemoteError
-QwenRemoteTimeout = MolmoRemoteTimeout
-QwenRemoteAuthenticationError = MolmoRemoteAuthenticationError
-QwenRemoteServerError = MolmoRemoteServerError
-QwenRemoteConnectionError = MolmoRemoteConnectionError
-QwenRemoteResponseError = MolmoRemoteResponseError
 
 
 HttpPost = Callable[[str, bytes, Mapping[str, str], float], bytes]
@@ -273,10 +259,10 @@ def build_remote_payload(
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
-class RemoteMolmoVerifier:
+class RemoteQwenSarVerifier:
     """Send one candidate board to an OpenAI-compatible vLLM endpoint."""
 
-    method = "molmo_remote"
+    method = "qwen_remote"
 
     def __init__(
         self,
@@ -321,116 +307,11 @@ class RemoteMolmoVerifier:
             self._scene_cache[key] = description
             if len(self._scene_cache) > 8:
                 self._scene_cache.pop(next(iter(self._scene_cache)))
-            log.info("[molmo-remote] scene-cache miss cameras=%d", len(board.images))
+            log.info("[qwen-remote] scene-cache miss cameras=%d", len(board.images))
         else:
-            log.info("[molmo-remote] scene-cache hit cameras=%d", len(board.images))
+            log.info("[qwen-remote] scene-cache hit cameras=%d", len(board.images))
         self._scene_description = description
         return description
-
-    def point_object_candidates(
-        self,
-        parsed,
-        round_: "CctvDetectionRound",
-        command_text: str,
-    ):
-        """Recover missed target boxes by pointing inside explicit landmark crops."""
-        if not parsed.landmark or parsed.target_type == "person":
-            return ()
-        from PIL import Image
-
-        from marc_agent.perception.candidate_ids import object_candidate_id
-        from marc_agent.perception.cctv_yolo import _pad_box
-        from marc_agent.types import ObjectCandidate
-
-        have_target = {
-            item.camera_id
-            for item in round_.objects
-            if item.class_name == parsed.target_type
-        }
-        anchors = [
-            item
-            for item in round_.objects
-            if item.class_name == parsed.landmark
-            and item.camera_id not in have_target
-            and item.camera_id in round_.frames
-        ]
-        anchors.sort(key=lambda item: (-item.confidence, item.candidate_id))
-        if not anchors:
-            return ()
-
-        counts: dict[str, int] = {}
-        for item in round_.objects:
-            if item.class_name == parsed.target_type:
-                counts[item.camera_id] = counts.get(item.camera_id, 0) + 1
-        recovered = []
-        for offset in range(0, len(anchors), MAX_REMOTE_IMAGES):
-            batch = anchors[offset : offset + MAX_REMOTE_IMAGES]
-            images = []
-            crop_bounds = []
-            for anchor in batch:
-                frame = round_.frames[anchor.camera_id]
-                image = (
-                    frame.rgb.convert("RGB")
-                    if hasattr(frame.rgb, "convert")
-                    else Image.fromarray(frame.rgb, mode="RGB")
-                )
-                bounds = _pad_box(
-                    anchor.bbox_xyxy,
-                    (frame.width, frame.height),
-                    pad_frac=0.75,
-                )
-                crop_bounds.append(bounds)
-                images.append(image.crop(tuple(round(value) for value in bounds)))
-            board = _SceneBoard(
-                tuple(images),
-                (
-                    f"Mission: {command_text}. Each image is an enlarged region around "
-                    f"a detected {parsed.landmark}. Point once to the center of the "
-                    f"{parsed.target_type} satisfying the mission in each image where it "
-                    "is visible. Do not point to the landmark itself or invent a target."
-                ),
-            )
-            raw = self._complete(board, max_tokens=SCENE_MAX_TOKENS)
-            points = _parse_points(raw)
-            used_images = set()
-            for image_index, x_norm, y_norm in points:
-                if image_index in used_images or not 1 <= image_index <= len(batch):
-                    continue
-                used_images.add(image_index)
-                anchor = batch[image_index - 1]
-                left, top, right, bottom = crop_bounds[image_index - 1]
-                x = left + (right - left) * x_norm / 1000.0
-                y = top + (bottom - top) * y_norm / 1000.0
-                frame = round_.frames[anchor.camera_id]
-                radius = max(2.0, 0.003 * max(frame.width, frame.height))
-                box = (
-                    max(0.0, x - radius),
-                    max(0.0, y - radius),
-                    min(float(frame.width), x + radius),
-                    min(float(frame.height), y + radius),
-                )
-                index = counts.get(anchor.camera_id, 0)
-                counts[anchor.camera_id] = index + 1
-                recovered.append(
-                    ObjectCandidate(
-                        object_candidate_id(
-                            anchor.camera_id, parsed.target_type, index
-                        ),
-                        parsed.target_type,
-                        box,
-                        0.5,
-                        anchor.camera_id,
-                        (int(frame.width), int(frame.height)),
-                    )
-                )
-        log.info(
-            "[molmo-remote] point-refine target=%s landmark=%s added=%d ids=%s",
-            parsed.target_type,
-            parsed.landmark,
-            len(recovered),
-            ",".join(item.candidate_id for item in recovered) or "-",
-        )
-        return tuple(recovered)
 
     def _with_scene_reference(self, board: "CandidateBoard") -> "CandidateBoard":
         description = self._scene_description
@@ -481,7 +362,7 @@ class RemoteMolmoVerifier:
         try:
             for attempt in range(1, max_attempts + 1):
                 log.info(
-                    "[molmo-remote] dispatch endpoint=%s model=%s images=%d "
+                    "[qwen-remote] dispatch endpoint=%s model=%s images=%d "
                     "candidates=%d request=%dB deadline=%.1fs budget=%s "
                     "max_tokens=%d attempt=%d/%d",
                     self.config.chat_completions_url,
@@ -515,7 +396,7 @@ class RemoteMolmoVerifier:
                         else "failed"
                     )
                     log.warning(
-                        "[molmo-remote] %s endpoint=%s model=%s "
+                        "[qwen-remote] %s endpoint=%s model=%s "
                         "latency=%.0fms error=%s detail=%s attempt=%d/%d",
                         kind,
                         self.config.chat_completions_url,
@@ -531,7 +412,7 @@ class RemoteMolmoVerifier:
                 except Exception as exc:
                     latency_ms = (time.perf_counter() - started) * 1000.0
                     log.warning(
-                        "[molmo-remote] failed endpoint=%s model=%s latency=%.0fms "
+                        "[qwen-remote] failed endpoint=%s model=%s latency=%.0fms "
                         "error=%s detail=%s attempt=%d/%d",
                         self.config.chat_completions_url,
                         self.config.model_name,
@@ -560,7 +441,7 @@ class RemoteMolmoVerifier:
         self.last_finish_reason = finish_reason
         preview = " ".join(text.split())
         log.info(
-            "[molmo-remote] response status=ok model=%s images=%d request=%dB "
+            "[qwen-remote] response status=ok model=%s images=%d request=%dB "
             "response=%dB latency=%.0fms finish_reason=%s text=%s",
             self.config.model_name,
             len(board.images),
@@ -571,21 +452,3 @@ class RemoteMolmoVerifier:
             preview,
         )
         return text
-
-
-# Backward-compatible import for existing integrations using the old adapter name.
-RemoteQwenSarVerifier = RemoteMolmoVerifier
-
-
-def _parse_points(raw: str) -> tuple[tuple[int, float, float], ...]:
-    """Parse Molmo's ``image point x y`` coordinates in thousandths."""
-    parsed = []
-    for coords in _POINT_COORDS_RE.findall(raw or ""):
-        for item in coords.split(";"):
-            values = [float(value) for value in _POINT_NUMBER_RE.findall(item)]
-            if len(values) < 4:
-                continue
-            image_index, _point_index, x, y = values[-4:]
-            if 0.0 <= x <= 1000.0 and 0.0 <= y <= 1000.0:
-                parsed.append((int(image_index), x, y))
-    return tuple(parsed)

@@ -109,7 +109,7 @@ def _downward_projector(camera_id: str):
 
 
 class ObjectSelectionTests(unittest.TestCase):
-    def test_molmo_gets_a_detail_crop_for_every_same_class_proposal(self):
+    def test_remote_qwen_gets_a_detail_crop_for_every_same_class_proposal(self):
         parsed = parse_command("Find the tumbler.")
         objects = [
             _object(
@@ -649,7 +649,7 @@ class ObjectSelectionTests(unittest.TestCase):
         ids = [item.target.candidate_id for item in ranked]
         self.assertEqual(["rig_3:tumbler:0"], ids)
 
-    def test_molmo_can_recover_a_target_mislabeled_as_another_mission_object(self):
+    def test_remote_qwen_can_recover_a_target_mislabeled_as_another_mission_object(self):
         parsed = parse_command("Find the tumbler on the bench.")
         round_ = CctvDetectionRound(
             objects=[
@@ -1295,7 +1295,7 @@ class ObjectSelectionTests(unittest.TestCase):
         calls = []
 
         class Verifier:
-            method = "molmo_remote"
+            method = "qwen_remote"
 
             def __call__(self, board):
                 calls.append(board)
@@ -1341,7 +1341,7 @@ class ObjectSelectionTests(unittest.TestCase):
         calls = []
 
         class Verifier:
-            method = "molmo_remote"
+            method = "qwen_remote"
             last_metrics = None
             last_finish_reason = "stop"
 

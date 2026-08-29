@@ -942,8 +942,8 @@ def select_sar_candidate(
                 command,
                 round_,
                 contenders,
-                len(contenders) if method == "molmo_remote" else None,
-                pack_cameras=method == "molmo_remote",
+                len(contenders) if method == "qwen_remote" else None,
+                pack_cameras=method == "qwen_remote",
             )
             (parsed, raw_output) = call_verifier(
                 verifier,

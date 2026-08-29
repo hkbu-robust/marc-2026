@@ -44,7 +44,7 @@ from marc_agent.perception.sar_selection import (
     select_sar_candidate,
 )
 from marc_agent.perception.qwen_remote import (
-    RemoteMolmoVerifier,
+    RemoteQwenSarVerifier,
     check_remote_health,
 )
 from marc_agent.perception.qwen_runtime import (
@@ -110,13 +110,13 @@ def get_default_verifier() -> Optional[Verifier]:
 def log_qwen_startup_status() -> None:
     """Log configured Qwen mode; warmup local weights or probe remote vLLM."""
     mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
-    if mode not in {"qwen", "qwen-remote", "molmo"}:
+    if mode not in {"qwen", "qwen-remote"}:
         log.info("[vlm-startup] disabled mode=%s", mode)
         return
     try:
         backend = (
             QwenBackend.REMOTE
-            if mode in {"qwen-remote", "molmo"}
+            if mode == "qwen-remote"
             else configured_backend()
         )
         if backend is QwenBackend.LOCAL:
@@ -133,7 +133,7 @@ def log_qwen_startup_status() -> None:
             return
         config = QwenRemoteConfig.load()
         log.info(
-            "[molmo-startup] configured backend=remote models_url=%s model=%s "
+            "[qwen-startup] configured backend=remote models_url=%s model=%s "
             "timeout=%.1fs",
             config.models_url,
             config.model_name,
@@ -142,14 +142,14 @@ def log_qwen_startup_status() -> None:
         started = time.perf_counter()
         model_ids = check_remote_health(config)
         log.info(
-            "[molmo-startup] health=ok model=%s available=%s latency=%.0fms",
+            "[qwen-startup] health=ok model=%s available=%s latency=%.0fms",
             config.model_name,
             ",".join(model_ids),
             (time.perf_counter() - started) * 1000.0,
         )
     except Exception as exc:
         log.warning(
-            "[molmo-startup] health=failed error=%s detail=%s; "
+            "[qwen-startup] health=failed error=%s detail=%s; "
             "SAR rounds will use deterministic fallback if the failure persists",
             type(exc).__name__,
             exc,
@@ -216,18 +216,18 @@ def _default_verifier() -> Optional[Verifier]:
     if _CACHED_VERIFIER is not None:
         return _CACHED_VERIFIER
     mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
-    if mode not in {"qwen", "qwen-remote", "molmo"}:
+    if mode not in {"qwen", "qwen-remote"}:
         log.info("[vlm] verifier disabled mode=%s", mode)
         return None
     backend = (
         QwenBackend.REMOTE
-        if mode in {"qwen-remote", "molmo"}
+        if mode == "qwen-remote"
         else configured_backend()
     )
     if backend is QwenBackend.REMOTE:
-        verifier = RemoteMolmoVerifier()
+        verifier = RemoteQwenSarVerifier()
         log.info(
-            "[molmo] verifier configured backend=remote endpoint=%s model=%s "
+            "[qwen] verifier configured backend=remote endpoint=%s model=%s "
             "timeout=%.1fs",
             verifier.config.chat_completions_url,
             verifier.config.model_name,
@@ -497,7 +497,7 @@ def run_stage1_candidate_pipeline(
 def _refresh_selected_candidates(
     candidates: Stage1CandidateResult,
 ) -> Stage1CandidateResult:
-    """Refresh Molmo's target camera and carry new boxes into projection."""
+    """Refresh Qwen's target camera and carry new boxes into projection."""
     camera_id = None
     if candidates.sar_selection and candidates.sar_selection.selected:
         camera_id = candidates.sar_selection.selected.camera_id
