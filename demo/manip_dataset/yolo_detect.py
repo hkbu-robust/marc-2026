@@ -172,7 +172,7 @@ class YoloTracker:
                 f"conf={self.cfg.conf} max={self.cfg.candidate_limit}"
             )
             if self.cfg.status == "provisional":
-                print("[yolo] PROVISIONAL_PIPELINE_ONLY: ordinary umbrella is unsupported")
+                print("[yolo] PROVISIONAL_PIPELINE_ONLY: human review pending; not final challenge readiness")
             return True
         except Exception as e:
             self.model = None

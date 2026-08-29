@@ -24,8 +24,8 @@ EXPECTED_IMAGES = {"train": 2266, "val": 454}
 EXCLUDED_CLASSES = frozenset({"master_chef_can", "wood_block"})
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png"})
 CONFIG = Path(__file__).with_name("configs") / "stage2-roboview-yolo26x.yaml"
-SEED_SHA256 = "931e1824a4cf08cb5865f112d9405e83b936d14616d067aace5c98b78488d146"
-SEED_RUN = "stage2-roboview-yolo26x-1920-provisional-20260828/epoch40.pt"
+STAGE1_SEED_SHA256 = "12712d12e3321dffeb49296285a7d99f8fab12b46aa99a808b5d3cd1da80da22"
+STAGE1_SEED_RUN = "stage1-cctv-yolo26x-1920-umbrella-ceccc62"
 
 
 def sha256(path: Path) -> str:
@@ -239,8 +239,8 @@ def train_detector(args: argparse.Namespace) -> None:
     from ultralytics.data.utils import check_det_dataset
 
     data, checkpoint = args.data.resolve(), args.model.resolve()
-    if not checkpoint.is_file() or sha256(checkpoint) != SEED_SHA256:
-        raise ValueError("--model must be the selected Stage 2 epoch40.pt")
+    if not checkpoint.is_file() or sha256(checkpoint) != STAGE1_SEED_SHA256:
+        raise ValueError("--model must be the original selected Stage 1 last.pt")
     manifest_path = data.with_name("dataset_manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     names = manifest["derived"]["ordered_classes"]
@@ -250,8 +250,8 @@ def train_detector(args: argparse.Namespace) -> None:
     model = YOLO(checkpoint)
     seed_names = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
     missing = [name for name in names if name not in seed_names]
-    if missing != ["umbrella"]:
-        raise ValueError(f"selected seed must transfer nine classes and add only umbrella: {missing}")
+    if missing:
+        raise ValueError(f"Stage 1 seed is missing transferable classes: {missing}")
 
     overrides = {
         "model": str(checkpoint),
@@ -273,8 +273,8 @@ def train_detector(args: argparse.Namespace) -> None:
         "completed": False,
         "seed_checkpoint": {
             "path": str(checkpoint),
-            "sha256": SEED_SHA256,
-            "selected_run": SEED_RUN,
+            "sha256": STAGE1_SEED_SHA256,
+            "selected_run": STAGE1_SEED_RUN,
             "ordered_classes": seed_names,
         },
         "dataset": {"path": str(data), **manifest},
