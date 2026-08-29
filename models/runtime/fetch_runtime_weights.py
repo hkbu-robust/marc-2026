@@ -326,11 +326,11 @@ def fetch_all(
             #     snapshot_download=snapshot_download,
             #     skip_if_complete=skip_if_complete,
             # ),
-            fetch_yolo11x(
-                dests["yolo11x"],
-                hub_download=hub_download,
-                skip_if_complete=skip_if_complete,
-            ),
+            # fetch_yolo11x(
+            #     dests["yolo11x"],
+            #     hub_download=hub_download,
+            #     skip_if_complete=skip_if_complete,
+            # ),
         ]
     )
     return lines

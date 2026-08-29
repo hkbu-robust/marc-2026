@@ -9,7 +9,7 @@
 #
 # Build context = the starter kit root (copies marc_sdk + demo together).
 #   -> see compose build.context=.. , dockerfile=demo/Dockerfile.
-# Build-time network bakes Qwen, GraspGen-X, and YOLO11x. Runtime is offline.
+# Build-time network only bakes local Qwen. Runtime is offline.
 # ---------------------------------------------------------------------------
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -101,8 +101,7 @@ WORKDIR /agent/demo
 # and then runs the CMD below. team_id/token are injected via the compose env (from_env).
 CMD ["python3", "participant_app.py"]
 
-# Probe-only extra: YOLO11x for auto-approach. The graded `agent` stage already
-# has torch, ultralytics, and baked yolo11x.pt.
+# Probe-only extra. The graded `agent` stage already has torch and ultralytics.
 FROM agent AS manip-probe
 ENV YOLO_CONFIG_DIR=/agent/demo/weights
 RUN mkdir -p /agent/demo/weights

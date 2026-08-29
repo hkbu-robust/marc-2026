@@ -212,7 +212,7 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
         downloader.assert_not_called()
         hub.assert_not_called()
 
-    def test_fast_build_does_not_fetch_graspgenx(self):
+    def test_fast_build_does_not_fetch_optional_runtime_weights(self):
         downloader = Mock(side_effect=AssertionError("must not download GraspGenX"))
         hub = Mock(side_effect=AssertionError("must not download YOLO"))
         with tempfile.TemporaryDirectory() as tmp:
@@ -229,7 +229,7 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
                     hub_download=hub,
                     bake_qwen=False,
                 )
-        self.assertEqual(2, len(lines))
+        self.assertEqual(["skip qwen (MARC_QWEN_BACKEND is not local)"], lines)
         downloader.assert_not_called()
         hub.assert_not_called()
 
