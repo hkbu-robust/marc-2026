@@ -398,7 +398,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("near", result.grounding.relation)
         self.assertEqual("picnic_table", result.grounding.landmark)
 
-    def test_parking_floor_drop_submits_empty_landmark(self):
+    def test_parking_floor_drop_submits_nearest_vehicle_landmark(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
                 objects=[
@@ -430,11 +430,11 @@ class Stage1RoundTests(unittest.TestCase):
             expected_intent=Intent.BRING,
         )
         self.assertIsNotNone(result.grounding)
-        self.assertEqual("", result.grounding.landmark)
-        self.assertIsNone(result.grounding.relation)
+        self.assertEqual("police_car", result.grounding.landmark)
+        self.assertEqual("near", result.grounding.relation)
         self.assertEqual("tumbler", result.grounding.target_type)
         self.assertEqual("rig_a:tumbler:0", result.target_id)
-        self.assertEqual(result.grounding.anchor_coord, result.grounding.target_coord)
+        self.assertNotEqual(result.grounding.anchor_coord, result.grounding.target_coord)
 
     def test_sar_without_landmark_does_not_project_nearby_object(self):
         def detector(client, *, stub_path=None):
@@ -510,7 +510,7 @@ class Stage1RoundTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(result.grounding)
-        self.assertEqual("", result.grounding.landmark)
+        self.assertEqual("taxi", result.grounding.landmark)
         self.assertEqual("rig_a:person_prone:0", result.target_id)
         self.assertEqual("rig_a:taxi:0", result.anchor_id)
         self.assertNotEqual(
@@ -547,7 +547,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
         self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
 
-    def test_empty_parking_space_submits_tumbler_without_car_name(self):
+    def test_empty_parking_space_submits_tumbler_with_nearest_car(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
                 objects=[
@@ -578,7 +578,8 @@ class Stage1RoundTests(unittest.TestCase):
             projector=_geometry(),
         )
         self.assertIsNotNone(result.grounding)
-        self.assertEqual("", result.grounding.landmark)
+        self.assertEqual("police_car", result.grounding.landmark)
+        self.assertEqual("near", result.grounding.relation)
         self.assertEqual("tumbler", result.grounding.target_type)
         self.assertEqual("rig_a:tumbler:0", result.target_id)
 

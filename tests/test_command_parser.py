@@ -447,8 +447,10 @@ class CommandFixtureTests(unittest.TestCase):
         )
         from marc_agent.command_parser import implicit_anchor_classes
 
+        from marc_agent.command_parser import PARKED_VEHICLE_LANDMARKS
+
         self.assertEqual(
-            frozenset(),
+            PARKED_VEHICLE_LANDMARKS,
             implicit_anchor_classes(
                 empty, "Find the tumbler dropped in the empty parking space."
             ),

@@ -145,6 +145,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:tumbler:2", selected.target.candidate_id)
         self.assertEqual(4, len(set(calls[0].candidate_ids)))
         self.assertEqual(5, len(calls[0].images))
+        self.assertTrue(all(image.size == (512, 512) for image in calls[0].images[1:]))
         self.assertIn("including a shoe", calls[0].prompt)
 
     def test_on_prefers_mug_sitting_on_picnic_table(self):
@@ -508,7 +509,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:mug:0", target_id)
         self.assertEqual("rig_a:picnic_table:0", anchor_id)
 
-    def test_parking_lot_car_cue_does_not_invent_a_vehicle_anchor(self):
+    def test_parking_lot_car_cue_pairs_with_vehicle_anchor(self):
         text = (
             "I think I dropped my tumbler on the ground as I got out of my car "
             "in the parking lot."
@@ -541,23 +542,24 @@ class ObjectSelectionTests(unittest.TestCase):
             camera_ids=["rig_7_a"],
         )
         ranked = rank_object_candidates(parsed, round_, command_text=text)
-        self.assertTrue(all(item.anchor is None for item in ranked))
-        self.assertEqual("rig_7_a:tumbler:2", ranked[0].target.candidate_id)
+        self.assertTrue(all(item.anchor.class_name == "suv" for item in ranked))
+        self.assertEqual("rig_7_a:tumbler:3", ranked[0].target.candidate_id)
         target_id, anchor_id = parse_object_verifier_output(
-            "rig_7_a:tumbler:3|none", ranked
+            "rig_7_a:tumbler:3|rig_7_a:suv:0", ranked
         )
         self.assertEqual("rig_7_a:tumbler:3", target_id)
-        self.assertIsNone(anchor_id)
+        self.assertEqual("rig_7_a:suv:0", anchor_id)
         calls = []
         selected = select_object_candidate(
             parsed,
             round_,
             command_text=text,
-            verifier=lambda board: calls.append(board) or "rig_7_a:tumbler:2|none",
+            verifier=lambda board: calls.append(board)
+            or "rig_7_a:tumbler:3|rig_7_a:suv:0",
         )
         self.assertEqual(1, len(calls))
-        self.assertEqual("rig_7_a:tumbler:2", selected.target.candidate_id)
-        self.assertIsNone(selected.anchor)
+        self.assertEqual("rig_7_a:tumbler:3", selected.target.candidate_id)
+        self.assertEqual("rig_7_a:suv:0", selected.anchor.candidate_id)
 
     def test_verifier_truncated_prefix_resolves_unique_target(self):
         parsed = parse_command("Find the mug on the picnic table.")
@@ -574,6 +576,28 @@ class ObjectSelectionTests(unittest.TestCase):
             "rig_a|rig_a:picnic_table:0", ranked
         )
         self.assertEqual("rig_a:mug:0", target_id)
+        self.assertEqual("rig_a:picnic_table:0", anchor_id)
+
+    def test_verifier_camera_prefix_uses_best_pair_within_that_camera(self):
+        parsed = parse_command("Find the mug on the picnic table.")
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("rig_a:mug:0", "mug", (280, 200, 340, 255), "rig_a", 0.9),
+                _object("rig_a:mug:1", "mug", (350, 200, 410, 255), "rig_a", 0.7),
+                _object(
+                    "rig_a:picnic_table:0",
+                    "picnic_table",
+                    (200, 250, 450, 400),
+                    "rig_a",
+                ),
+            ],
+            camera_ids=["rig_a"],
+        )
+        ranked = rank_object_candidates(parsed, round_)
+        target_id, anchor_id = parse_object_verifier_output(
+            "rig_a|rig_a:picnic_table:0", ranked
+        )
+        self.assertEqual(ranked[0].target.candidate_id, target_id)
         self.assertEqual("rig_a:picnic_table:0", anchor_id)
 
     def test_verifier_thinking_trace_uses_last_valid_pair(self):
@@ -731,7 +755,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:tumbler:1", ranked[0].target.candidate_id)
 
 
-    def test_parking_floor_drop_does_not_pair_with_vehicle(self):
+    def test_parking_floor_drop_pairs_with_vehicle(self):
         parsed = parse_command(
             "Pick up the tumbler dropped on the parking lot floor and bring it to the owner.",
         )
@@ -769,8 +793,7 @@ class ObjectSelectionTests(unittest.TestCase):
         )
         ranked = rank_object_candidates(parsed, round_)
         self.assertTrue(ranked)
-        self.assertIsNone(ranked[0].anchor)
-        self.assertTrue(all(item.anchor is None for item in ranked))
+        self.assertEqual("police_car", ranked[0].anchor.class_name)
         self.assertEqual("rig_a:tumbler:0", ranked[0].target.candidate_id)
 
     def test_world_on_prefers_contact_inside_bench_footprint(self):
@@ -985,7 +1008,8 @@ class ObjectSelectionTests(unittest.TestCase):
             command_text="Find the tumbler dropped in the empty parking space.",
         )
         self.assertEqual("rig_a:tumbler:1", ranked[0].target.candidate_id)
-        self.assertIsNone(ranked[0].anchor)
+        self.assertIsNotNone(ranked[0].anchor)
+        self.assertIn(ranked[0].anchor.class_name, {"police_car", "normal_car_1"})
 
     def test_same_camera_floor_drop_prefers_lower_box(self):
         text = (
@@ -1245,6 +1269,55 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual("cam:tumbler:1", selected.target.candidate_id)
         self.assertEqual("qwen", selected.method)
+
+    def test_remote_verifier_tournaments_large_boards_without_dropping_candidates(self):
+        text = "Find the umbrella."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    f"cam:umbrella:{index}",
+                    "umbrella",
+                    (40.0 + 100 * index, 200.0, 80.0 + 100 * index, 260.0),
+                    "cam",
+                    0.9 - 0.1 * index,
+                )
+                for index in range(4)
+            ],
+            frames={
+                "cam": CctvFrame(
+                    "cam", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)
+                )
+            },
+            camera_ids=["cam"],
+        )
+        seen = set()
+
+        class Verifier:
+            method = "molmo_remote"
+
+            def __call__(self, board):
+                self.last_finish_reason = "stop"
+                self.last_metrics = None
+                seen.update(board.candidate_ids)
+                self.assert_board(board)
+                chosen = (
+                    "cam:umbrella:3"
+                    if "cam:umbrella:3" in board.candidate_ids
+                    else board.candidate_ids[0]
+                )
+                return f"{chosen}|none"
+
+            @staticmethod
+            def assert_board(board):
+                assert len(board.candidate_ids) <= 3
+                assert len(board.images) <= 6
+
+        selected = select_object_candidate(
+            parsed, round_, command_text=text, verifier=Verifier()
+        )
+        self.assertEqual("cam:umbrella:3", selected.target.candidate_id)
+        self.assertEqual({f"cam:umbrella:{index}" for index in range(4)}, seen)
 
     def test_parking_lot_camera_beats_park_camera_with_taxi(self):
         text = "Find the tumbler dropped in the empty parking space."

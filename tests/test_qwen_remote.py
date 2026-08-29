@@ -87,28 +87,16 @@ class QwenRemoteTests(unittest.TestCase):
         self.assertIn("rig_b: an empty road", prompts[1])
         self.assertEqual(192, max_tokens[0])
 
-    def test_verifier_caps_multimodal_requests_at_eight_images(self):
-        captured = {}
-
-        def post(_url, body, _headers, _timeout):
-            captured.update(json.loads(body))
-            return json.dumps(
-                {"choices": [{"message": {"content": "rig_a:person_prone:0|emergency"}}]}
-            ).encode("utf-8")
-
+    def test_verifier_rejects_unbatched_multimodal_requests(self):
         image = Image.new("RGB", (8, 8))
         board = CandidateBoard(
             images=(image,) * 13,
             prompt="choose",
             evidence=(),
         )
-        verifier = RemoteQwenSarVerifier(_config(), post=post)
-        with self.assertLogs("marc_agent.molmo_remote", level="WARNING") as logged:
+        verifier = RemoteQwenSarVerifier(_config(), post=lambda *_args: b"")
+        with self.assertRaisesRegex(QwenRemoteResponseError, "batch it to at most 6"):
             verifier(board)
-        content = captured["messages"][0]["content"]
-        self.assertEqual(8, sum(item["type"] == "image_url" for item in content))
-        self.assertEqual(8, verifier.last_metrics.image_count)
-        self.assertIn("image-limit requested=13 sent=8", "\n".join(logged.output))
 
     def test_payload_contains_lossless_png_image_and_deterministic_generation(self):
         image = Image.new("RGB", (32, 24), color=(20, 40, 60))

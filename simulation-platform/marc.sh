@@ -43,6 +43,45 @@ preflight() {
     || echo "WARN: nvidia container runtime not detected - GPU may not work (check nvidia-container-toolkit)."
 }
 
+gui_preflight() {
+  [[ "${HEADLESS:-false}" == "true" ]] && return
+  if [[ -z "${DISPLAY:-}" ]]; then
+    echo "ERROR: GUI requested but DISPLAY is empty. Reconnect with: ssh -Y <host>" >&2
+    exit 1
+  fi
+  local source_xauth="${XAUTHORITY:-$HOME/.Xauthority}"
+  [[ -f "$source_xauth" ]] || {
+    echo "ERROR: Xauthority cookie not found at $source_xauth" >&2
+    exit 1
+  }
+  if command -v xdpyinfo >/dev/null 2>&1; then
+    DISPLAY="$DISPLAY" XAUTHORITY="$source_xauth" xdpyinfo >/dev/null 2>&1 || {
+      echo "ERROR: $DISPLAY cannot reach your local X server." >&2
+      exit 1
+    }
+  elif command -v python3 >/dev/null 2>&1; then
+    DISPLAY="$DISPLAY" XAUTHORITY="$source_xauth" python3 -c \
+      'import ctypes, sys; x = ctypes.CDLL("libX11.so.6"); x.XOpenDisplay.restype = ctypes.c_void_p; sys.exit(not x.XOpenDisplay(None))' || {
+      echo "ERROR: $DISPLAY cannot reach your local X server." >&2
+      exit 1
+    }
+  else
+    echo "ERROR: install xdpyinfo or python3 to validate X11 forwarding." >&2
+    exit 1
+  fi
+
+  # Docker has a different hostname, so use a wildcard copy of this SSH display's cookie.
+  local cookie docker_xauth="${TMPDIR:-/tmp}/marc-xauth-$UID"
+  cookie="$(xauth -f "$source_xauth" nlist "$DISPLAY")"
+  [[ -n "$cookie" ]] || {
+    echo "ERROR: no Xauthority cookie found for $DISPLAY" >&2
+    exit 1
+  }
+  install -m 600 /dev/null "$docker_xauth"
+  printf '%s\n' "$cookie" | sed 's/^..../ffff/' | xauth -f "$docker_xauth" nmerge -
+  export XAUTHORITY="$docker_xauth"
+}
+
 ensure_base() {
   if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
     echo "[marc] building base image ($BASE_IMAGE) - first time only, this takes a while."
@@ -59,7 +98,7 @@ case "${1:-}" in
     echo "[marc] setup complete. Next: bash simulation-platform/marc.sh platform"
     ;;
   platform)
-    preflight; ensure_base
+    preflight; gui_preflight; ensure_base
     echo "[marc] platform: GHCR content image COPY --from."
     "${DC[@]}" -f "$COMPOSE_FILE" --profile platform up --build
     ;;
@@ -82,7 +121,7 @@ case "${1:-}" in
     # Problem-selection TUI, run INSIDE the platform image (reads the scenario from the content image,
     # so no scenario file is shipped in this repo). Writes ./problems.yaml (auto-used on the next run).
     shift
-    scenario="${1:-${ENV_MARC_SCENARIO:-marc2026_demo}}"
+    scenario="${1:-${ENV_MARC_SCENARIO:-marc2026_chungmu}}"
     # The TUI runs inside the platform image (to read the in-image scenario). Build it if missing
     # - the first select therefore takes a while (one-time image build), then it is instant.
     if ! docker image inspect marc-platform:practice >/dev/null 2>&1; then

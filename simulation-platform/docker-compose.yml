@@ -27,11 +27,11 @@ x-marc-common: &marc-common
   environment: &marc-env
     ACCEPT_EULA: "Y"                   # NVIDIA EULA acceptance (participant is the licensee)
     PRIVACY_CONSENT: "Y"
-    ENV_MARC_SCENARIO: "${ENV_MARC_SCENARIO:-marc2026_demo}"
+    ENV_MARC_SCENARIO: "${ENV_MARC_SCENARIO:-marc2026_chungmu}"
     HEADLESS: "${HEADLESS:-false}"
-    # GUI (HEADLESS=false): forward the host X display. Also uncomment the X11 volumes below
-    # and run `xhost +local:root` on the host. Harmless when HEADLESS=true.
-    DISPLAY: "${DISPLAY:-:0}"
+    # GUI (HEADLESS=false): preserve the SSH-forwarded display. marc.sh rejects an
+    # empty value before launch instead of silently sending Isaac to a nonexistent :0.
+    DISPLAY: "${DISPLAY:-}"
     XAUTHORITY: "/root/.Xauthority"
     ISAAC_SIM_PATH: "/isaac-sim"
     RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
@@ -93,9 +93,9 @@ services:
       - ../.runtime-data/cache/computecache:/root/.nv/ComputeCache:rw
       - ../.runtime-data/logs:/root/.nvidia-omniverse/logs:rw
       - ../.runtime-data/data:/root/.local/share/ov/data:rw
-      # To check the score panel/viewport via GUI (HEADLESS=false), uncomment + run `xhost +local:root` on the host
+      # SSH X11 uses the per-login cookie; no broad xhost permission is needed.
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${XAUTHORITY:-/root/.Xauthority}:/root/.Xauthority:rw
+      - ${XAUTHORITY:-${HOME}/.Xauthority}:/root/.Xauthority:ro
 
   dataset-gen:                         # <- marc.sh dataset-gen  (perception labels; entry = trainer.py)
     <<: *marc-common
@@ -181,10 +181,9 @@ services:
       - ../.runtime-data/cache/computecache:/root/.nv/ComputeCache:rw
       - ../.runtime-data/logs:/root/.nvidia-omniverse/logs:rw
       - ../.runtime-data/data:/root/.local/share/ov/data:rw
-      # GUI (HEADLESS=false, the default): the generator renders through the viewport, so without
-      # the host X display it fails to create a window and crashes. Run `xhost +local:root`.
+      # GUI (HEADLESS=false, the default): the generator needs a reachable X display.
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${XAUTHORITY:-/root/.Xauthority}:/root/.Xauthority:rw
+      - ${XAUTHORITY:-${HOME}/.Xauthority}:/root/.Xauthority:ro
 
   # Manipulation trainer - same unified image, only the entry differs via command.
   #   A practice tool, so it is not part of the competition scoring runtime.
@@ -209,9 +208,9 @@ services:
       - ../.runtime-data/cache/computecache:/root/.nv/ComputeCache:rw
       - ../.runtime-data/logs:/root/.nvidia-omniverse/logs:rw
       - ../.runtime-data/data:/root/.local/share/ov/data:rw
-      # GUI (HEADLESS=false): view the trainer viewport for pnp_tune. Run `xhost +local:root` on the host.
+      # GUI (HEADLESS=false): view the trainer viewport for pnp_tune.
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${XAUTHORITY:-/root/.Xauthority}:/root/.Xauthority:rw
+      - ${XAUTHORITY:-${HOME}/.Xauthority}:/root/.Xauthority:ro
 
   # Robot-base-camera YOLO dataset. Same image as manip-trainer; entry is a bind-mounted
   # generator that attaches Replicator GT to Base_Camera_Left (640x480) and writes
@@ -260,7 +259,7 @@ services:
       - ../.runtime-data/logs:/root/.nvidia-omniverse/logs:rw
       - ../.runtime-data/data:/root/.local/share/ov/data:rw
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ${XAUTHORITY:-/root/.Xauthority}:/root/.Xauthority:rw
+      - ${XAUTHORITY:-${HOME}/.Xauthority}:/root/.Xauthority:ro
 
   select:                              # <- marc.sh select  (problem-selection TUI, in-container)
     # Reuses the platform image and reads the scenario from inside it (/metacom2026/scenarios), so no

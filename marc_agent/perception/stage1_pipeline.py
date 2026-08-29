@@ -578,6 +578,7 @@ def _grounding_payload(
     selection: Optional[ObjectSelection] = None,
     fallback_class: Optional[str] = None,
     relation: Optional[Relation] = None,
+    anchor_class: Optional[str] = None,
 ) -> GroundingResult:
     del fallback_class
     implied_anchor = (
@@ -585,7 +586,7 @@ def _grounding_payload(
         and selection.anchor is not None
         and (parsed.landmark is not None or parsed.scene_hint is not None)
     )
-    landmark = parsed.landmark or (
+    landmark = parsed.landmark or anchor_class or (
         selection.anchor.class_name
         if implied_anchor
         else ""
@@ -645,7 +646,13 @@ def _compose_person(
         )
         return _compose_last_resort(candidates, projector, parsed)
     target_xyz, anchor_xyz = projected
-    grounding = _grounding_payload(parsed, person.camera_id, target_xyz, anchor_xyz)
+    grounding = _grounding_payload(
+        parsed,
+        person.camera_id,
+        target_xyz,
+        anchor_xyz,
+        anchor_class=anchor.class_name if anchor is not None else None,
+    )
     log.info(
         "[stage1] grounding camera=%s target_id=%s anchor_id=%s method=%s "
         "situation=%s target_xyz=(%.3f, %.3f, %.3f) anchor_xyz=(%.3f, %.3f, %.3f)",

@@ -5,8 +5,7 @@
 # Overlay this together with docker-compose.yml to attach an X11 display to the platform service.
 # (The base compose is headless. This overlay adds DISPLAY + the X11 socket.)
 #
-# Prerequisite (host, once): allow X server access
-#   xhost +local:root
+# Prerequisite: connect with `ssh -Y`; the SSH Xauthority cookie is mounted read-only.
 # Run:
 #   HEADLESS=false docker compose \
 #    -f docker-compose.yml -f docker-compose.gui.yml --profile platform up
@@ -15,6 +14,6 @@
 services:
   platform:
     environment:
-      DISPLAY: "${DISPLAY:-:0}"        # host X display (usually :0 or :1)
+      DISPLAY: "${DISPLAY:-}"
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw

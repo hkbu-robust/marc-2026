@@ -42,6 +42,7 @@ ObjectVerifier = Callable[["ObjectBoard"], str]
 OccupancyAt = Callable[[float, float], Optional[int]]
 
 OBJECT_BOARD_LIMIT = 12
+_REMOTE_BATCH_SIZE = 3
 _OFF_ROAD_SCENES = frozenset(PARKING_SCENES | {"park"})
 _FLOOR_PLACE_RE = re.compile(
     r"\b(?:on the (?:floor|ground|pavement)|lot floor)\b",
@@ -594,9 +595,6 @@ def rank_object_candidates(
             use_place=place_only,
         )
 
-    if place_only:
-        return unanchored(targets)
-
     anchor_names = implicit_anchor_classes(parsed, command_text)
     if not anchor_names:
         if _place_only_request(parsed, command_text):
@@ -733,22 +731,34 @@ def _annotated_view(frame, ranked: tuple[ObjectSelection, ...]):
 
 
 def _context_crop(frame, item: ObjectSelection):
-    from PIL import ImageDraw
+    from PIL import Image, ImageDraw
 
     x1, y1, x2, y2 = item.target.bbox_xyxy
-    pad = 0.2 * max(x2 - x1, y2 - y1, 32.0)
+    side = min(
+        max(frame.width, frame.height),
+        max(128.0, 3.0 * max(x2 - x1, y2 - y1)),
+    )
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
     crop_box = (
-        max(0, math.floor(x1 - pad)),
-        max(0, math.floor(y1 - pad)),
-        min(frame.width, math.ceil(x2 + pad)),
-        min(frame.height, math.ceil(y2 + pad)),
+        max(0, math.floor(cx - side / 2.0)),
+        max(0, math.floor(cy - side / 2.0)),
+        min(frame.width, math.ceil(cx + side / 2.0)),
+        min(frame.height, math.ceil(cy + side / 2.0)),
     )
     image = _bounded_image(
-        frame.rgb,
-        max_side=max(frame.width, frame.height),
+        frame.rgb, max_side=max(frame.width, frame.height)
     ).crop(crop_box)
-    image.thumbnail((640, 640))
+    image = image.resize((512, 512), Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image)
+    sx = 512 / (crop_box[2] - crop_box[0])
+    sy = 512 / (crop_box[3] - crop_box[1])
+    box = (
+        round((x1 - crop_box[0]) * sx),
+        round((y1 - crop_box[1]) * sy),
+        round((x2 - crop_box[0]) * sx),
+        round((y2 - crop_box[1]) * sy),
+    )
+    draw.rectangle(box, outline="red", width=3)
     draw.text((4, 4), item.target.candidate_id, fill="red")
     return image
 
@@ -785,8 +795,8 @@ def format_object_verifier_prompt(
         "a person are usually theirs. A unique instance is enough even beside a person. "
         "If the object is not on the named support, still pick it when it shares the "
         "landmark's camera. Reply with exactly "
-        "TARGET_ID|ANCHOR_ID and nothing else. ANCHOR_ID must be none when the request "
-        "has no landmark.\n"
+        "TARGET_ID|ANCHOR_ID and nothing else. Copy the listed anchor_id; it may be "
+        "inferred from a parsed scene hint.\n"
         f"Original request: {command_text}\n"
         f"Parsed target type: {target_type}\n"
         f"Parsed relation: {relation or 'none'}\n"
@@ -905,13 +915,14 @@ def _parse_object_token(
         if (target_id, resolved_anchor) not in allowed:
             if resolved_anchor is None:
                 return _resolve_target_only(target_id, ranked)
-            matches = {
-                pair
-                for pair in allowed
-                if pair[0].startswith(target_id) and pair[1] == resolved_anchor
-            }
-            if len(matches) == 1:
-                return next(iter(matches))
+            matches = [
+                item
+                for item in ranked
+                if item.target.candidate_id.startswith(target_id)
+                and (item.anchor.candidate_id if item.anchor else None) == resolved_anchor
+            ]
+            if matches:
+                return _pair_key(matches[0])
             raise ValueError(f"unknown pair: {target_id}|{anchor_id}")
         return target_id, resolved_anchor
     try:
@@ -936,10 +947,9 @@ def _resolve_target_only(
         prefixed = [
             item for item in ranked if item.target.candidate_id.startswith(text)
         ]
-        unique_ids = {item.target.candidate_id for item in prefixed}
-        if len(unique_ids) != 1:
+        if not prefixed:
             raise ValueError("output must be exactly TARGET_ID|ANCHOR_ID")
-        exact = [item for item in prefixed if item.target.candidate_id in unique_ids]
+        exact = prefixed
     item = exact[0]
     return (
         item.target.candidate_id,
@@ -994,25 +1004,72 @@ def select_object_candidate(
         "ok" if occupancy_at is not None else "missing",
     )
 
-    board = build_object_board(
-        command_text,
-        parsed,
-        round_,
-        board_ranked,
-        projector=projector,
-        occupancy_at=occupancy_at,
-    )
     method = str(getattr(verifier, "method", "qwen"))
     try:
+        contenders = board_ranked
+        remote = method == "molmo_remote"
+        while remote and len(contenders) > _REMOTE_BATCH_SIZE:
+            log.info(
+                "[vlm] object tournament contenders=%d batch_size=%d",
+                len(contenders),
+                _REMOTE_BATCH_SIZE,
+            )
+            winners = []
+            for offset in range(0, len(contenders), _REMOTE_BATCH_SIZE):
+                batch = contenders[offset : offset + _REMOTE_BATCH_SIZE]
+                if len(batch) == 1:
+                    winners.append(batch[0])
+                    continue
+                batch_board = build_object_board(
+                    command_text,
+                    parsed,
+                    round_,
+                    batch,
+                    max_crops=len(batch),
+                    projector=projector,
+                    occupancy_at=occupancy_at,
+                )
+                try:
+                    (target_id, anchor_id), _ = call_verifier(
+                        verifier,
+                        batch_board,
+                        lambda text, batch=batch: parse_object_verifier_output(
+                            text, batch
+                        ),
+                    )
+                    winners.append(
+                        next(
+                            item
+                            for item in batch
+                            if _pair_key(item) == (target_id, anchor_id)
+                        )
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "[vlm] object batch failed offset=%d size=%d error=%s; "
+                        "advancing geometry winner",
+                        offset,
+                        len(batch),
+                        type(exc).__name__,
+                    )
+                    winners.append(batch[0])
+            contenders = tuple(winners)
+        board = build_object_board(
+            command_text,
+            parsed,
+            round_,
+            contenders,
+            max_crops=len(contenders) if remote else None,
+            projector=projector,
+            occupancy_at=occupancy_at,
+        )
         (target_id, anchor_id), raw_output = call_verifier(
             verifier,
             board,
-            lambda text: parse_object_verifier_output(text, board_ranked),
+            lambda text: parse_object_verifier_output(text, contenders),
         )
         selected = next(
-            item
-            for item in board_ranked
-            if _pair_key(item) == (target_id, anchor_id)
+            item for item in contenders if _pair_key(item) == (target_id, anchor_id)
         )
         log.info(
             "[vlm] object verified target=%s anchor=%s backend=%s output=%s",

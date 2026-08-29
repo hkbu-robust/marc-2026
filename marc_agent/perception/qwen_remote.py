@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("marc_agent.molmo_remote")
 
-MAX_REMOTE_IMAGES = 8
+MAX_REMOTE_IMAGES = 6
 SCENE_MAX_TOKENS = 192
 
 
@@ -133,7 +133,9 @@ def _post(url: str, body: bytes, headers: Mapping[str, str], timeout_s: float) -
             raise QwenRemoteAuthenticationError(
                 f"vLLM rejected the configured API key (HTTP {exc.code})"
             ) from exc
-        raise QwenRemoteServerError(f"vLLM returned HTTP {exc.code}") from exc
+        detail = exc.read(512).decode("utf-8", errors="replace").strip()
+        suffix = f": {detail}" if detail else ""
+        raise QwenRemoteServerError(f"vLLM returned HTTP {exc.code}{suffix}") from exc
     except (TimeoutError, socket.timeout) as exc:
         raise QwenRemoteTimeout(
             f"vLLM did not respond within {timeout_s:.1f}s"
@@ -323,12 +325,10 @@ class RemoteMolmoVerifier:
         max_tokens: int | None = None,
     ) -> str:
         if len(board.images) > MAX_REMOTE_IMAGES:
-            log.warning(
-                "[molmo-remote] image-limit requested=%d sent=%d",
-                len(board.images),
-                MAX_REMOTE_IMAGES,
+            raise QwenRemoteResponseError(
+                f"candidate board has {len(board.images)} images; "
+                f"batch it to at most {MAX_REMOTE_IMAGES}"
             )
-            board = replace(board, images=board.images[:MAX_REMOTE_IMAGES])
         body = build_remote_payload(board, self.config, max_tokens=max_tokens)
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",

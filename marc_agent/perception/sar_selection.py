@@ -11,9 +11,8 @@ from enum import Enum
 from typing import Callable, Iterable, Optional
 
 from marc_agent.command_parser import (
-    PARKING_SCENES,
+    LANDMARK_TYPES,
     SEATING_LANDMARKS,
-    VEHICLE_LANDMARKS,
     ParsedCommand,
     Relation,
 )
@@ -31,7 +30,10 @@ from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidat
 _SITUATIONS = frozenset({"normal", "abnormal", "emergency", "accident"})
 _P_ID_RE = re.compile(r"^P(\d+)$", re.IGNORECASE)
 SHORTLIST_CAP = 8
-_FACE_DOWN_POSES = frozenset({"person_prone", "person_lying_down"})
+_REMOTE_BATCH_SIZE = 3
+_FACE_DOWN_POSES = frozenset(
+    {"person_prone", "person_lying_down", "person_bending"}
+)
 _SEATING_LYING_POSES = (
     (POSE_GROUPS["prostrate"] - frozenset({"person_bending"}))
     | frozenset({"person_reclining"})
@@ -171,11 +173,7 @@ def resolve_sar_anchor(
     classes = (
         frozenset({command.landmark})
         if command.landmark
-        else (
-            VEHICLE_LANDMARKS
-            if command.scene_hint in PARKING_SCENES
-            else scene_classes(command.scene_hint)
-        )
+        else (LANDMARK_TYPES if command.scene_hint else frozenset())
     )
     anchor, _ = _nearest_anchor(person, round_.objects, classes)
     return anchor
@@ -275,7 +273,7 @@ def _soft_camera_evidence(
     matches = sorted(visible & scene_classes(command.scene_hint))
     if matches:
         evidence.extend(f"scene:{item}" for item in matches)
-        score += min(1.0, 0.25 * len(matches))
+        score += min(2.0, 0.5 * len(matches))
     return tuple(evidence), score
 
 
@@ -357,7 +355,10 @@ def candidate_evidence(
 
 _POSE_CUE_CLASSES = (
     (re.compile(r"\b(?:bent|bending)\b"), frozenset({"person_bending"})),
-    (re.compile(r"\b(?:sitting|sat)\b"), frozenset({"person_sitting"})),
+    (
+        re.compile(r"\b(?:sitting|sat|climbed|climbing)\b"),
+        frozenset({"person_sitting"}),
+    ),
     (re.compile(r"\b(?:lying)\b"), frozenset({"person_lying_down"})),
     (re.compile(r"\b(?:collapsed|fell|fallen)\b"), POSE_GROUPS["prostrate"]),
     (re.compile(r"\b(?:face[\s-]*down|prone)\b"), frozenset({"person_prone"})),
@@ -516,28 +517,34 @@ def _annotated_view(frame, evidence: tuple[CandidateEvidence, ...]):
 
 
 def _context_crop(frame, item: CandidateEvidence):
-    from PIL import ImageDraw
+    from PIL import Image, ImageDraw
 
-    boxes = [item.person.bbox_xyxy]
-    if item.anchor:
-        boxes.append(item.anchor.bbox_xyxy)
-    x1 = min(box[0] for box in boxes)
-    y1 = min(box[1] for box in boxes)
-    x2 = max(box[2] for box in boxes)
-    y2 = max(box[3] for box in boxes)
-    pad = 0.2 * max(x2 - x1, y2 - y1, 32.0)
+    x1, y1, x2, y2 = item.person.bbox_xyxy
+    side = min(
+        max(frame.width, frame.height),
+        max(160.0, 2.0 * max(x2 - x1, y2 - y1)),
+    )
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
     crop_box = (
-        max(0, math.floor(x1 - pad)),
-        max(0, math.floor(y1 - pad)),
-        min(frame.width, math.ceil(x2 + pad)),
-        min(frame.height, math.ceil(y2 + pad)),
+        max(0, math.floor(cx - side / 2.0)),
+        max(0, math.floor(cy - side / 2.0)),
+        min(frame.width, math.ceil(cx + side / 2.0)),
+        min(frame.height, math.ceil(cy + side / 2.0)),
     )
     image = _bounded_image(
-        frame.rgb,
-        max_side=max(frame.width, frame.height),
+        frame.rgb, max_side=max(frame.width, frame.height)
     ).crop(crop_box)
-    image.thumbnail((640, 640))
+    image = image.resize((512, 512), Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image)
+    sx = 512 / (crop_box[2] - crop_box[0])
+    sy = 512 / (crop_box[3] - crop_box[1])
+    box = (
+        round((x1 - crop_box[0]) * sx),
+        round((y1 - crop_box[1]) * sy),
+        round((x2 - crop_box[0]) * sx),
+        round((y2 - crop_box[1]) * sy),
+    )
+    draw.rectangle(box, outline="red", width=3)
     draw.text((4, 4), item.person.candidate_id, fill="red")
     return image
 
@@ -891,16 +898,70 @@ def select_sar_candidate(
             prompt=board.prompt if board is not None else None,
         )
 
-    board = _assemble_board(
-        command_text,
-        command,
-        round_,
-        shortlist if shortlist else ranked,
-        None,
-    )
+    contenders = shortlist if shortlist else ranked
+    board = _assemble_board(command_text, command, round_, contenders, None)
     metrics = None
     if verifier is not None:
         try:
+            method = str(getattr(verifier, "method", "qwen"))
+            if method == "molmo_remote":
+                poses = _named_pose_classes(command_text, command)
+                pose_contenders = tuple(
+                    item for item in contenders if item.person.pose_class in poses
+                )
+                if pose_contenders:
+                    contenders = pose_contenders
+                    board = _assemble_board(
+                        command_text, command, round_, contenders, None
+                    )
+            while method == "molmo_remote" and len(contenders) > _REMOTE_BATCH_SIZE:
+                log.info(
+                    "[vlm] SAR tournament contenders=%d batch_size=%d",
+                    len(contenders),
+                    _REMOTE_BATCH_SIZE,
+                )
+                winners = []
+                for offset in range(0, len(contenders), _REMOTE_BATCH_SIZE):
+                    batch = contenders[offset : offset + _REMOTE_BATCH_SIZE]
+                    if len(batch) == 1:
+                        winners.append(batch[0])
+                        continue
+                    batch_board = _assemble_board(
+                        command_text, command, round_, batch, len(batch)
+                    )
+                    try:
+                        (batch_parsed, _) = call_verifier(
+                            verifier,
+                            batch_board,
+                            lambda text, batch=batch: parse_verifier_output(
+                                text, tuple(item.person.candidate_id for item in batch)
+                            ),
+                        )
+                        candidate_id, _ = batch_parsed
+                        winners.append(
+                            next(
+                                item
+                                for item in batch
+                                if item.person.candidate_id == candidate_id
+                            )
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "[vlm] SAR batch failed offset=%d size=%d error=%s; "
+                            "advancing geometry winner",
+                            offset,
+                            len(batch),
+                            type(exc).__name__,
+                        )
+                        winners.append(batch[0])
+                contenders = tuple(winners)
+            board = _assemble_board(
+                command_text,
+                command,
+                round_,
+                contenders,
+                len(contenders) if method == "molmo_remote" else None,
+            )
             (parsed, raw_output) = call_verifier(
                 verifier,
                 board,
@@ -910,7 +971,7 @@ def select_sar_candidate(
             metrics = _verifier_metrics(verifier, board)
             selected = next(
                 item.person
-                for item in board.evidence
+                for item in contenders
                 if item.person.candidate_id == candidate_id
             )
             log.info(

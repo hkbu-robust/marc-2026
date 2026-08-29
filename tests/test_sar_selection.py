@@ -181,6 +181,7 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:person_bending:0", board.candidate_ids[0])
         self.assertIn("rig_a:person_walking:0", board.candidate_ids)
         self.assertEqual(3, len(board.images))
+        self.assertEqual((512, 512), board.images[-1].size)
         self.assertIn("rig_a:trash_can:0", board.prompt)
         self.assertIn(self.text, board.prompt)
         self.assertIn("rig_a:person_walking:0", board.prompt)
@@ -843,6 +844,66 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
         self.assertEqual("valid_model_output", result.reason)
         self.assertEqual("qwen", result.method)
+
+    def test_remote_verifier_tournaments_every_shortlisted_person(self):
+        text = "Find the person lying face-down and motionless."
+        command = parse_command(text)
+        people = [
+            _person(
+                f"rig_a:person_prone:{index}",
+                "person_prone",
+                (20.0 + 60 * index, 120.0, 60.0 + 60 * index, 220.0),
+                0.9 - 0.01 * index,
+            )
+            for index in range(8)
+        ]
+        round_ = CctvDetectionRound(
+            people=people,
+            frames={"rig_a": _frame("rig_a")},
+            camera_ids=["rig_a"],
+        )
+        seen = set()
+
+        class Verifier:
+            method = "molmo_remote"
+            last_metrics = None
+            last_finish_reason = "stop"
+
+            def __call__(self, board):
+                seen.update(board.candidate_ids)
+                assert len(board.candidate_ids) <= 3
+                assert len(board.images) <= 6
+                desired = "rig_a:person_prone:7"
+                return desired if desired in board.candidate_ids else board.candidate_ids[0]
+
+        result = select_sar_candidate(text, command, round_, verifier=Verifier())
+        self.assertEqual("rig_a:person_prone:7", result.selected.candidate_id)
+        self.assertEqual({person.candidate_id for person in people}, seen)
+
+    def test_remote_verifier_keeps_explicit_pose_candidates(self):
+        text = "Find the person lying face-down and motionless."
+        command = parse_command(text)
+        round_ = CctvDetectionRound(
+            people=[
+                _person("rig_a:person_prone:0", "person_prone", (20, 120, 60, 220)),
+                _person("rig_a:person_walking:0", "person_walking", (80, 80, 130, 260)),
+            ],
+            frames={"rig_a": _frame("rig_a")},
+            camera_ids=["rig_a"],
+        )
+        seen = []
+
+        class Verifier:
+            method = "molmo_remote"
+            last_metrics = None
+            last_finish_reason = "stop"
+
+            def __call__(self, board):
+                seen.extend(board.candidate_ids)
+                return board.candidate_ids[0]
+
+        select_sar_candidate(text, command, round_, verifier=Verifier())
+        self.assertEqual(["rig_a:person_prone:0"], seen)
 
     def test_fallback_after_bad_qwen_stays_on_shortlist(self):
         with self.assertLogs("marc_agent.sar_selection", level="INFO"):
