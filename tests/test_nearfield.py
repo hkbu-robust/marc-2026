@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from marc_agent.retrieval_state import close_enough_to_search, nearfield_start_reason
+from marc_agent.retrieval_state import close_enough_to_search, nearfield_start_reason, yolo_may_center
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEMO = os.path.join(_ROOT, "demo")
@@ -43,6 +43,23 @@ class NearFieldHandoffTests(unittest.TestCase):
             "nav_reached",
             nearfield_start_reason(True, (10.0, 0.0), center, 3.0, 0.7),
         )
+
+    def test_far_box_stays_skip_and_observe(self):
+        center = (0.0, 0.0)
+        far = (15.0, 0.0)
+        self.assertEqual(
+            "skip_too_far",
+            nearfield_start_reason(False, far, center, 3.0, 0.7),
+        )
+        self.assertFalse(yolo_may_center(True, far, center, 3.0, 15.0, 0.7))
+        self.assertTrue(yolo_may_center(True, (3.5, 0.0), center, 3.0, 2.0, 0.7))
+        self.assertTrue(yolo_may_center(True, far, center, 3.0, 2.0, 0.7))
+        acquire = NearFieldAcquire(object(), detector=object())
+        acquire._phase = "scan"
+        acquire._phase_t0 = 0.0
+        lin, ang = acquire._command(1.0, 1, 0.2, 15.0, may_center=False)
+        self.assertEqual(0.0, lin)
+        self.assertEqual(0.0, ang)
 
     def test_inward_crawl_allowed_when_slightly_outside_disc(self):
         pose = (3.5, 0.0, math.pi)

@@ -13,6 +13,7 @@ from marc_agent.command_parser import parse_command
 from marc_agent.perception.sar_selection import (
     SelectionStatus,
     build_candidate_board,
+    candidate_evidence,
     parse_verifier_output,
     select_sar_candidate,
     shortlist_for_verifier,
@@ -150,6 +151,20 @@ def _downward_projector(*camera_ids: str):
     )
     ids = camera_ids or ("rig_a",)
     return CctvProjector(static_lookup({camera_id: geometry for camera_id in ids}))
+
+
+class _BoxProjector:
+    """Map (camera_id, bbox) -> world XYZ for SAR world-distance tests."""
+
+    def __init__(self, xy_by_box):
+        self._xy = {
+            (cam, tuple(box)): (float(xy[0]), float(xy[1]), 0.0)
+            for (cam, box), xy in xy_by_box.items()
+        }
+
+    def project_contact(self, camera_id, box, pose_class=None):
+        del pose_class
+        return self._xy.get((camera_id, tuple(box)))
 
 
 class SarSelectionTests(unittest.TestCase):
@@ -909,6 +924,13 @@ class SarSelectionTests(unittest.TestCase):
                     0.99,
                     "rig_a",
                 ),
+                _person(
+                    "rig_a:person_bending:0",
+                    "person_bending",
+                    (300.0, 80.0, 380.0, 360.0),
+                    0.95,
+                    "rig_a",
+                ),
             ],
             frames={"rig_a": _frame("rig_a"), "rig_b": _frame("rig_b")},
             camera_ids=["rig_a", "rig_b"],
@@ -928,6 +950,66 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual("rig_b:person_prone:0", result.selected.candidate_id)
         self.assertEqual("valid_model_output", result.reason)
+        self.assertNotIn("rig_a:person_bending:0", board.candidate_ids)
+
+    def test_world_gate_drops_far_same_pose_and_skips_verifier(self):
+        text = "Find the person bent over near the trash can who needs urgent help."
+        command = parse_command(text)
+        near_box = (300.0, 150.0, 380.0, 280.0)
+        far_box = (10.0, 150.0, 90.0, 280.0)
+        trash_box = (310.0, 200.0, 370.0, 320.0)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam_a:trash_can:0", "trash_can", trash_box, "cam_a"),
+                _object("cam_b:trash_can:0", "trash_can", trash_box, "cam_b"),
+            ],
+            people=[
+                _person(
+                    "cam_a:person_bending:0",
+                    "person_bending",
+                    near_box,
+                    0.4,
+                    "cam_a",
+                ),
+                _person(
+                    "cam_b:person_bending:0",
+                    "person_bending",
+                    far_box,
+                    0.99,
+                    "cam_b",
+                ),
+            ],
+            frames={"cam_a": _frame("cam_a"), "cam_b": _frame("cam_b")},
+            camera_ids=["cam_a", "cam_b"],
+        )
+        projector = _BoxProjector({
+            ("cam_a", near_box): (0.0, 0.0),
+            ("cam_a", trash_box): (1.7, 0.0),
+            ("cam_b", far_box): (3.7, 0.0),
+            ("cam_b", trash_box): (0.0, 0.0),
+        })
+        shortlist = shortlist_for_verifier(
+            candidate_evidence(command, round_, text),
+            command,
+            text,
+            projector,
+        )
+        self.assertEqual(
+            ("cam_a:person_bending:0",),
+            tuple(item.person.candidate_id for item in shortlist),
+        )
+        self.assertAlmostEqual(1.7, shortlist[0].world_dist_m, places=2)
+        calls = []
+        result = select_sar_candidate(
+            text,
+            command,
+            round_,
+            verifier=lambda board: calls.append(board) or "cam_b:person_bending:0",
+            projector=projector,
+        )
+        self.assertEqual([], calls)
+        self.assertEqual("cam_a:person_bending:0", result.selected.candidate_id)
+        self.assertEqual("unique_shortlist", result.reason)
 
     def test_lying_on_bench_with_prone_does_not_skip_verifier(self):
         text = "Near the taxi, find the person lying down on top of the bench."

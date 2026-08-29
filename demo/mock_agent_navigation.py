@@ -344,7 +344,7 @@ def run_nav_leg(
     goal,
     deadline,
     tol=0.7,
-    inflation_m=0.45,
+    inflation_m=0.55,
     exclude_m=0.6,
     cruise=False,
     extra_obstacles=None,
@@ -396,7 +396,10 @@ def path_is_blocked(
         if not planner._in_bounds(r, c):
             return True
         cells.append((r, c))
-    pad = 4
+    infl_c = inflate_cells(inflation_m, planner._res)
+    # Crop must outrun erosion: _erode treats the crop border as blocked, so
+    # pad < infl_c false-blocks every chord on a 5 cm grid (infl_c=11 at 0.55 m).
+    pad = max(4, infl_c + 2)
     rmin = max(0, min(r for r, _ in cells) - pad)
     rmax = min(planner._h, max(r for r, _ in cells) + pad + 1)
     cmin = max(0, min(c for _, c in cells) - pad)
@@ -408,7 +411,6 @@ def path_is_blocked(
             trav, np.logical_not(planner._overlay[rmin:rmax, cmin:cmax]))
     if extra_obstacles:
         planner._block_obstacles(trav, extra_obstacles, rmin, cmin)
-    infl_c = inflate_cells(inflation_m, planner._res)
     if infl_c > 0:
         trav = OccupancyGridPlanner._erode(trav, infl_c)
     H, W = trav.shape
@@ -683,7 +685,11 @@ class OccupancyGridPlanner:
         return wx, wy
 
     def cell_free(self, wx, wy, inflation_m=0.0) -> bool:
-        """True when occupancy is 0 at (wx, wy) with a square inflation radius."""
+        """True when occupancy is 0 at (wx, wy) with a square inflation radius.
+
+        Lidar overlay cells are blocked too so a tumbler behind a car is not a
+        legal sit-on-the-bumper goal. Occupancy 100 is never punched.
+        """
         if not self.ready:
             return False
         row, col = self._w2c(wx, wy)
@@ -696,6 +702,8 @@ class OccupancyGridPlanner:
                 if not self._in_bounds(nr, nc):
                     return False
                 if int(self._grid[nr, nc]) != 0:
+                    return False
+                if self._overlay is not None and bool(self._overlay[nr, nc]):
                     return False
         return True
 
@@ -917,6 +925,14 @@ class OccupancyGridPlanner:
             r0, r1, c0, c1, disc = sl
             self._overlay[r0:r1, c0:c1][disc] = True
             self._overlay_t[r0:r1, c0:c1][disc] = now
+
+    def replace_overlay(self, obstacles, now_s=0.0):
+        """Redraw the lidar layer from this tick's discs. Does not punch occupancy."""
+        if not self.ready or self._overlay is None:
+            return
+        self._overlay[:] = False
+        self._overlay_t[:] = 0.0
+        self.stamp_overlay(obstacles, now_s=now_s)
 
     def expire_overlay(self, now_s=0.0):
         """Free overlay cells not restamped within OVERLAY_TTL_S."""

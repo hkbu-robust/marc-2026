@@ -25,7 +25,7 @@ import threading
 from marc_sdk import MARCClient
 
 from marc_agent.command_parser import Intent
-from marc_agent.navigation_runtime import Stage2Navigator
+from marc_agent.navigation_runtime import NavStatus, Stage2Navigator
 from marc_agent.gpu_handoff import (
     after_successful_pick,
     before_graspgenx,
@@ -68,7 +68,7 @@ log = logging.getLogger("participant_app")
 STAGE2_NAV_TIMEOUT_S = 1800.0
 STAGE2_NAV_RATE_HZ = 10.0
 STAGE2_NAV_DT = 1.0 / STAGE2_NAV_RATE_HZ
-STAGE2_INFLATION_M = 0.45      # body radius plus curb pad (keeps wheels off the grass)
+STAGE2_INFLATION_M = 0.55      # body radius plus curb pad (keeps wheels off the grass)
 STAGE2_STUCK_TIME_S = 8.0      # if movement < threshold for this long, replan from the current pose
 STAGE2_STUCK_MOVE_M = 0.05
 STAGE2_REPLAN_CAP = 50         # fail closed if the crop stays sealed
@@ -329,36 +329,53 @@ class DemoParticipant:
             log.info("[Stage2] leg1 -> search-area approach %s (center=%s r=%.2f)",
                      tuple(round(v, 2) for v in approach),
                      tuple(round(v, 2) for v in search), self._state.hint_radius)
-            result = self._navigate_to(
-                self._live_approach_goal,
-                deadline,
-                tol=GOAL_TOLERANCE,
-                inflation_m=STAGE2_INFLATION_M,
-                exclude_m=0.6,
-                leg="search",
-            )
-            reached_search = result.reached
-            pose_after = c.get_world_pose()
-            pose_xy = (pose_after[0], pose_after[1]) if pose_after is not None else pose_xy
-            handoff = nearfield_start_reason(
-                reached_search, pose_xy, search, self._state.hint_radius, GOAL_TOLERANCE,
-            )
+            result = None
+            while c.is_running and c.now_s() < deadline:
+                result = self._navigate_to(
+                    self._live_approach_goal,
+                    deadline,
+                    tol=GOAL_TOLERANCE,
+                    inflation_m=STAGE2_INFLATION_M,
+                    exclude_m=0.6,
+                    leg="search",
+                )
+                reached_search = result.reached
+                pose_after = c.get_world_pose()
+                pose_xy = (pose_after[0], pose_after[1]) if pose_after is not None else pose_xy
+                handoff = nearfield_start_reason(
+                    reached_search, pose_xy, search, self._state.hint_radius, GOAL_TOLERANCE,
+                )
+                if not str(handoff).startswith("skip"):
+                    break
+                if handoff != "skip_too_far":
+                    break
+                if result.status in (NavStatus.NO_MAP, NavStatus.TIMEOUT):
+                    break
+                log.info("[Stage2] still outside search disc (%s) -- resume occupancy nav",
+                         handoff)
             log.info("[Stage2] leg1 result=%s reason=%s replans=%d yolo=%s",
-                     result.status.value, result.reason, result.replan_count, handoff)
+                     result.status.value if result is not None else "none",
+                     result.reason if result is not None else "",
+                     result.replan_count if result is not None else 0,
+                     handoff)
             dump_json(dump, "nav.json", {
-                "status": result.status.value,
-                "reason": result.reason,
+                "status": None if result is None else result.status.value,
+                "reason": None if result is None else result.reason,
                 "reached": reached_search,
-                "replan_count": result.replan_count,
+                "replan_count": 0 if result is None else result.replan_count,
                 "search": list(search) if search is not None else None,
                 "hint_radius": self._state.hint_radius,
                 "approach": list(approach),
                 "pose_xy": list(pose_xy) if pose_xy is not None else None,
                 "handoff": handoff,
-                "last_method": result.last_method,
-                "waypoint_count": len(result.path) if result.path else 0,
-                "first_waypoint": list(result.path[0]) if result.path else None,
-                "last_waypoint": list(result.path[-1]) if result.path else None,
+                "last_method": None if result is None else result.last_method,
+                "waypoint_count": 0 if result is None or not result.path else len(result.path),
+                "first_waypoint": (
+                    None if result is None or not result.path else list(result.path[0])
+                ),
+                "last_waypoint": (
+                    None if result is None or not result.path else list(result.path[-1])
+                ),
             })
         if not c.is_running:
             return

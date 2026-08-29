@@ -236,6 +236,44 @@ class CctvYoloTests(unittest.TestCase):
         self.assertEqual([], extra)
         self.assertEqual(2, detector._predict_frame.call_count)
 
+    def test_object_refine_crops_every_picnic_table_on_cameras_missing_target(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.model = object()
+        detector.names = {8: "pencilcase"}
+        detector._predict_frame = Mock(return_value=[])
+        frames = {
+            "cam_a": CctvFrame(
+                "cam_a", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)
+            ),
+            "cam_b": CctvFrame(
+                "cam_b", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)
+            ),
+        }
+        objects = [
+            ObjectCandidate(
+                "cam_a:picnic_table:0",
+                "picnic_table",
+                (30.0, 40.0, 200.0, 220.0),
+                0.9,
+                "cam_a",
+                (640, 480),
+            ),
+            ObjectCandidate(
+                "cam_b:picnic_table:0",
+                "picnic_table",
+                (40.0, 50.0, 220.0, 240.0),
+                0.8,
+                "cam_b",
+                (640, 480),
+            ),
+        ]
+        extra = detector.refine_around_landmarks(
+            frames, objects, "pencilcase", frozenset({"picnic_table"})
+        )
+        self.assertEqual([], extra)
+        self.assertEqual(2, detector._predict_frame.call_count)
+
     def test_object_refine_runs_when_another_camera_already_has_target(self):
         parsed = parse_command("Find the tumbler on the bench.")
         missed = ObjectCandidate(

@@ -8,6 +8,7 @@ is personal space (~1.2 m); a person a few metres away occupies the stall.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence
 
@@ -22,6 +23,10 @@ BAY_DIAG_FRAC = 0.16
 MIN_CAMERA_DIST_M = 0.5
 MIN_DEPTH_M = 0.15
 NORMAL_POSES = POSE_GROUPS["upright"] | POSE_GROUPS["seated"]
+_SPEAKER_LEFT_RE = re.compile(
+    r"\b(?:I\s+(?:left|dropped|set|put|placed)|left\s+my)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,11 @@ def prior_key(evidence: PriorEvidence, *, demote_owned: bool) -> tuple:
     """Sort key: unowned first (when an alternative exists), then closer, then farther."""
     owned = 1 if demote_owned and evidence.owned else 0
     return (owned, -float(evidence.camera_prox), -float(evidence.person_gap))
+
+
+def speaker_left_item(command_text: str) -> bool:
+    """True when the speaker says they left the item where they stood."""
+    return bool(_SPEAKER_LEFT_RE.search(command_text or ""))
 
 
 def distinct_target_count(ranked: Sequence) -> int:

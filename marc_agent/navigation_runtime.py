@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-from marc_agent.lidar_safety import advise, pointcloud2_xyz
+from marc_agent.lidar_safety import CLEAR_FAR, advise, overlay_discs, pointcloud2_xyz
 from marc_agent.retrieval_state import DEFAULT_GOAL_TOLERANCE
 
 _DEMO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo")
@@ -36,10 +36,9 @@ from mock_agent_navigation import (  # noqa: E402
 log = logging.getLogger("participant_app")
 
 BACKUP_V = 0.20
-ESCAPE_ANGULAR = 1.2
-CREEP_V = 0.20
 YAW_BIAS_GAIN = 0.5
 RESUME_M = 1.20
+BACKUP_LOOK_M = (0.5, 1.0, 1.5)
 
 
 class NavStatus(str, Enum):
@@ -71,35 +70,98 @@ def _occupancy_cell_free(planner, x, y) -> bool:
     return int(planner._grid[row, col]) == 0
 
 
-def _frontal_escape(planner, pose, follower, bumper_hot, escape_turn):
-    """Reverse on free road. If a detour exists, latch a turn until the bumper clears.
-
-    Returns ``(cmd, escape_turn)`` where ``cmd`` is ``(linear, angular)`` or None.
-    """
-    if not bumper_hot:
-        return None, 0.0
+def _last_free_behind(planner, pose):
+    """Last occupancy-free cell along ``-heading``, or None if reverse is sealed."""
     x, y, yaw = pose
     if not _occupancy_cell_free(planner, x, y):
-        return None, 0.0
-    turn = float(escape_turn)
-    if follower is not None and follower.path:
-        if abs(turn) < 1e-9:
-            idx = min(int(follower.idx), len(follower.path) - 1)
-            wx, wy = follower.path[idx]
-            herr = math.atan2(
-                math.sin(math.atan2(wy - y, wx - x) - yaw),
-                math.cos(math.atan2(wy - y, wx - x) - yaw),
-            )
-            turn = 1.0 if herr >= 0.0 else -1.0
-        angular = turn * ESCAPE_ANGULAR
-    else:
-        turn = 0.0
-        angular = 0.0
-    behind = BACKUP_V * 0.25
-    bx = x - behind * math.cos(float(yaw))
-    by = y - behind * math.sin(float(yaw))
-    linear = -BACKUP_V if _occupancy_cell_free(planner, bx, by) else 0.0
-    return (linear, angular), turn
+        return None
+    cc, ss = math.cos(float(yaw)), math.sin(float(yaw))
+    last = None
+    for dist in (BACKUP_V * 0.25,) + BACKUP_LOOK_M:
+        bx = x - dist * cc
+        by = y - dist * ss
+        if not _occupancy_cell_free(planner, bx, by):
+            break
+        last = (bx, by)
+    return last
+
+
+def _reverse_on_road(planner, pose):
+    """Straight reverse along ``-heading`` while the backing cells stay occupancy-free."""
+    if _last_free_behind(planner, pose) is None:
+        return None
+    return (-BACKUP_V, 0.0)
+
+
+def _frontal_escape(planner, pose, bumper_hot):
+    """Straight reverse on free road while the bumper box is hot. No yaw into the car."""
+    if not bumper_hot:
+        return None
+    return _reverse_on_road(planner, pose)
+
+
+def _overlay_ahead(planner, pose) -> bool:
+    """True when lidar overlay sits along +heading within a short look-ahead."""
+    if planner is None or not planner.ready or planner._overlay is None:
+        return False
+    x, y, yaw = pose
+    cc, ss = math.cos(float(yaw)), math.sin(float(yaw))
+    for dist in BACKUP_LOOK_M:
+        r, c = planner._w2c(x + dist * cc, y + dist * ss)
+        if planner._in_bounds(r, c) and bool(planner._overlay[r, c]):
+            return True
+    return False
+
+
+def _poly_after_start_hole(origin, waypoints, hole_m=0.20):
+    """Remaining polyline starting just outside the chassis overlay hole."""
+    if not waypoints:
+        return None
+    ox, oy = float(origin[0]), float(origin[1])
+    fx, fy = float(waypoints[0][0]), float(waypoints[0][1])
+    dx, dy = fx - ox, fy - oy
+    dist = math.hypot(dx, dy)
+    if dist <= hole_m:
+        return list(waypoints) if len(waypoints) >= 2 else None
+    t = hole_m / dist
+    return [(ox + t * dx, oy + t * dy)] + list(waypoints)
+
+
+def _remaining_blocked(planner, pose_xy, remain, inflation_m) -> bool:
+    """True when the followed path hugs occupancy or cuts a lidar disc.
+
+    Occupancy inflation uses ``[pose] + remain`` so a PathFollower chord along
+    the curb is rejected. Overlay uses the followed waypoints (or the chord
+    after the 0.20 m start hole) so the chassis hole next to a car disc does
+    not replan-loop.
+    """
+    if not remain:
+        return False
+    poly = [pose_xy] + list(remain)
+    if path_is_blocked(
+        planner, poly, inflation_m=inflation_m, ignore_overlay=True,
+    ):
+        return True
+    if len(remain) >= 2:
+        return path_is_blocked(
+            planner, remain, inflation_m=inflation_m, ignore_overlay=False,
+        )
+    skipped = _poly_after_start_hole(pose_xy, remain)
+    if skipped is None:
+        return False
+    return path_is_blocked(
+        planner, skipped, inflation_m=inflation_m, ignore_overlay=False,
+    )
+
+
+def _should_backup(planner, pose, advice) -> bool:
+    """True when NO_PATH should reverse instead of holding: lidar or overlay ahead."""
+    if advice is not None:
+        if advice.stop:
+            return True
+        if math.isfinite(advice.ahead_m) and advice.ahead_m < CLEAR_FAR:
+            return True
+    return _overlay_ahead(planner, pose)
 
 
 def _plan_attempts(inflation_m: float, allow_thin: bool = True):
@@ -157,7 +219,7 @@ class Stage2Navigator:
         self,
         client,
         dt: float = 0.10,
-        inflation_m: float = 0.45,
+        inflation_m: float = 0.55,
         exclude_m: float = 0.6,
         stuck_time_s: float = 8.0,
         stuck_move_m: float = 0.05,
@@ -175,7 +237,6 @@ class Stage2Navigator:
         self._path_inflation = float(inflation_m)
         self.last_path = None
         self.last_method = None
-        self._escape_turn = 0.0
 
     def _warm_lidar(self, deadline_s, ticks: int = 8):
         """Wait briefly so the first tick can see a cloud if one is already publishing."""
@@ -194,7 +255,7 @@ class Stage2Navigator:
         Snap an occupied/unknown goal onto the nearest free inflated cell.
         A free goal behind a wall stays put so D* can fail closed or go around.
         Never thin inflation below the configured chassis radius.
-        Lidar never enters the grid; the live corridor handles close hits.
+        Occupancy 100/unknown still fail-closed. Live lidar discs sit on overlay.
         """
         plan_goal = goal_xy
         free = getattr(planner, "cell_free", None)
@@ -223,6 +284,13 @@ class Stage2Navigator:
                 planner, chord, inflation_m=0.0, ignore_overlay=True,
             ):
                 continue
+            # Overlay + curb pad on the followed polyline. Skip a 1-point path
+            # so the chassis start hole is not treated as a blocked join.
+            poly = list(path)
+            if len(poly) >= 2 and path_is_blocked(
+                planner, poly, inflation_m=inflation, ignore_overlay=False,
+            ):
+                continue
             self._path_inflation = float(inflation)
             if abs(inflation - self.inflation_m) > 1e-9 or abs(margin - 12.0) > 1e-9:
                 log.info(
@@ -239,9 +307,9 @@ class Stage2Navigator:
         """Follow occupancy D* Lite until inside ``tol`` of ``goal_xy``.
 
         ``goal_xy`` and ``tol`` may be callables so a late Stage 2 reveal can retarget.
-        Live lidar only scales or reverses in the chassis corridor. Off-road / unknown
-        start stays fail-closed (zero, no_path). ``extra_obstacles`` is a test hook of
-        world discs fed into that corridor, not a map overlay.
+        Live lidar stamps overlay discs so D* detours unmarked cars, and still
+        scales or reverses in the chassis corridor. Off-road / unknown start stays
+        fail-closed (zero, no_path). ``extra_obstacles`` is a test hook of world discs.
         """
         client = self.client
         extra = list(extra_obstacles or [])
@@ -304,6 +372,12 @@ class Stage2Navigator:
             xyz = pointcloud2_xyz(cloud) if cloud is not None else None
             advice = advise(_merge_xyz(xyz, _world_discs_to_base(extra, pose)))
             now_s = client.now_s()
+            discs = overlay_discs(xyz, pose)
+            discs.extend(extra)
+            if planner.ready:
+                planner.expire_overlay(now_s)
+                planner.stamp_overlay(discs, now_s=now_s)
+                planner.clear_start_hole((x, y), exclude_m=0.20)
             if advice.stop:
                 stop_latched = True
             elif not math.isfinite(advice.ahead_m) or advice.ahead_m >= RESUME_M:
@@ -317,10 +391,17 @@ class Stage2Navigator:
                 replan_reason = ReplanReason.GOAL_RETARGET
             last_goal = cur_goal
 
+            falling_edge = prev_frontal and not bumper_hot
             if bumper_hot:
                 last_reason = ReplanReason.FRONTAL
                 if not prev_frontal:
-                    log.info("[Stage2] %s FRONTAL lidar stop -> reverse on free road", leg)
+                    log.info("[Stage2] %s FRONTAL lidar stop -> reverse, stamp, replan", leg)
+                    need_replan = True
+                    replan_reason = ReplanReason.FRONTAL
+            elif falling_edge:
+                log.info("[Stage2] %s bumper clear -> replan around overlay", leg)
+                need_replan = True
+                replan_reason = ReplanReason.FRONTAL
             prev_frontal = bumper_hot
 
             if last_xy is not None:
@@ -334,13 +415,10 @@ class Stage2Navigator:
                     last_progress_t = client.now_s()
             last_xy = (x, y)
 
-            if follower is not None and not need_replan:
+            if follower is not None and not need_replan and not bumper_hot:
                 remain = list(follower.path[follower.idx:])
                 if remain and _occupancy_cell_free(planner, x, y):
-                    join = [(x, y), remain[0]]
-                    if path_is_blocked(
-                        planner, join, inflation_m=0.0, ignore_overlay=True,
-                    ):
+                    if _remaining_blocked(planner, (x, y), remain, self.inflation_m):
                         log.info("[Stage2] %s path blocked -> replan", leg)
                         last_reason = ReplanReason.PATH_BLOCKED
                         need_replan = True
@@ -375,6 +453,7 @@ class Stage2Navigator:
                             path=self.last_path, last_method=self.last_method,
                         )
                     log.info("[Stage2] %s replan reason=%s count=%d", leg, replan_reason, n_replan)
+                planner.clear_start_hole((x, y), exclude_m=0.20)
                 path = self._plan_path(planner, (x, y), cur_goal, allow_thin=True)
                 if path:
                     follower = PathFollower(path, passthrough=self.cruise)
@@ -401,13 +480,11 @@ class Stage2Navigator:
                                     leg, planner.last_status, sr, sc, sv, start_trav,
                                     gr, gc, gv, goal_trav)
                         last_log_t = now_s
-                    cmd, self._escape_turn = _frontal_escape(
-                        planner, (x, y, yaw), None, bumper_hot, self._escape_turn,
-                    )
+                    cmd = _frontal_escape(planner, (x, y, yaw), bumper_hot)
+                    if cmd is None and _should_backup(planner, (x, y, yaw), advice):
+                        cmd = _reverse_on_road(planner, (x, y, yaw))
                     if cmd is not None:
                         client.send_cmd_vel(cmd[0], cmd[1])
-                    elif _occupancy_cell_free(planner, x, y):
-                        client.send_cmd_vel(CREEP_V, 0.0)
                     else:
                         client.send_cmd_vel(0.0, 0.0)
                     client.sleep(self.dt)
@@ -429,9 +506,7 @@ class Stage2Navigator:
             else:
                 linear, angular = 0.0, 0.0
 
-            cmd, self._escape_turn = _frontal_escape(
-                planner, (x, y, yaw), follower, bumper_hot, self._escape_turn,
-            )
+            cmd = _frontal_escape(planner, (x, y, yaw), bumper_hot)
             if cmd is not None:
                 linear, angular = cmd
             else:

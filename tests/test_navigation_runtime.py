@@ -15,7 +15,12 @@ _DEMO = os.path.join(_ROOT, "demo")
 if _DEMO not in sys.path:
     sys.path.insert(0, _DEMO)
 
-from marc_agent.navigation_runtime import NavStatus, Stage2Navigator, _plan_attempts
+from marc_agent.navigation_runtime import (
+    NavStatus,
+    Stage2Navigator,
+    _frontal_escape,
+    _plan_attempts,
+)
 from marc_agent.retrieval_state import search_area_approach_goal
 
 
@@ -96,6 +101,7 @@ class FakeClient:
         lidar_after_s=None,
         lidar_origin_max_m=None,
         lidar_until_s=None,
+        lidar_world_xyz=None,
     ):
         self._pose = [float(start[0]), float(start[1]), float(start[2])]
         self._t = 0.0
@@ -106,6 +112,7 @@ class FakeClient:
         self._occ = occ
         self.stop_after_s = stop_after_s
         self._lidar_xyz = lidar_xyz
+        self._lidar_world = lidar_world_xyz
         self._lidar_after_s = lidar_after_s
         self._lidar_origin = (float(start[0]), float(start[1]))
         self._lidar_origin_max_m = lidar_origin_max_m
@@ -137,8 +144,6 @@ class FakeClient:
         return self._occ
 
     def get_lidar(self):
-        if self._lidar_xyz is None:
-            return None
         if self._lidar_after_s is not None and self._t < float(self._lidar_after_s):
             return None
         if self._lidar_until_s is not None and self._t >= float(self._lidar_until_s):
@@ -152,6 +157,17 @@ class FakeClient:
                 self._lidar_left_origin = True
             if self._lidar_left_origin:
                 return None
+        if self._lidar_world is not None:
+            x, y, yaw = self._pose
+            cc, ss = math.cos(yaw), math.sin(yaw)
+            rows = []
+            for item in self._lidar_world:
+                dx = float(item[0]) - x
+                dy = float(item[1]) - y
+                rows.append([dx * cc + dy * ss, -dx * ss + dy * cc, float(item[2])])
+            return _xyz_cloud(rows)
+        if self._lidar_xyz is None:
+            return None
         return _xyz_cloud(self._lidar_xyz)
 
     def get_imu(self):
@@ -235,6 +251,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertIn("snapshot_approach_goal", src)
         self.assertIn("expected_intent=Intent.BRING", src)
         self.assertIn("MARC_STAGE2_MOCK_VLA", src)
+        self.assertIn("STAGE2_INFLATION_M = 0.55", src)
 
     def test_unknown_cells_are_not_traversable(self):
         grid = np.full((20, 40), -1, dtype=np.int8)
@@ -328,7 +345,25 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual(0, inflate_cells(0.0, 0.5))
         self.assertEqual(1, inflate_cells(0.25, 0.5))
         self.assertEqual(1, inflate_cells(0.45, 0.5))
+        self.assertEqual(2, inflate_cells(0.55, 0.5))
         self.assertEqual(9, inflate_cells(0.45, 0.05))
+        self.assertEqual(11, inflate_cells(0.55, 0.05))
+
+    def test_fine_grid_free_chord_not_eaten_by_inflation_crop(self):
+        from mock_agent_navigation import OccupancyGridPlanner, path_is_blocked
+
+        res = 0.05
+        grid = np.zeros((80, 200), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, res, 0.0, 0.0)
+        start = (1.0, 2.0)
+        goal = (8.0, 2.0)
+        self.assertFalse(
+            path_is_blocked(
+                planner, [start, goal], inflation_m=0.55, ignore_overlay=True,
+            ),
+            "0.55 m pad must not false-block a free 5 cm-grid chord",
+        )
 
     def test_coarse_grid_inflation_keeps_path_off_the_curb(self):
         from mock_agent_navigation import OccupancyGridPlanner
@@ -569,7 +604,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         client = FakeClient(
             [1.0, 5.0, 0.0],
             occ=occ,
-            lidar_xyz=[[2.0, 0.0, 0.4]],
+            lidar_world_xyz=[(3.0, 5.0, 0.4)],
             lidar_after_s=0.3,
         )
         nav = Stage2Navigator(
@@ -597,8 +632,12 @@ class NavigationRuntimeTests(unittest.TestCase):
             replan_cap=8,
         )
         nav.navigate_to((16.0, 5.0), 3.0, leg="search", tol=0.7)
-        reverse = [v for v, _w in client.cmds if v < -1e-6]
+        reverse = [(v, w) for v, w in client.cmds if v < -1e-6]
         self.assertTrue(reverse, "0.5 m corridor hit must reverse, got %s" % client.cmds[:12])
+        self.assertTrue(
+            all(abs(w) < 1e-9 for _v, w in reverse),
+            "frontal reverse must be straight, got %s" % reverse[:8],
+        )
 
     def test_lidar_ahead_reverses_then_goes_around(self):
         grid = np.zeros((20, 40), dtype=np.int8)
@@ -624,26 +663,37 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertTrue(reverse, "expected reverse on free road with a frontal hit")
         self.assertTrue(forward, "expected forward after the bumper box cleared")
         self.assertLess(min(reverse), max(forward))
+        self.assertTrue(
+            all(abs(w) < 1e-9 for v, w in client.cmds if v < -1e-6),
+            "frontal reverse must not yaw into the car",
+        )
+        path = result.path or ()
+        self.assertTrue(
+            any(abs(wy - 5.0) > 0.4 for _wx, wy in path),
+            "after bumper clear, D* must leave the car line, got %s" % (path,),
+        )
 
     def test_overlay_narrow_strip_keeps_dstar_detour(self):
         from mock_agent_navigation import OccupancyGridPlanner, path_is_blocked
 
         res = 0.1
         grid = np.full((40, 80), 100, dtype=np.int8)
-        grid[2:18, :] = 0
+        grid[2:32, :] = 0
         occ = _Occ(grid, res, 0.0, 0.0)
         helper = OccupancyGridPlanner()
         helper.update_from_array(grid, res, 0.0, 0.0)
-        start = helper._c2w(3, 8)
-        goal = helper._c2w(10, 70)
-        disc = helper._c2w(10, 35) + (0.35,)
+        start = helper._c2w(16, 8)
+        goal = helper._c2w(16, 70)
+        disc = helper._c2w(16, 35) + (0.35,)
+        hug = helper._c2w(3, 8)
+        hug_goal = helper._c2w(3, 70)
         planner = OccupancyGridPlanner()
         planner.update_from_array(grid, res, 0.0, 0.0)
         planner.stamp_overlay([disc], now_s=1.0)
         planner.clear_start_hole(start, exclude_m=0.20)
-        hug = planner.plan(start, goal, inflation_m=0.0, snap_m=8.0, margin_m=12.0)
-        self.assertIsNotNone(hug)
-        chord = [start] + list(hug)
+        curb = planner.plan(hug, hug_goal, inflation_m=0.0, snap_m=8.0, margin_m=12.0)
+        self.assertIsNotNone(curb)
+        chord = [hug] + list(curb)
         self.assertTrue(
             path_is_blocked(planner, chord, inflation_m=0.25, ignore_overlay=True),
             "0.25 m occupancy inflation should reject the curb-hugging overlay detour",
@@ -684,7 +734,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         client = FakeClient(
             [0.5, 1.55, 0.0],
             occ=occ,
-            lidar_xyz=[[0.4, 1.2, 0.4]],
+            lidar_xyz=[[0.4, 2.0, 0.4]],
         )
         nav = Stage2Navigator(
             client,
@@ -707,10 +757,200 @@ class NavigationRuntimeTests(unittest.TestCase):
         planner.update_from_array(grid, res, 0.0, 0.0)
         start = (2.0, 2.0)
         ahead = (2.4, 2.0)
-        planner.stamp_overlay([(ahead[0], ahead[1], 0.15)], now_s=1.0)
+        planner.stamp_overlay([(ahead[0], ahead[1], 0.45)], now_s=1.0)
         planner.clear_start_hole(start, exclude_m=0.20)
         row, col = planner._w2c(ahead[0], ahead[1])
         self.assertTrue(bool(planner._overlay[row, col]))
+
+    def test_side_lidar_does_not_stamp_overlay_on_the_road(self):
+        from mock_agent_navigation import OccupancyGridPlanner, path_is_blocked
+        from marc_agent.lidar_safety import overlay_discs
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        start = (1.0, 5.0)
+        goal = (16.0, 5.0)
+        pose = (start[0], start[1], 0.0)
+        side = overlay_discs(np.asarray([[0.4, 2.0, 0.4]], dtype=np.float32), pose)
+        self.assertEqual([], side)
+        planner.stamp_overlay(side, now_s=1.0)
+        self.assertFalse(path_is_blocked(planner, [start, goal], inflation_m=0.0))
+        corridor = overlay_discs(np.asarray([[2.0, 0.0, 0.4]], dtype=np.float32), pose)
+        self.assertTrue(corridor)
+        planner.stamp_overlay(corridor, now_s=1.0)
+        self.assertTrue(path_is_blocked(planner, [start, goal], inflation_m=0.0))
+
+    def test_live_lidar_disc_detours_on_free_occupancy(self):
+        from mock_agent_navigation import OccupancyGridPlanner, path_is_blocked
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        start = (1.0, 5.0)
+        goal = (16.0, 5.0)
+        car = (3.0, 5.0, 0.45)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        planner.stamp_overlay([car], now_s=1.0)
+        planner.clear_start_hole(start, exclude_m=0.20)
+        chord = [start, goal]
+        self.assertTrue(
+            path_is_blocked(planner, chord, inflation_m=0.0),
+            "straight chord through a live lidar disc must be blocked",
+        )
+        self.assertFalse(
+            path_is_blocked(planner, chord, inflation_m=0.0, ignore_overlay=True),
+            "occupancy-only must still see free cells",
+        )
+        row, col = planner._w2c(car[0], car[1])
+        self.assertTrue(bool(planner._overlay[row, col]))
+        nav = Stage2Navigator(
+            FakeClient([start[0], start[1], 0.0], occ=occ, lidar_world_xyz=[(3.0, 5.0, 0.4)]),
+            dt=0.10,
+            inflation_m=0.25,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=20,
+        )
+        planned = nav._plan_path(planner, start, goal)
+        self.assertIsNotNone(planned)
+        through_plan = [
+            (wx, wy) for wx, wy in planned
+            if abs(wy - 5.0) < 0.30 and abs(wx - 3.0) < 0.40
+        ]
+        self.assertEqual(
+            [], through_plan, "_plan_path must not cut the chassis disc, got %s" % (planned,),
+        )
+        result = nav.navigate_to(goal, 40.0, leg="search", tol=0.7)
+        self.assertEqual("reached", result.status.value)
+        self.assertTrue(any(v > 1e-6 for v, _w in nav.client.cmds))
+        path = result.path or ()
+        through = [
+            (wx, wy) for wx, wy in path
+            if abs(wy - 5.0) < 0.30 and abs(wx - 3.0) < 0.40
+        ]
+        self.assertEqual([], through, "D* must detour around the lidar disc, got %s" % (path,))
+
+    def test_plan_path_does_not_punch_goal_overlay(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        start = (1.0, 5.0)
+        goal = (16.0, 5.0)
+        bumper = (15.6, 5.0, 0.4)
+        planner.stamp_overlay([bumper], now_s=1.0)
+        planner.clear_start_hole(start, exclude_m=0.20)
+        nav = Stage2Navigator(FakeClient([start[0], start[1], 0.0]), inflation_m=0.25)
+        nav._plan_path(planner, start, goal)
+        row, col = planner._w2c(bumper[0], bumper[1])
+        self.assertTrue(bool(planner._overlay[row, col]))
+        planner.clear_goal_hole(goal, exclude_m=0.6)
+        self.assertFalse(
+            bool(planner._overlay[row, col]),
+            "0.6 m goal hole would erase a bumper disc; live nav must not call it",
+        )
+
+    def test_remaining_path_uses_inflation_pad(self):
+        from mock_agent_navigation import OccupancyGridPlanner, path_is_blocked
+
+        res = 0.1
+        grid = np.full((30, 80), 100, dtype=np.int8)
+        grid[10:21, :] = 0
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, res, 0.0, 0.0)
+        start = planner._c2w(10, 8)
+        goal = planner._c2w(10, 70)
+        self.assertTrue(
+            path_is_blocked(planner, [start, goal], inflation_m=0.55),
+            "0.55 m pad must reject a curb-hugging remaining chord",
+        )
+        self.assertFalse(
+            path_is_blocked(
+                planner, [start, goal], inflation_m=0.0, ignore_overlay=True,
+            ),
+            "raw occupancy 0 along the curb cell must stay open",
+        )
+
+    def test_no_path_frontal_reverses_instead_of_creep(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        grid[:, 20] = 100
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([2.0, 5.0, 0.0], occ=occ, lidar_xyz=[[0.5, 0.0, 0.4]])
+        nav = Stage2Navigator(
+            client,
+            dt=0.10,
+            inflation_m=0.55,
+            exclude_m=0.4,
+            stuck_time_s=30.0,
+            replan_cap=8,
+        )
+        nav.navigate_to((16.0, 5.0), 2.0, leg="search", tol=0.7)
+        reverse = [(v, w) for v, w in client.cmds if v < -1e-6]
+        self.assertTrue(reverse, "NO_PATH with a frontal disc must reverse, got %s" % client.cmds[:12])
+        self.assertFalse(
+            any(v > 1e-6 for v, _w in client.cmds),
+            "occupancy-free NO_PATH must not creep forward, got %s" % client.cmds[:12],
+        )
+        self.assertTrue(all(abs(w) < 1e-9 for _v, w in reverse))
+
+    def test_overlay_union_survives_empty_cloud_until_ttl(self):
+        from mock_agent_navigation import OVERLAY_TTL_S, OccupancyGridPlanner
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        disc = (5.0, 5.0, 0.45)
+        planner.stamp_overlay([disc], now_s=1.0)
+        row, col = planner._w2c(5.0, 5.0)
+        planner.expire_overlay(2.0)
+        planner.stamp_overlay([], now_s=2.0)
+        self.assertTrue(
+            bool(planner._overlay[row, col]),
+            "union stamp must keep the disc when the next cloud is empty",
+        )
+        planner.expire_overlay(1.0 + OVERLAY_TTL_S + 0.1)
+        self.assertFalse(bool(planner._overlay[row, col]))
+
+    def test_goal_snap_skips_overlay_disc(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        tumbler = (8.0, 5.0)
+        planner.stamp_overlay([(tumbler[0], tumbler[1], 0.45)], now_s=1.0)
+        self.assertFalse(planner.cell_free(tumbler[0], tumbler[1], 0.0))
+        snapped = planner.nearest_free_xy(tumbler, inflation_m=0.55)
+        self.assertIsNotNone(snapped)
+        self.assertGreater(
+            math.hypot(snapped[0] - tumbler[0], snapped[1] - tumbler[1]),
+            0.40,
+        )
+
+    def test_live_loop_unions_overlay_not_replace(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(root, "marc_agent", "navigation_runtime.py")
+        with open(path, encoding="utf-8") as stream:
+            src = stream.read()
+        self.assertNotIn("replace_overlay", src)
+        self.assertIn("stamp_overlay", src)
+        self.assertIn("expire_overlay", src)
+        self.assertIn("inflation_m=self.inflation_m", src)
+
+    def test_frontal_escape_is_straight_reverse(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.zeros((20, 40), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.5, 0.0, 0.0)
+        pose = (2.0, 5.0, 0.0)
+        self.assertIsNone(_frontal_escape(planner, pose, False))
+        cmd = _frontal_escape(planner, pose, True)
+        self.assertIsNotNone(cmd)
+        self.assertLess(cmd[0], 0.0)
+        self.assertEqual(0.0, cmd[1])
 
 
 if __name__ == "__main__":

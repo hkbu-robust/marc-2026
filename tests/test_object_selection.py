@@ -1465,6 +1465,122 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:mug:0", ranked[0].target.candidate_id)
         self.assertEqual("target", ranked[0].match)
 
+    def test_named_near_ranks_by_world_metres_not_pixel_score(self):
+        text = "Find the umbrella next to the trash can."
+        parsed = parse_command(text)
+        park_umb = (200.0, 200.0, 260.0, 280.0)
+        park_trash = (210.0, 210.0, 250.0, 300.0)
+        owned_umb = (40.0, 300.0, 90.0, 380.0)
+        owned_trash = (200.0, 200.0, 280.0, 360.0)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam_park:umbrella:0", "umbrella", park_umb, "cam_park", 0.99),
+                _object("cam_park:trash_can:0", "trash_can", park_trash, "cam_park"),
+                _object("cam_own:umbrella:0", "umbrella", owned_umb, "cam_own", 0.4),
+                _object("cam_own:trash_can:0", "trash_can", owned_trash, "cam_own"),
+            ],
+            camera_ids=["cam_park", "cam_own"],
+        )
+
+        class _XY:
+            def project_contact(self, camera_id, box, **_kwargs):
+                key = (camera_id, tuple(box))
+                return {
+                    ("cam_park", park_umb): (10.0, 0.0, 0.0),
+                    ("cam_park", park_trash): (14.0, 0.0, 0.0),
+                    ("cam_own", owned_umb): (0.0, 0.0, 0.0),
+                    ("cam_own", owned_trash): (0.4, 0.0, 0.0),
+                }.get(key)
+
+        ranked = rank_object_candidates(
+            parsed, round_, projector=_XY(), command_text=text,
+        )
+        self.assertEqual("cam_own:umbrella:0", ranked[0].target.candidate_id)
+
+    def test_first_person_near_keeps_owned_pair(self):
+        text = (
+            "Find the umbrella I left leaning against the trash can."
+        )
+        parsed = parse_command(text)
+        owned_umb = (80.0, 260.0, 140.0, 340.0)
+        owned_trash = (150.0, 200.0, 250.0, 400.0)
+        empty_umb = (200.0, 200.0, 240.0, 250.0)
+        empty_trash = (205.0, 205.0, 235.0, 255.0)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam_own:umbrella:0", "umbrella", owned_umb, "cam_own", 0.4),
+                _object("cam_own:trash_can:0", "trash_can", owned_trash, "cam_own"),
+                _object("cam_park:umbrella:0", "umbrella", empty_umb, "cam_park", 0.99),
+                _object("cam_park:trash_can:0", "trash_can", empty_trash, "cam_park"),
+            ],
+            people=[
+                _person(
+                    "cam_own:person_standing:0",
+                    (40.0, 180.0, 200.0, 400.0),
+                    "cam_own",
+                    "person_walking",
+                ),
+            ],
+            camera_ids=["cam_own", "cam_park"],
+        )
+
+        class _XY:
+            def project_contact(self, camera_id, box, **_kwargs):
+                key = (camera_id, tuple(box))
+                return {
+                    ("cam_own", owned_umb): (0.0, 0.0, 0.0),
+                    ("cam_own", owned_trash): (0.5, 0.0, 0.0),
+                    ("cam_park", empty_umb): (20.0, 0.0, 0.0),
+                    ("cam_park", empty_trash): (24.0, 0.0, 0.0),
+                }.get(key)
+
+        ranked = rank_object_candidates(
+            parsed, round_, projector=_XY(), command_text=text,
+        )
+        self.assertEqual("cam_own:umbrella:0", ranked[0].target.candidate_id)
+
+    def test_road_taxi_prefers_occupancy_road_and_closer_taxi(self):
+        text = "Find the umbrella on the road next to the taxi."
+        parsed = parse_command(text)
+        self.assertEqual("road", parsed.scene_hint)
+        self.assertEqual("taxi", parsed.landmark)
+        park_umb = (40.0, 300.0, 80.0, 380.0)
+        park_taxi = (90.0, 280.0, 400.0, 420.0)
+        road_umb = (200.0, 200.0, 240.0, 250.0)
+        road_taxi = (250.0, 180.0, 400.0, 360.0)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam_park:umbrella:0", "umbrella", park_umb, "cam_park", 0.99),
+                _object("cam_park:taxi:0", "taxi", park_taxi, "cam_park"),
+                _object("cam_park:bench:0", "bench", (20.0, 20.0, 180.0, 120.0), "cam_park"),
+                _object("cam_road:umbrella:0", "umbrella", road_umb, "cam_road", 0.4),
+                _object("cam_road:taxi:0", "taxi", road_taxi, "cam_road"),
+            ],
+            camera_ids=["cam_park", "cam_road"],
+        )
+
+        class _XY:
+            def project_contact(self, camera_id, box, **_kwargs):
+                key = (camera_id, tuple(box))
+                return {
+                    ("cam_park", park_umb): (0.0, 10.0, 0.0),
+                    ("cam_park", park_taxi): (8.0, 10.0, 0.0),
+                    ("cam_road", road_umb): (0.0, 0.0, 0.0),
+                    ("cam_road", road_taxi): (1.0, 0.0, 0.0),
+                }.get(key)
+
+        def occupancy_at(x, y):
+            return -1 if y >= 5.0 else 0
+
+        ranked = rank_object_candidates(
+            parsed,
+            round_,
+            projector=_XY(),
+            command_text=text,
+            occupancy_at=occupancy_at,
+        )
+        self.assertEqual("cam_road:umbrella:0", ranked[0].target.candidate_id)
+
 
 if __name__ == "__main__":
     unittest.main()

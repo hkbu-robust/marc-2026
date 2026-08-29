@@ -15,6 +15,7 @@ from marc_agent.retrieval_state import (
     nearfield_start_reason,
     search_area_approach_goal,
     snapshot_approach_goal,
+    yolo_may_center,
 )
 
 
@@ -108,6 +109,8 @@ class RetrievalStateTests(unittest.TestCase):
             "close_enough",
             nearfield_start_reason(False, (3.5, 0.0), (0.0, 0.0), 3.0, 0.7),
         )
+        self.assertFalse(yolo_may_center(True, (15.0, 0.0), (0.0, 0.0), 3.0, 15.0))
+        self.assertTrue(yolo_may_center(True, (3.5, 0.0), (0.0, 0.0), 3.0, 4.0))
 
     def test_snapshot_approach_does_not_slide_with_pose(self):
         center = (-44.38, 121.12)

@@ -14,6 +14,7 @@ from marc_agent.perception.lost_item_priors import (
     evidence_nearfield,
     parked_vehicle_count,
     prior_key,
+    speaker_left_item,
     stall_is_empty,
 )
 from marc_agent.types import ObjectCandidate, PersonCandidate
@@ -84,6 +85,16 @@ class LostItemPriorsTests(unittest.TestCase):
         far = evidence_nearfield((0.0, 0.0), 0.5, people_xy=((5.0, 0.0),))
         self.assertFalse(far.owned)
         self.assertTrue(math.isfinite(far.person_gap))
+
+    def test_speaker_left_item_keeps_first_person_leave(self):
+        self.assertTrue(
+            speaker_left_item(
+                "I stopped to throw something in the bin and left my umbrella "
+                "leaning against the trash can."
+            )
+        )
+        self.assertTrue(speaker_left_item("Find the sunblock I left next to the bench."))
+        self.assertFalse(speaker_left_item("Find the umbrella next to the trash can."))
 
     def test_stall_empty_unless_person_or_overlapping_vehicle(self):
         vacant = _object("rig_a:tumbler:1", (500.0, 400.0, 530.0, 440.0))

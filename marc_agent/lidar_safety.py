@@ -1,12 +1,13 @@
-"""Local lidar corridor: slow or stop in the chassis envelope, never paint the map.
+"""Local lidar corridor plus world discs for the occupancy overlay.
 
-``get_lidar()`` is already robot/base frame (REP-103, +X forward). Occupancy D* stays
-the only global layer. This module classifies live hits: pad/ground/self are ignored,
-side objects do not stop, and only a body-height box ahead of the bumper forces reverse.
+``get_lidar()`` is already robot/base frame (REP-103, +X forward). Body-height hits
+feed a chassis corridor (stop / slow / yaw) and cluster into world discs so D* can
+detour around unmarked cars. Pad/ground/self are ignored; side objects do not stop.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -22,6 +23,8 @@ STOP_X_MAX = 0.80
 CORRIDOR_Y = 0.55
 CLEAR_FAR = 2.50
 NUDGE_Y = 0.80
+DISC_R = BODY_R
+_BIN_M = 0.25
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,36 @@ def _usable(xyz) -> Optional[np.ndarray]:
     if pts.shape[0] == 0:
         return None
     return pts
+
+
+def overlay_discs(xyz, pose, radius: float = DISC_R) -> list[tuple[float, float, float]]:
+    """Cluster corridor body-height hits into world discs for ``stamp_overlay``.
+
+    Only the bumper / nudge window is stamped (same as ``advise``), with a chassis
+    pad rather than a car radius. Hits are quantized in world XY so a bumper cloud
+    becomes a handful of discs. Empty or unusable clouds yield ``[]``.
+    """
+    pts = _usable(xyz)
+    if pts is None or pose is None or len(pose) < 3:
+        return []
+    x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
+    cc, ss = math.cos(yaw), math.sin(yaw)
+    bins: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    for px, py, _pz in pts:
+        fx, fy = float(px), float(py)
+        if fx < STOP_X_MIN or fx > CLEAR_FAR or abs(fy) > NUDGE_Y:
+            continue
+        wx = x + fx * cc - fy * ss
+        wy = y + fx * ss + fy * cc
+        key = (int(round(wx / _BIN_M)), int(round(wy / _BIN_M)))
+        bins.setdefault(key, []).append((wx, wy))
+    rad = float(radius)
+    discs = []
+    for group in bins.values():
+        mx = sum(pt[0] for pt in group) / len(group)
+        my = sum(pt[1] for pt in group) / len(group)
+        discs.append((mx, my, rad))
+    return discs
 
 
 def _speed_scale(clearance: float) -> float:
