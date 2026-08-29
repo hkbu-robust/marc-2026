@@ -58,7 +58,13 @@ from marc_agent.retrieval_state import (
 from marc_agent.round_clock import RoundClock
 from mock_agent_vla import MockVLAGrounding
 from marc_agent.lidar_safety import advise, pointcloud2_xyz
-from nearfield import NearFieldAcquire, make_detector
+from nearfield import (
+    NearFieldAcquire,
+    PEEK_PERIOD_S,
+    PEEK_RANGE_PAD_M,
+    make_detector,
+    peek_yolo_handoff,
+)
 
 log = logging.getLogger("participant_app")
 
@@ -329,6 +335,27 @@ class DemoParticipant:
             log.info("[Stage2] leg1 -> search-area approach %s (center=%s r=%.2f)",
                      tuple(round(v, 2) for v in approach),
                      tuple(round(v, 2) for v in search), self._state.hint_radius)
+            last_peek = [0.0]
+
+            def _yolo_handoff(pose):
+                center = self._state.search_xy()
+                if center is None or pose is None or len(pose) < 2:
+                    return False
+                dist = math.hypot(
+                    float(pose[0]) - float(center[0]),
+                    float(pose[1]) - float(center[1]),
+                )
+                if dist > float(self._state.hint_radius or 0.0) + PEEK_RANGE_PAD_M:
+                    return False
+                now = c.now_s()
+                if now - last_peek[0] < PEEK_PERIOD_S:
+                    return False
+                last_peek[0] = now
+                return peek_yolo_handoff(
+                    c, detector, pose, center, self._state.hint_radius,
+                    target_type=self._state.target_type or "",
+                )
+
             result = None
             while c.is_running and c.now_s() < deadline:
                 result = self._navigate_to(
@@ -338,6 +365,9 @@ class DemoParticipant:
                     inflation_m=STAGE2_INFLATION_M,
                     exclude_m=0.6,
                     leg="search",
+                    search_xy=self._state.search_xy(),
+                    search_radius=self._state.hint_radius,
+                    handoff_fn=_yolo_handoff,
                 )
                 reached_search = result.reached
                 pose_after = c.get_world_pose()
@@ -575,7 +605,8 @@ class DemoParticipant:
 
     def _navigate_to(self, goal, deadline, tol=GOAL_TOLERANCE,
                      inflation_m=STAGE2_INFLATION_M, exclude_m=0.6, cruise=False,
-                     leg="search"):
+                     leg="search", search_xy=None, search_radius=0.0,
+                     handoff_fn=None):
         """Drive to a goal (x, y) or callable via live occupancy D* Lite."""
         nav = Stage2Navigator(
             self.client,
@@ -587,7 +618,11 @@ class DemoParticipant:
             replan_cap=STAGE2_REPLAN_CAP,
             cruise=cruise,
         )
-        return nav.navigate_to(goal, deadline, leg=leg, tol=tol)
+        return nav.navigate_to(
+            goal, deadline, leg=leg, tol=tol,
+            search_xy=search_xy, search_radius=search_radius,
+            handoff_fn=handoff_fn,
+        )
 
     # -- notifications --
 

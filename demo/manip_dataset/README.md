@@ -1,9 +1,39 @@
-# Manip-trainer teleop dataset collector
+# Manip-trainer teleop
+
+Two client profiles talk to the same sim (`bash simulation-platform/marc.sh manip-trainer`):
+
+| Profile | Service | What it is for |
+|---|---|---|
+| **`manip-pick`** | `agent-manip-pick` | Test GraspGen-X (**G**) or wrist-YOLO (**H**) grip + basket drop. No HDF5. |
+| `tools` | `agent-manip-probe` | Record OpenVLA demos (HDF5). Manual grasp + **P** place. |
+
+## GraspGen-X pick tester (no dataset)
+
+```bash
+# terminal 1
+bash simulation-platform/marc.sh manip-trainer
+
+# terminal 2
+cd demo
+docker compose --profile manip-pick up --build agent-manip-pick
+```
+
+In the trainer GUI, choose the object and **Place near** (or **Place far**, then **A** in the client). Press **G** to snapshot with near-field YOLO and run GraspGen-X pick + overhead basket. Press **H** for a wrist-YOLO pick (Stage 2 YOLO stays loaded; no GraspGen-X). **O** cycles the class, **N** recovers to ready (nothing is saved). Press `?` for the key map.
+
+Requires an interactive TTY. `MARC_PICK_POLICY=graspgenx` is pinned on this service.
+The image is `marc-agent-manip-pick:local` and builds with `MARC_QWEN_BACKEND=remote`
+so `--build` does **not** Hub-pull the 17.5 GB Qwen snapshot (pick never loads it).
+It still bakes GraspGen-X + near-field YOLO. Live pick/place Python is bind-mounted
+(`marc_agent/`, `manip_dataset/`, `nearfield.py`, `arm_pick.py`, `pnp_params.json`);
+Dockerfile/image changes still need `--build`. If a previous build is stuck on
+`Fetching 16 files` for Qwen, stop it and rebuild.
+
+## Dataset collector
 
 Keyboard-driven demonstration collector against the MARC **manip-trainer** profile.
 Produces raw HDF5 episodes for later OpenVLA LoRA fine-tuning.
 
-## Run
+## Run (dataset collector)
 
 ```bash
 # terminal 1
@@ -54,8 +84,8 @@ and yaw each scene so boxes are not glued to one patch of the image.
 
 1. Arm moves to a **joint-space ready** pose (`MARC_READY_J1…J6`), then teleop uses EE-delta IK.
 2. **MANUAL_BASE** — `i/k/j/l` place and aim the chassis; `A` starts auto-approach.
-3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** view (not majority 360×640, which is a gripper-like close-up). Then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **median depth inside the YOLO box** (`MARC_APPROACH_STOP_M`), with no overrun if already closer than `MARC_APPROACH_ALREADY_NEAR` (`C` cancels).
-   Each tick logs `err` (box vs image center), `obj=used/raw`, `name`/`conf`, and `d` (bbox depth). `obj=0/0` means YOLO saw nothing; `obj=0/3` means boxes existed but were skipped (e.g. `person`).
+3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** and **prefers 360×640 chassis depth** when that shape is in the lock window. Then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **arm-base forward** from the same localize as pick (`MARC_APPROACH_STOP_M`, default 0.26 m). After that it keeps crawling until that forward range is at pick range (`MARC_APPROACH_ALREADY_NEAR`, default 0.16 m); wall-clock `OVERRUN_M / speed` is only a cap, because the practice sim often closes much slower than `cmd_vel`. No extra crawl if already closer than `ALREADY_NEAR` (`C` cancels).
+   Each tick logs `err` (box vs image center), `obj=used/raw`, `name`/`conf`, `fwd` (arm-base), and `d` (bbox depth). `obj=0/0` means YOLO saw nothing; `obj=0/3` means boxes existed but were skipped (e.g. `person`).
    Inference is always restricted to the exact `MARC_TARGET_OBJECT`; an unsupported target fails closed and never falls back to all classes. RGB is passed as a PIL image. Lock dumps PNGs under `datasets/yolo_debug/`.
 4. **ARM_TELEOP** — EE nudges + grip; steps are recorded with live images.
    Closing (`v`) **ramps** over `MARC_GRIP_RAMP` and stops the instant `gripper/holding`
@@ -70,9 +100,11 @@ and yaw each scene so boxes are not glued to one patch of the image.
    only; `P` exists so `basket/occupied` can go true for the `E` keep filter. Hand nudges
    cannot place: the basket is *behind* the arm (`place_fwd` is negative in `pnp_params.json`).
 
-   The motion is **pure joint space** — eight interpolations between poses, no Cartesian tracking:
+   The motion is **pure joint space** — interpolations between poses, no Cartesian tracking:
 
-   `squeeze` (re-close, dwell) → `fold to ready` (`DEFAULT_ARM_Q`, still holding) → `raise to carry height` → **`rotate over basket` (joint 1 only, 180°)** → `lower into basket` → `release` → `raise clear` → `rotate back to front` → `fold to ready`.
+   `keep latched grip` (no re-squeeze) → `raise to carry height` → **`rotate over basket` (joint 1 +π)** → `lower into basket` → `release` → `raise clear` → `rotate back to front` → `fold to ready`.
+
+   Pick already stopped the fingers at contact. Place copies that live squeeze and does **not** command json/env close again — squeezing past contact ejects the object. It also does not fold to the 9 cm ready pose while holding.
 
    Why it is built this way: a straight Cartesian line to a point behind the shoulder has no
    collision-free interpolation, and IK will cheerfully return a pose that reaches the basket
@@ -186,11 +218,12 @@ Produces `episodes/episode_XXXX.npz`, `manifest.json`, and `dataset_statistics.j
 ## Code changes need a rebuild
 
 The Dockerfile `COPY`s `demo/` into the image, so an edit is invisible until the
-image is rebuilt — except `manip_dataset/`, which is bind-mounted on
-`agent-manip-probe`. YOLO/torch live in the `manip-probe` image target
-(`marc-agent-manip-probe:local`); adding ultralytics or changing the Dockerfile
-needs `--build`. If the key map printed at startup is missing keys you expect,
-you are running a stale image.
+image is rebuilt — except bind-mounted paths. `agent-manip-probe` mounts
+`manip_dataset/`. `agent-manip-pick` also mounts `marc_agent/`, `nearfield.py`,
+`arm_pick.py`, and `pnp_params.json`. YOLO/torch live in the `manip-probe` image
+target (`marc-agent-manip-probe:local`); adding ultralytics or changing the
+Dockerfile needs `--build`. If the key map printed at startup is missing keys
+you expect, you are running a stale image.
 
 ```bash
 cd demo
@@ -202,7 +235,8 @@ MARC_TEAM_ID=u1 docker compose run --rm -it --build agent-manip-probe
 Defaults for ready/teleop numerics are defined once in
 [`arm_control.py`](arm_control.py) as `DEFAULT_*` / `DEFAULT_READY_*` (from
 `arm_kin.DEFAULT_ARM_Q` for J5/J6). Override them in **`demo/.env`** (next to
-`docker-compose.yml`) — that file is loaded by `agent-manip-probe` via `env_file`.
+`docker-compose.yml`) — that file is loaded by `agent-manip-probe` and
+`agent-manip-pick` via `env_file`.
 A `.env` under `manip_dataset/` is **not** read by Compose.
 
 | Variable | Default (code) | Meaning |
@@ -216,15 +250,15 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_YOLO_HALF` | `0` | FP16 predict. Off by default (avoids Ultralytics `half` deprecation spam) |
 | `MARC_YOLO_CAM` | `base_left` | RGB camera for centering (`base_left`/`base_right`) |
 | `MARC_TARGET_OBJECT` | `tumbler` | Exact required class; unsupported names fail closed |
-| `MARC_APPROACH_STOP_M` | `0.55` | Stop when median depth inside the YOLO box is below this (m) |
-| `MARC_APPROACH_ALREADY_NEAR` | `0.45` | Bbox depth (m) counted as pick range: no yaw, no overrun |
+| `MARC_APPROACH_STOP_M` | `0.26` | Stop when arm-base forward (pick localize) is below this (m) |
+| `MARC_APPROACH_ALREADY_NEAR` | `0.16` | Arm-base fwd (m) counted as pick range: no yaw, no overrun |
 | `MARC_APPROACH_CRAWL` | `0.30` | Requested approach speed (m/s); clamped by `MAX_STEP` |
 | `MARC_APPROACH_MAX_STEP` | `0.04` | Max distance travelled per camera frame (m). Caps effective speed to the sensor rate |
 | `MARC_APPROACH_STALE_STOP` | `0.5` | Hold still if no usable RGB/depth for this long (s), instead of driving blind |
 | `MARC_APPROACH_K` | `3` | Persistence frames, counted only on **new** RGB frames |
 | `MARC_APPROACH_PERCENTILE` | `30` | Percentile of depth pixels inside the YOLO box |
 | `MARC_APPROACH_MIN_VALID` | `4` | Min valid depth pixels in the box; below this range is unknown |
-| `MARC_APPROACH_OVERRUN_M` | `0.68` | Extra forward after detect (m), so the ready-pose gripper sits over the object |
+| `MARC_APPROACH_OVERRUN_M` | `0.68` | Commanded extra crawl after detect (m). Live stop is arm-base fwd ≤ `ALREADY_NEAR`; this only sizes the wall-clock cap when the sim closes slower than `cmd_vel` |
 | `MARC_APPROACH_YAW_GAIN` | `1.2` | P-gain on image-right error → `angular_z` (negated). Flip the sign if it turns the wrong way |
 | `MARC_APPROACH_YAW_MAX` | `0.35` | Clamp on yaw rate (rad/s) |
 | `MARC_APPROACH_YAW_MIN` | `0.10` | Floor on yaw rate (rad/s) while aligning, so a small error still turns the chassis |

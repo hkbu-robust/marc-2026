@@ -1,4 +1,4 @@
-"""User-triggered base auto-approach: YOLO centering + bbox-depth stop."""
+"""User-triggered base auto-approach: YOLO centering + arm-base-fwd stop."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ import numpy as np
 
 from .images import depth_in_bbox, image_to_depth, image_to_rgb
 from .yolo_detect import YoloConfig, YoloTracker
+
+from nearfield import choose_lock_depth, k_from_info, localize_detection
 
 
 def _env_float(name: str, default: float) -> float:
@@ -60,10 +62,17 @@ DEFAULT_ALIGN_TIMEOUT_S = 0.0  # 0 = never drive on timeout
 DEFAULT_BURST_M = 0.15
 DEFAULT_LAT_MIN_M = 0.05
 DEFAULT_LAT_MAX_M = 20.0
-# Stop once median depth inside the YOLO box is this close (m).
-DEFAULT_STOP_M = 0.55
+# Stop once arm-base forward (same metric as pick localize) is this close (m).
+DEFAULT_STOP_M = 0.26
 # Closer than this: already at pick range — stop with no overrun.
-DEFAULT_ALREADY_NEAR_M = 0.45
+DEFAULT_ALREADY_NEAR_M = 0.16
+# Practice sim often closes ~1 cm/s even when cmd_vel is 0.14 m/s. Overrun
+# therefore stops on arm-base fwd, with this rate only sizing the wall-clock cap.
+OVERRUN_SLOW_MPS = 0.008
+OVERRUN_MAX_S = 60.0
+OVERRUN_MIN_S = 25.0
+# Skip burst re-ALIGN once arm-base fwd is this close to STOP_M (m).
+BURST_SKIP_PAD_M = 0.10
 
 
 @dataclass
@@ -157,7 +166,7 @@ class DepthApproachController:
 
     Linear and angular velocity are never commanded together: the base either
     yaws (ALIGN) or drives (DRIVE). The object is the YOLO box on the base RGB
-    camera; range is median depth inside that box.
+    camera; range is arm-base forward from the same localize as pick.
     """
 
     def __init__(self, client, cfg: Optional[ApproachConfig] = None,
@@ -173,6 +182,7 @@ class DepthApproachController:
         self._overrun = False
         self._overrun_t0: Optional[float] = None
         self._overrun_need_s = 0.0
+        self._overrun_d0: Optional[float] = None
         self._detect_reason: str = ""
         self._last_rgb_stamp: Optional[tuple] = None
         self._last_depth_stamp: Optional[tuple] = None
@@ -186,6 +196,7 @@ class DepthApproachController:
         self._lat_err: Optional[float] = None
         self._det: Optional[dict] = None
         self._d_obj_cached: Optional[float] = None
+        self._fwd_cached: Optional[float] = None
         self._phase: str = "align"
         self._phase_t0: Optional[float] = None
         self._phase_why: str = "start"
@@ -237,6 +248,41 @@ class DepthApproachController:
         if self._rgb_swap:
             return np.ascontiguousarray(rgb[:, :, ::-1])
         return rgb
+
+    def _camera_k(self, rgb_shape):
+        getter = getattr(self._client, "get_robot_info", None)
+        info = None
+        if callable(getter):
+            try:
+                info = getter(self.yolo_cfg.camera)
+            except Exception:
+                info = None
+        return k_from_info(info, rgb_shape)
+
+    def _localize_fwd(self, det, depth, rgb_shape) -> Optional[float]:
+        """Arm-base forward of the YOLO box, same helper as pick snapshot."""
+        if det is None or depth is None or det.get("bbox") is None:
+            return None
+        shape = det.get("rgb_shape") or rgb_shape
+        if shape is None:
+            return None
+        try:
+            loc = localize_detection(
+                det["bbox"],
+                depth,
+                shape,
+                self._camera_k(shape),
+                pose=None,
+                hint_xy=None,
+                hint_radius=None,
+                conf=det.get("conf"),
+                name=det.get("name") or "",
+            )
+        except Exception:
+            return None
+        if loc.reason not in ("ok", "out_of_reach", "outside_radius"):
+            return None
+        return float(loc.fwd)
 
     def _measure(self) -> Optional[dict]:
         """Read RGB + depth; YOLO on new RGB. None if neither stream is usable."""
@@ -338,6 +384,16 @@ class DepthApproachController:
         if n_obj > 0 and lat is not None:
             self._lat_err = float(lat)
 
+        fwd = None
+        if n_obj > 0 and det is not None:
+            fwd = self._localize_fwd(det, depth, rgb_shape or (det.get("rgb_shape")))
+            if fwd is not None:
+                self._fwd_cached = float(fwd)
+            else:
+                fwd = self._fwd_cached
+        else:
+            fwd = None
+
         self._last_good_t = now
         self._last_fail = ""
         return {
@@ -345,6 +401,7 @@ class DepthApproachController:
             "lat_n_obj": n_obj,
             "n_raw": n_raw,
             "d_obj": None if d_obj is None else float(d_obj),
+            "fwd": None if fwd is None else float(fwd),
             "name": None if det is None else det.get("name"),
             "conf": None if det is None else det.get("conf"),
             "bbox": None if det is None else det.get("bbox"),
@@ -382,16 +439,24 @@ class DepthApproachController:
             return None
         return float(m["d_obj"])
 
+    def _range_m(self, m: Optional[dict]) -> Optional[float]:
+        """Arm-base forward for stop/overrun. Fall back to bbox depth if missing."""
+        if m is not None and m.get("fwd") is not None:
+            return float(m["fwd"])
+        if self._fwd_cached is not None:
+            return float(self._fwd_cached)
+        return self._d_obj(m)
+
     def _too_near(self, m: Optional[dict]) -> bool:
         """YOLO box is already at pick range — do not yaw or keep crawling."""
-        d = self._d_obj(m)
+        d = self._range_m(m)
         lim = float(self.cfg.already_near_m)
         n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
-        return n_obj > 0 and d is not None and lim > 0.0 and d < lim
+        return n_obj > 0 and d is not None and lim > 0.0 and d <= lim
 
     def _obj_stop(self, m: Optional[dict]) -> bool:
-        """Object depth inside the box is close enough to stop, and not far off-axis."""
-        d = self._d_obj(m)
+        """Arm-base forward is close enough to stop, and not far off-axis."""
+        d = self._range_m(m)
         lim = float(self.cfg.stop_m)
         n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
         lat = None if m is None else m.get("lat_err")
@@ -463,8 +528,11 @@ class DepthApproachController:
             self._enter("align", f"off-center err={err:+.2f}")
             return 0.0, 0.0
         if self.cfg.burst_m > 0.0 and self._drive_m >= self.cfg.burst_m:
-            self._enter("align", f"burst {self._drive_m:.2f}m")
-            return 0.0, 0.0
+            d = self._range_m(m)
+            stop = float(self.cfg.stop_m)
+            if d is None or stop <= 0.0 or d > stop + BURST_SKIP_PAD_M:
+                self._enter("align", f"burst {self._drive_m:.2f}m")
+                return 0.0, 0.0
         return speed, 0.0
 
     def _lock_streams(self) -> bool:
@@ -566,10 +634,13 @@ class DepthApproachController:
         if self._rgb_swap:
             print("[approach] RGB channels swapped for YOLO (8UC3 was RGB, not BGR)")
         dcounts = Counter(depth_shapes)
-        same_h = [s for s in dcounts if s[0] == self._lock_rgb[0]]
-        self._lock_depth = (
-            max(same_h, key=lambda s: (s[0], s[1], dcounts[s])) if same_h
-            else max(dcounts.keys(), key=lambda s: (s[0], s[1], dcounts[s]))
+        self._lock_depth = choose_lock_depth(list(dcounts.elements()), self._lock_rgb)
+        if self._lock_depth is None:
+            self._last_fail = "no depth during lock"
+            return False
+        print(
+            f"[approach] depth lock {self._lock_depth[0]}x{self._lock_depth[1]} "
+            f"candidates={sorted(dcounts.keys())}"
         )
         if len(counts) > 1:
             others = ", ".join(
@@ -579,15 +650,6 @@ class DepthApproachController:
             print(
                 f"[approach] rgb lock {self._lock_rgb[0]}x{self._lock_rgb[1]} "
                 f"by taller chassis view, ignoring {others}"
-            )
-        if len(dcounts) > 1:
-            others = ", ".join(
-                f"{s[0]}x{s[1]}({c})" for s, c in dcounts.items()
-                if s != self._lock_depth
-            )
-            print(
-                f"[approach] depth lock {self._lock_depth[0]}x{self._lock_depth[1]}, "
-                f"ignoring {others}"
             )
         elapsed = time.monotonic() - t_start
         self._frame_dt = (elapsed / max(1, n - 1)) if elapsed > 0 else None
@@ -611,10 +673,13 @@ class DepthApproachController:
         self._t0 = time.monotonic()
         self._overrun = False
         self._overrun_t0 = None
+        self._overrun_need_s = 0.0
+        self._overrun_d0 = None
         self._detect_reason = ""
         self._lat_err = None
         self._det = None
         self._d_obj_cached = None
+        self._fwd_cached = None
         self._drive_m = 0.0
         self._arrive_now = False
         self._skip_overrun = False
@@ -644,7 +709,8 @@ class DepthApproachController:
             f"{self._speed():.3f} m/s  (max_step={self.cfg.max_step_m}m, "
             f"frame≈{'?' if fps is None else f'{fps:.1f}'} Hz)  "
             f"stale_stop={self.cfg.stale_stop_s}s  "
-            f"overrun={self.cfg.overrun_m:.3f}m\n"
+            f"overrun until fwd≤{self.cfg.already_near_m:.2f}m "
+            f"(cmd {self.cfg.overrun_m:.3f}m)\n"
             f"[approach] stop-turn-go: yaw_gain={self.cfg.yaw_gain} "
             f"yaw=[{self.cfg.yaw_min},{self.cfg.yaw_max}]  "
             f"center_tol={self.cfg.center_tol} realign={self.cfg.realign} "
@@ -653,7 +719,8 @@ class DepthApproachController:
         )
         print(
             "[approach] live: err from YOLO box vs image center; "
-            "d=depth inside that box. obj=used/raw. ALIGN waits for a detection "
+            "fwd=arm-base forward (pick localize); d=bbox depth. "
+            "obj=used/raw. ALIGN waits for a detection "
             "(does not drive blind). Lost box → re-ALIGN, not stop."
         )
         return True
@@ -664,14 +731,80 @@ class DepthApproachController:
             return 0.0
         return m / max(1e-3, self._speed())
 
+    def _overrun_cap_s(self, d0: Optional[float]) -> float:
+        """Wall-clock cap. cmd_vel/speed overestimates travel when the sim runs slow."""
+        commanded = self._overrun_duration_s()
+        target = max(0.0, float(self.cfg.already_near_m))
+        remaining = 0.0
+        if d0 is not None and target > 0.0:
+            remaining = max(0.0, float(d0) - target)
+        if remaining <= 0.0:
+            return commanded
+        slow_s = remaining / OVERRUN_SLOW_MPS
+        return min(OVERRUN_MAX_S, max(commanded, slow_s, OVERRUN_MIN_S))
+
+    def _begin_overrun(self, reason: str, d0: Optional[float]) -> None:
+        self._detect_reason = reason
+        self._overrun = True
+        self._overrun_t0 = time.monotonic()
+        self._overrun_d0 = d0
+        self._overrun_need_s = self._overrun_cap_s(d0)
+        d_s = "--" if d0 is None else f"{float(d0):.3f}"
+        print(
+            f"[approach] DETECT ({reason}) — crawl until fwd≤"
+            f"{self.cfg.already_near_m:.2f}m (now {d_s})  "
+            f"cap={self._overrun_need_s:.2f}s  cmd={self.cfg.overrun_m:.3f}m "
+            f"@ {self._speed():.2f} m/s"
+        )
+        self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
+
+    def _stop_approach(self, reason: str, t_s: float) -> bool:
+        self._client.send_cmd_vel(0.0, 0.0)
+        self.active = False
+        self._overrun = False
+        fwd = self._fwd_cached
+        extra = "" if fwd is None or "fwd=" in reason else f" fwd={fwd:.3f}"
+        print(f"[approach] STOP ({reason}{extra})  t={t_s:.2f}s")
+        return True
+
+    def _tick_overrun(self, t_s: float, do_log: bool) -> bool:
+        assert self._overrun_t0 is not None
+        elapsed = time.monotonic() - self._overrun_t0
+        need = self._overrun_need_s
+        m = self._measure()
+        d = self._range_m(m)
+        bbox = self._d_obj(m)
+        if do_log:
+            d_s = "--" if d is None else f"{d:.2f}"
+            b_s = "--" if bbox is None else f"{bbox:.2f}"
+            print(
+                f"[approach] t={t_s:5.2f}s  OVERRUN {elapsed:.2f}/{need:.2f}s "
+                f"fwd={d_s} d={b_s}  pick≤{self.cfg.already_near_m:.2f}m"
+            )
+        if self._too_near(m):
+            d_s = "--" if d is None else f"{d:.3f}"
+            return self._stop_approach(f"overrun pick range fwd={d_s}", t_s)
+        if elapsed >= need:
+            extra = "" if d is None else f" fwd={d:.3f}"
+            return self._stop_approach(
+                f"overrun cap ({self.cfg.overrun_m:.3f}m){extra}  "
+                f"detect={self._detect_reason}",
+                t_s,
+            )
+        self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
+        return False
+
     def cancel(self):
         self.active = False
         self._hit_count = 0
         self._overrun = False
         self._overrun_t0 = None
+        self._overrun_need_s = 0.0
+        self._overrun_d0 = None
         self._lat_err = None
         self._det = None
         self._d_obj_cached = None
+        self._fwd_cached = None
         self._phase = "align"
         self._phase_t0 = None
         self._align_ok = 0
@@ -693,40 +826,12 @@ class DepthApproachController:
             self._arrive_now = False
             reason = self._detect_reason or "already there"
             if self._skip_overrun or self._overrun_duration_s() <= 0.0:
-                self._client.send_cmd_vel(0.0, 0.0)
-                self.active = False
-                print(f"[approach] STOP ({reason}) after t={t_s:.2f}s  (no overrun)")
-                return True
-            self._overrun = True
-            self._overrun_t0 = time.monotonic()
-            self._overrun_need_s = self._overrun_duration_s()
-            print(
-                f"[approach] DETECT ({reason}) — overrun {self.cfg.overrun_m:.3f}m "
-                f"(~{self._overrun_need_s:.2f}s at {self._speed():.2f} m/s)"
-            )
-            self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
+                return self._stop_approach(f"{reason} (no overrun)", t_s)
+            self._begin_overrun(reason, self._fwd_cached)
             return False
 
         if self._overrun:
-            assert self._overrun_t0 is not None
-            elapsed = time.monotonic() - self._overrun_t0
-            need = self._overrun_need_s
-            if do_log:
-                print(
-                    f"[approach] t={t_s:5.2f}s  OVERRUN {elapsed:.2f}/{need:.2f}s "
-                    f"(~{self.cfg.overrun_m:.3f}m)"
-                )
-            if elapsed >= need:
-                self._client.send_cmd_vel(0.0, 0.0)
-                self.active = False
-                self._overrun = False
-                print(
-                    f"[approach] STOP after overrun ({self.cfg.overrun_m:.3f}m)  "
-                    f"detect={self._detect_reason}  t={t_s:.2f}s"
-                )
-                return True
-            self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
-            return False
+            return self._tick_overrun(t_s, do_log)
 
         m = self._measure()
 
@@ -769,6 +874,7 @@ class DepthApproachController:
             lat = m.get("lat_err")
             n_obj = int(m.get("lat_n_obj") or 0)
             d_obj = m.get("d_obj")
+            fwd = m.get("fwd")
             name = m.get("name") or "-"
             conf = m.get("conf")
             n_raw = int(m.get("n_raw") or 0)
@@ -777,6 +883,7 @@ class DepthApproachController:
                 f"err={'--' if lat is None else f'{lat:+.2f}'} "
                 f"obj={n_obj}/{n_raw} {name}"
                 f"{'' if conf is None else f' {conf:.2f}'}  "
+                f"fwd={'--' if fwd is None else f'{float(fwd):.2f}'} "
                 f"d={'--' if d_obj is None else f'{float(d_obj):.2f}'}  "
                 f"ang={ang:+.2f}  "
                 f"hit={self._hit_count}/{self.cfg.persist_k}  "
@@ -786,26 +893,14 @@ class DepthApproachController:
             )
 
         if self._hit_count >= self.cfg.persist_k:
+            rng = self._range_m(m)
             if self._too_near(m):
                 reason = "already near"
             else:
-                d = self._d_obj(m)
-                reason = f"bbox_depth={d:.3f}" if d is not None else "in range"
-            self._detect_reason = reason
-            skip_overrun = self._too_near(m)
-            self._overrun_need_s = 0.0 if skip_overrun else self._overrun_duration_s()
-            if self._overrun_need_s <= 0.0:
-                self._client.send_cmd_vel(0.0, 0.0)
-                self.active = False
-                print(f"[approach] STOP ({reason}) after t={t_s:.2f}s  (no overrun)")
-                return True
-            self._overrun = True
-            self._overrun_t0 = time.monotonic()
-            print(
-                f"[approach] DETECT ({reason}) — overrun {self.cfg.overrun_m:.3f}m "
-                f"(~{self._overrun_need_s:.2f}s at {self._speed():.2f} m/s)"
-            )
-            self._client.send_cmd_vel(linear_x=self._speed(), angular_z=0.0)
+                reason = f"fwd={rng:.3f}" if rng is not None else "in range"
+            if self._too_near(m) or self._overrun_duration_s() <= 0.0:
+                return self._stop_approach(f"{reason} (no overrun)", t_s)
+            self._begin_overrun(reason, rng)
             return False
 
         self._client.send_cmd_vel(linear_x=lin, angular_z=ang)
