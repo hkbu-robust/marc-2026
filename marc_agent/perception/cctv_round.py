@@ -24,14 +24,13 @@ def _timeout_s(discovery_timeout_s: Optional[float]) -> float:
 
 
 def discovery_timeout_from_limit(time_limit: float | None) -> Optional[float]:
-    """First-round CCTV wait from the mission clock: about 15%, clamped to 8–25s."""
+    """CCTV startup wait while reserving at least 15s for detection and selection."""
     limit = float(time_limit or 0.0)
     if limit <= 0.0:
         return None
-    budget = min(limit * 0.15, max(0.0, limit - 20.0))
-    if budget <= 0.0:
+    if limit <= 15.0:
         return min(8.0, max(1.0, limit * 0.4))
-    return min(25.0, max(8.0, budget))
+    return min(15.0, max(8.0, limit - 15.0))
 
 
 def _kick_discover(client) -> None:

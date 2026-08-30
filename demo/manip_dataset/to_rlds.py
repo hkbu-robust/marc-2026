@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Convert successful marc_pnp HDF5 episodes to an OpenVLA-oriented export.
+"""Convert successful marc_pnp HDF5 episodes to an OpenVLA RLDS source.
 
 Writes:
   <out>/episodes/episode_XXXX.npz   — arrays per episode
   <out>/dataset_statistics.json     — nested marc_pnp q01/q99/mask
   <out>/manifest.json               — episode index + language
+  <out>/marc_pnp_dataset_builder.py — materializes the source as TFDS/RLDS
 
-Does not require tensorflow_datasets at convert time (NumPy export). Point an
-OXE/RLDS builder at these files, or load npz directly in a custom OpenVLA
-dataset transform. LoRA fine-tuning should use unnorm_key=marc_pnp.
+Conversion does not require tensorflow_datasets. Run the emitted builder from
+an OpenVLA environment to materialize TFDS/RLDS. LoRA fine-tuning should use
+unnorm_key=marc_pnp.
 
 Usage:
   python3 -m manip_dataset.to_rlds \\
@@ -22,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from typing import List, Tuple
 
@@ -92,7 +94,11 @@ def _load_episode(ep_dir: str, camera: str = "auto") -> Tuple[dict, dict]:
 
 
 def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str = "auto"):
-    os.makedirs(os.path.join(out_dir, "episodes"), exist_ok=True)
+    episode_out = os.path.join(out_dir, "episodes")
+    os.makedirs(episode_out, exist_ok=True)
+    for name in os.listdir(episode_out):
+        if name.startswith("episode_") and name.endswith(".npz"):
+            os.unlink(os.path.join(episode_out, name))
     episodes = []
     all_actions: List[np.ndarray] = []
     all_states: List[np.ndarray] = []
@@ -113,6 +119,13 @@ def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str
             if not meta_peek.get("success", False):
                 continue
             meta, data = _load_episode(ep_dir, camera)
+            if data["action"].ndim != 2 or data["action"].shape[1] != 7:
+                raise ValueError(f"action must have shape (N, 7), got {data['action'].shape}")
+            if not np.isfinite(data["action"]).all():
+                raise ValueError("action contains non-finite values")
+            grip = data["action"][:, -1]
+            if not np.all(np.isclose(grip, 0.0) | np.isclose(grip, 1.0)):
+                raise ValueError("raw gripper action must be binary close intent")
         except Exception as e:
             print(f"[skip] {name}: {e}")
             continue
@@ -126,12 +139,15 @@ def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str
             [data["q_arm"], data["q_grip"].reshape(-1, 1)], axis=1
         ).astype(np.float32)
 
-        out_path = os.path.join(out_dir, "episodes", f"episode_{idx:04d}.npz")
+        # Raw teleop intent is 1=close. OpenVLA/OXE is 0=closed, 1=open.
+        actions = np.asarray(data["action"], dtype=np.float32).copy()
+        actions[:, -1] = 1.0 - actions[:, -1]
+        out_path = os.path.join(episode_out, f"episode_{idx:04d}.npz")
         np.savez_compressed(
             out_path,
             image=images,
             state=state,
-            action=data["action"],
+            action=actions,
             ee_pos=data["ee_pos"],
             ee_quat=data["ee_quat"],
             language_instruction=meta.get("language_instruction", ""),
@@ -148,7 +164,7 @@ def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str
             "task": meta.get("task", "pick"),
             "camera": data["image_key"],
         })
-        all_actions.append(data["action"])
+        all_actions.append(actions)
         all_states.append(state)
         print(f"[ok] {name} -> episode_{idx:04d}.npz "
               f"({data['action'].shape[0]} steps, {data['image_key']})")
@@ -171,6 +187,10 @@ def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str
         json.dump(stats, f, indent=2)
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump({"episodes": episodes}, f, indent=2)
+    shutil.copyfile(
+        os.path.join(os.path.dirname(__file__), "marc_pnp_dataset_builder.py"),
+        os.path.join(out_dir, "marc_pnp_dataset_builder.py"),
+    )
     action_block = stats[DEFAULT_UNNORM_KEY]["action"]
     print(f"[done] {len(episodes)} episodes -> {out_dir}")
     print(f"[stats] action_q01={action_block['q01']}")

@@ -209,6 +209,16 @@ def dump_stage_round(
         _write_text(qwen_path, qwen_bits)
     elif qwen_path.exists():
         qwen_path.unlink()
+    for stale in out_dir.glob("qwen_object_*.png"):
+        stale.unlink()
+    for stale in out_dir.glob("qwen_sar_*.png"):
+        stale.unlink()
+    for label, result in (("object", object_sel), ("sar", sar)):
+        for index, image in enumerate(
+            getattr(result, "evidence_images", ()) if result is not None else (),
+            start=1,
+        ):
+            image.save(out_dir / f"qwen_{label}_{index:02d}.png")
     if extra:
         selection["extra"] = extra
     _write_json(out_dir / "summary.json", selection)

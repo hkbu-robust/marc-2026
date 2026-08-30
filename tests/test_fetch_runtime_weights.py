@@ -212,17 +212,54 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
         downloader.assert_not_called()
         hub.assert_not_called()
 
+    def test_fast_build_does_not_fetch_optional_runtime_weights(self):
+        downloader = Mock(side_effect=AssertionError("must not download GraspGenX"))
+        hub = Mock(side_effect=AssertionError("must not download YOLO"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(_FETCH_MOD, "yolo11x_ready", return_value=True):
+                lines = fetch_all(
+                    paths={
+                        "qwen": root / "qwen",
+                        "graspgenx": root / "graspgenx",
+                        "grippers": root / "grippers",
+                        "yolo11x": root / "yolo11x.pt",
+                    },
+                    snapshot_download=downloader,
+                    hub_download=hub,
+                    bake_qwen=False,
+                )
+        self.assertEqual(["skip qwen (MARC_QWEN_BACKEND is not local)"], lines)
+        downloader.assert_not_called()
+        hub.assert_not_called()
+
     def test_remote_compose_passes_backend_as_build_arg(self):
         text = Path("demo/docker-compose.qwen-remote.yml").read_text(encoding="utf-8")
         self.assertIn("MARC_QWEN_BACKEND: remote", text)
         self.assertIn("args:", text)
 
-    def test_base_compose_files_pin_local_qwen(self):
-        for path in (Path("docker-compose.yml"), Path("demo/docker-compose.yml")):
-            text = path.read_text(encoding="utf-8")
-            self.assertIn('MARC_SAR_DETECTOR: "qwen"', text)
-            self.assertIn('MARC_QWEN_BACKEND: "local"', text)
-            self.assertNotIn("MARC_QWEN_BACKEND:-local", text)
+    def test_root_compose_pins_local_qwen(self):
+        text = Path("docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn('MARC_SAR_DETECTOR: "qwen"', text)
+        self.assertIn('MARC_QWEN_BACKEND: "local"', text)
+
+    def test_demo_compose_uses_host_qwen(self):
+        text = Path("demo/docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn('MARC_SAR_DETECTOR: "qwen-remote"', text)
+        self.assertIn("MARC_QWEN_BACKEND: remote", text)
+        self.assertIn("http://127.0.0.1:8000/v1", text)
+        self.assertIn("qwen3-vl-8b", text)
+        self.assertIn("runtime: nvidia", text)
+        self.assertIn('NVIDIA_VISIBLE_DEVICES: "all"', text)
+        self.assertIn('NVIDIA_DRIVER_CAPABILITIES: "compute,utility"', text)
+        self.assertIn('MARC_CCTV_YOLO_DEVICE: "0"', text)
+        self.assertIn('MARC_YOLO_DEVICE: "0"', text)
+
+    def test_agent_image_uses_blackwell_capable_torch(self):
+        text = Path("demo/Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("torch==2.7.1 torchvision==0.22.1", text)
+        self.assertIn("https://download.pytorch.org/whl/cu128", text)
+        self.assertNotIn("https://download.pytorch.org/whl/cu121", text)
 
     def test_local_mount_skips_bake_but_runs_local_backend(self):
         text = Path("demo/docker-compose.qwen-local.yml").read_text(encoding="utf-8")
@@ -322,28 +359,21 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
 
 
 class AgentDockerfileTests(unittest.TestCase):
-    def test_graspgenx_installs_from_checkout_and_imports_before_fetch(self):
+    def test_fast_build_does_not_install_graspgenx(self):
         text = Path("demo/Dockerfile").read_text(encoding="utf-8")
-        pip_run, fetch_run = text.split("WORKDIR /agent", 1)
+        active = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
         self.assertIn(
             'pip3 install --upgrade "packaging>=26.2" "setuptools>=64,<78"',
-            pip_run,
+            active,
         )
-        self.assertIn("setuptools>=64,<78", pip_run)
-        self.assertNotIn("setuptools>=45,<78", text)
-        self.assertIn("pip3 install --no-deps --no-build-isolation /tmp/GraspGenX", text)
+        self.assertNotIn("/tmp/GraspGenX", active)
+        self.assertNotIn("from graspgenx", active)
         self.assertNotIn(
             "pip3 install --no-deps --no-build-isolation \\\n"
             "        git+https://github.com/NVlabs/GraspGenX.git",
             text,
-        )
-        self.assertIn(
-            'python3 -c "from graspgenx.grasp_server import GraspGenXSampler',
-            pip_run,
-        )
-        self.assertNotIn(
-            'python3 -c "from graspgenx.grasp_server import GraspGenXSampler',
-            fetch_run,
         )
         self.assertIn("ARG MARC_QWEN_BACKEND=local", text)
         self.assertIn("MARC_QWEN_BACKEND=\"$MARC_QWEN_BACKEND\"", text)

@@ -9,7 +9,7 @@
 #
 # Build context = the starter kit root (copies marc_sdk + demo together).
 #   -> see compose build.context=.. , dockerfile=demo/Dockerfile.
-# Build-time network bakes Qwen, GraspGen-X, and YOLO11x. Runtime is offline.
+# Build-time network only bakes local Qwen. Runtime is offline.
 # ---------------------------------------------------------------------------
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -34,7 +34,8 @@ RUN --network=host --mount=type=cache,target=/root/.cache/pip \
         python3-numpy python3-yaml python3-pip git libgl1 libglib2.0-0 \
         ros-humble-tf2-ros ros-humble-tf2-ros-py \
     && pip3 install placo h5py \
-    && pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
+    && pip3 install torch==2.7.1 torchvision==0.22.1 \
+        --index-url https://download.pytorch.org/whl/cu128 \
     && pip3 install "ultralytics-opencv-headless==8.4.118" \
     && pip3 install \
         "transformers==4.57.1" "accelerate==1.10.1" "safetensors==0.6.2" \
@@ -49,14 +50,16 @@ RUN --network=host --mount=type=cache,target=/root/.cache/pip \
         "huggingface_hub>=0.30.0,<1.0" "safetensors==0.6.2" \
     && pip3 install --no-deps urdfpy \
     && pip3 install --upgrade "packaging>=26.2" "setuptools>=64,<78" wheel setuptools-scm \
-    && python3 -c "import setuptools; v=tuple(map(int, setuptools.__version__.split('.')[:2])); assert v >= (64, 0), setuptools.__version__" \
-    && git init /tmp/GraspGenX \
-    && git -C /tmp/GraspGenX remote add origin https://github.com/NVlabs/GraspGenX.git \
-    && git -C /tmp/GraspGenX fetch --depth 1 origin b9429097728cb1c430dd78b92edf17ba318aad03 \
-    && git -C /tmp/GraspGenX checkout --detach FETCH_HEAD \
-    && pip3 install --no-deps --no-build-isolation /tmp/GraspGenX \
-    && python3 -c "from graspgenx.grasp_server import GraspGenXSampler; print('graspgenx import ok')" \
-    && rm -rf /tmp/GraspGenX
+    && python3 -c "import setuptools; v=tuple(map(int, setuptools.__version__.split('.')[:2])); assert v >= (64, 0), setuptools.__version__"
+# Fast-iteration branch: do not fetch or install GraspGenX.
+# RUN --network=host --mount=type=cache,target=/root/.cache/pip \
+#     git init /tmp/GraspGenX \
+#     && git -C /tmp/GraspGenX remote add origin https://github.com/NVlabs/GraspGenX.git \
+#     && git -C /tmp/GraspGenX fetch --depth 1 origin b9429097728cb1c430dd78b92edf17ba318aad03 \
+#     && git -C /tmp/GraspGenX checkout --detach FETCH_HEAD \
+#     && pip3 install --no-deps --no-build-isolation /tmp/GraspGenX \
+#     && python3 -c "from graspgenx.grasp_server import GraspGenXSampler; print('graspgenx import ok')" \
+#     && rm -rf /tmp/GraspGenX
 
 WORKDIR /agent
 
@@ -98,8 +101,7 @@ WORKDIR /agent/demo
 # and then runs the CMD below. team_id/token are injected via the compose env (from_env).
 CMD ["python3", "participant_app.py"]
 
-# Probe-only extra: YOLO11x for auto-approach. The graded `agent` stage already
-# has torch, ultralytics, and baked yolo11x.pt.
+# Probe-only extra. The graded `agent` stage already has torch and ultralytics.
 FROM agent AS manip-probe
 ENV YOLO_CONFIG_DIR=/agent/demo/weights
 RUN mkdir -p /agent/demo/weights

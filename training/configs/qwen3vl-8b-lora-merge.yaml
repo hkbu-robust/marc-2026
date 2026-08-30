@@ -1,0 +1,11 @@
+### model
+model_name_or_path: /home/marc2026/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct
+adapter_name_or_path: /tmp/marc-qwen-800/final-adapter
+template: qwen3_vl_nothink
+trust_remote_code: true
+
+### export
+export_dir: /tmp/marc-qwen-800/merged-model
+export_size: 5
+export_device: cpu
+export_legacy_format: false

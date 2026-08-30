@@ -87,7 +87,12 @@ class QwenRemoteConfig:
     ) -> "QwenRemoteConfig":
         env = os.environ if environ is None else environ
         json.loads(contract_path.read_text(encoding="utf-8"))
-        base_url = str(env.get("MARC_QWEN_BASE_URL") or "").strip().rstrip("/")
+        stream = str(env.get("STREAM") or "").strip().lower() == "true"
+        base_url = str(
+            "http://10.0.0.200:8000/v1"
+            if stream
+            else env.get("MARC_QWEN_BASE_URL") or "http://127.0.0.1:8000/v1"
+        ).strip().rstrip("/")
         parsed = urlparse(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise QwenConfigurationError(

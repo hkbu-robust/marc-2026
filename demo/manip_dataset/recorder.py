@@ -281,6 +281,23 @@ class EpisodeRecorder:
         self.meta["filled_frames"] = filled
         self.meta["includes_place"] = False
         self.meta["task"] = "pick"
+        grasp_steps = [i for i, step in enumerate(self.steps) if step["grasping"]]
+        grasp_index = grasp_steps[0] if grasp_steps else len(self.steps) - 1
+        grasp_step = self.steps[grasp_index]
+        self.meta["grasp_capture"] = {
+            "step": grasp_index,
+            "ee_pose_arm_base": {
+                "position": np.asarray(grasp_step["ee_pos"], dtype=float).tolist(),
+                "quaternion": np.asarray(grasp_step["ee_quat"], dtype=float).tolist(),
+                "quaternion_order": "wxyz",
+            },
+            "object_in_gripper": bool(grasp_steps),
+            "gripper": os.environ.get("MARC_GRASPGENX_GRIPPER", "robotiq_2f_140"),
+        }
+        self.meta["training_formats"] = {
+            "openvla": "RLDS source via manip_dataset.to_rlds",
+            "graspgenx": "capture requires exact object mesh and object pose annotation",
+        }
         h5_path = os.path.join(out_dir, "episode.hdf5")
         meta_path = os.path.join(out_dir, "meta.json")
 

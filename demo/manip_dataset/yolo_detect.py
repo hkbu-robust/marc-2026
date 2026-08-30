@@ -106,13 +106,20 @@ def _resolve_device(requested: str) -> str:
         return "cpu"
     try:
         import torch
-
-        if torch.cuda.is_available():
-            return req
-        print("[yolo] CUDA not available — falling back to CPU (YOLO will be slow)")
-    except Exception:
-        print("[yolo] torch not importable — falling back to CPU")
-    return "cpu"
+    except ImportError as exc:
+        raise RuntimeError(
+            f"near-field YOLO requested CUDA device {req}, but torch is not installed"
+        ) from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            f"near-field YOLO requested CUDA device {req}, but CUDA is unavailable"
+        )
+    index = int(req.removeprefix("cuda:"))
+    print(
+        f"[yolo] selected CUDA device={req} "
+        f"name={torch.cuda.get_device_name(index)}"
+    )
+    return req
 
 
 def _ensure_weights(path: Path) -> str:

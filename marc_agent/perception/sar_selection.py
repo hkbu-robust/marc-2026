@@ -10,10 +10,16 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Iterable, Optional
 
-from marc_agent.command_parser import ParsedCommand, Relation, SEATING_LANDMARKS
+from marc_agent.command_parser import (
+    LANDMARK_TYPES,
+    SEATING_LANDMARKS,
+    ParsedCommand,
+    Relation,
+)
 from marc_agent.perception.camera_gate import scene_classes
 from marc_agent.perception.pose_to_situation import situation_for_pose
 from marc_agent.perception.qwen_reply import call_verifier, last_parsed
+from marc_agent.perception.qwen_remote import pack_camera_evidence
 from marc_agent.perception.qwen_runtime import (
     QwenRuntimeConfig,
     configured_max_crops,
@@ -25,8 +31,9 @@ from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidat
 _SITUATIONS = frozenset({"normal", "abnormal", "emergency", "accident"})
 _P_ID_RE = re.compile(r"^P(\d+)$", re.IGNORECASE)
 SHORTLIST_CAP = 8
-WORLD_NEAR_FLOOR_M = 0.0
-_FACE_DOWN_POSES = frozenset({"person_prone", "person_lying_down"})
+_FACE_DOWN_POSES = frozenset(
+    {"person_prone", "person_lying_down", "person_bending"}
+)
 _SEATING_LYING_POSES = (
     (POSE_GROUPS["prostrate"] - frozenset({"person_bending"}))
     | frozenset({"person_reclining"})
@@ -85,6 +92,7 @@ class SarSelectionResult:
     raw_output: Optional[str] = None
     verifier_metrics: Optional[VerifierMetrics] = None
     prompt: Optional[str] = None
+    evidence_images: tuple[object, ...] = ()
 
 
 Verifier = Callable[[CandidateBoard], str]
@@ -166,7 +174,7 @@ def resolve_sar_anchor(
     classes = (
         frozenset({command.landmark})
         if command.landmark
-        else scene_classes(command.scene_hint)
+        else (LANDMARK_TYPES if command.scene_hint else frozenset())
     )
     anchor, _ = _nearest_anchor(person, round_.objects, classes)
     return anchor
@@ -210,9 +218,13 @@ _ON_SUPPORT_CUE = re.compile(
 
 
 def projection_relation(
-    command: ParsedCommand, command_text: str = ""
+    command: ParsedCommand,
+    command_text: str = "",
+    pose_class: Optional[str] = None,
 ) -> Optional[Relation]:
-    """Internal ON for projecting a person onto a support. Not submitted."""
+    """Use raised support geometry only for poses modeled above the ground."""
+    if pose_class == "person_bending":
+        return None
     if command.relation is not None:
         return command.relation
     if command.target_type != "person":
@@ -266,7 +278,7 @@ def _soft_camera_evidence(
     matches = sorted(visible & scene_classes(command.scene_hint))
     if matches:
         evidence.extend(f"scene:{item}" for item in matches)
-        score += 0.5
+        score += min(2.0, 0.5 * len(matches))
     return tuple(evidence), score
 
 
@@ -348,7 +360,10 @@ def candidate_evidence(
 
 _POSE_CUE_CLASSES = (
     (re.compile(r"\b(?:bent|bending)\b"), frozenset({"person_bending"})),
-    (re.compile(r"\b(?:sitting|sat)\b"), frozenset({"person_sitting"})),
+    (
+        re.compile(r"\b(?:sitting|sat|climbed|climbing)\b"),
+        frozenset({"person_sitting"}),
+    ),
     (re.compile(r"\b(?:lying)\b"), frozenset({"person_lying_down"})),
     (re.compile(r"\b(?:collapsed|fell|fallen)\b"), POSE_GROUPS["prostrate"]),
     (re.compile(r"\b(?:face[\s-]*down|prone)\b"), frozenset({"person_prone"})),
@@ -407,29 +422,7 @@ def _with_world(item: CandidateEvidence, projector) -> CandidateEvidence:
 
 
 def _cap_and_order(items: list[CandidateEvidence]) -> tuple[CandidateEvidence, ...]:
-    if len(items) > SHORTLIST_CAP:
-        has_world = any(item.world_dist_m is not None for item in items)
-        if has_world:
-            items = sorted(
-                items,
-                key=lambda item: (
-                    item.world_dist_m is None,
-                    item.world_dist_m if item.world_dist_m is not None else 0.0,
-                    item.person.camera_id,
-                    item.person.candidate_id,
-                ),
-            )[:SHORTLIST_CAP]
-        else:
-            items = sorted(
-                items,
-                key=lambda item: (item.person.camera_id, item.person.candidate_id),
-            )[:SHORTLIST_CAP]
-    return tuple(
-        sorted(
-            items,
-            key=lambda item: (item.person.camera_id, item.person.candidate_id),
-        )
-    )
+    return tuple(items[:SHORTLIST_CAP])
 
 
 def shortlist_for_verifier(
@@ -438,25 +431,9 @@ def shortlist_for_verifier(
     command_text: str = "",
     projector=None,
 ) -> tuple[CandidateEvidence, ...]:
-    """Command-conditioned people for the Qwen board, in score-neutral order."""
-    items = list(evidence)
-    poses = _named_pose_classes(command_text, command)
-    if poses:
-        posed = [item for item in items if item.person.pose_class in poses]
-        if posed:
-            items = posed
-    if command.landmark:
-        items = [item for item in items if item.anchor is not None]
-    items = [_with_world(item, projector) for item in items]
-    dists = [item.world_dist_m for item in items if item.world_dist_m is not None]
-    if projector is not None and dists:
-        limit = max(WORLD_NEAR_FLOOR_M, 2.0 * min(dists))
-        items = [
-            item
-            for item in items
-            if item.world_dist_m is None or item.world_dist_m <= limit
-        ]
-    return _cap_and_order(items)
+    """Keep the strongest evidence without treating detector labels as truth."""
+    del command, command_text
+    return _cap_and_order([_with_world(item, projector) for item in evidence])
 
 
 def _fallback_pick(
@@ -545,28 +522,34 @@ def _annotated_view(frame, evidence: tuple[CandidateEvidence, ...]):
 
 
 def _context_crop(frame, item: CandidateEvidence):
-    from PIL import ImageDraw
+    from PIL import Image, ImageDraw
 
-    boxes = [item.person.bbox_xyxy]
-    if item.anchor:
-        boxes.append(item.anchor.bbox_xyxy)
-    x1 = min(box[0] for box in boxes)
-    y1 = min(box[1] for box in boxes)
-    x2 = max(box[2] for box in boxes)
-    y2 = max(box[3] for box in boxes)
-    pad = 0.2 * max(x2 - x1, y2 - y1, 32.0)
+    x1, y1, x2, y2 = item.person.bbox_xyxy
+    side = min(
+        max(frame.width, frame.height),
+        max(160.0, 2.0 * max(x2 - x1, y2 - y1)),
+    )
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
     crop_box = (
-        max(0, math.floor(x1 - pad)),
-        max(0, math.floor(y1 - pad)),
-        min(frame.width, math.ceil(x2 + pad)),
-        min(frame.height, math.ceil(y2 + pad)),
+        max(0, math.floor(cx - side / 2.0)),
+        max(0, math.floor(cy - side / 2.0)),
+        min(frame.width, math.ceil(cx + side / 2.0)),
+        min(frame.height, math.ceil(cy + side / 2.0)),
     )
     image = _bounded_image(
-        frame.rgb,
-        max_side=max(frame.width, frame.height),
+        frame.rgb, max_side=max(frame.width, frame.height)
     ).crop(crop_box)
-    image.thumbnail((640, 640))
+    image = image.resize((512, 512), Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image)
+    sx = 512 / (crop_box[2] - crop_box[0])
+    sy = 512 / (crop_box[3] - crop_box[1])
+    box = (
+        round((x1 - crop_box[0]) * sx),
+        round((y1 - crop_box[1]) * sy),
+        round((x2 - crop_box[0]) * sx),
+        round((y2 - crop_box[1]) * sy),
+    )
+    draw.rectangle(box, outline="red", width=3)
     draw.text((4, 4), item.person.candidate_id, fill="red")
     return image
 
@@ -582,22 +565,26 @@ def format_sar_verifier_prompt(
     req = requested or "unspecified"
     return (
         "Select the single numbered person candidate that best matches the request. "
-        "Compare these listed people against the original request. Do not prefer P01, "
-        "list order, or higher detector confidence. Pose and landmark proximity named "
-        "in the request beat list order. world_dist_m is metres on the ground to the "
+        "Compare these listed people against the original request. Candidates are ordered "
+        "by weak detector and scene evidence, but you must verify them visually. First "
+        "match the requested place and every visible landmark modifier (for example, a "
+        "toppled bicycle is not an upright bicycle). Then match pose and landmark proximity; "
+        "these constraints beat list order. world_dist_m is metres on the ground to the "
         "parsed landmark when known; it is geometry, not the answer by itself. The "
         "request is language to satisfy, not visual ground truth. Use the images and "
         "detector metadata together. The middle token of each CANDIDATE_ID is the detector "
         "pose (person_sitting, person_lying_down, person_prone, …); prefer the pose that "
         "matches the request. Every listed candidate is eligible; detail_crop=no means "
-        "the candidate appears only in its annotated camera view. Reply with exactly "
-        "CANDIDATE_ID and nothing else.\n"
+        "the candidate appears only in its annotated camera view. Each visual= field maps "
+        "the row to an exact IMAGE and, when present, its yellow crop tile. Reply with "
+        "exactly CANDIDATE_ID and nothing else.\n"
         f"Original request: {command_text}\n"
         f"Parsed requested situation: {req}\n"
         f"Parsed requested landmark: {landmark or 'none'}\n"
         f"Parsed scene hint: {scene_hint or 'none'}\n"
-        "Prefer candidates whose camera contains the parsed landmark and any "
-        "place cues named in the request.\n"
+        "Prefer candidates whose camera visibly satisfies the parsed landmark, its "
+        "modifiers, and any place cues named in the request. A metadata anchor alone "
+        "does not prove that the requested landmark state is visible.\n"
         "Candidates:\n" + "\n".join(rows)
     )
 
@@ -637,11 +624,15 @@ def build_candidate_board(
     *,
     max_crops: Optional[int] = None,
     projector=None,
+    pack_cameras: bool = False,
 ) -> CandidateBoard:
     """Build bounded images for the command-conditioned shortlist."""
     ranked = candidate_evidence(command, round_, command_text)
     evidence = shortlist_for_verifier(ranked, command, command_text, projector)
-    return _assemble_board(command_text, command, round_, evidence, max_crops)
+    return _assemble_board(
+        command_text, command, round_, evidence, max_crops,
+        pack_cameras=pack_cameras,
+    )
 
 
 def _assemble_board(
@@ -650,21 +641,52 @@ def _assemble_board(
     round_: CctvDetectionRound,
     evidence: tuple[CandidateEvidence, ...],
     max_crops: Optional[int],
+    pack_cameras: bool = False,
 ) -> CandidateBoard:
     crop_limit = configured_max_crops() if max_crops is None else max_crops
     if crop_limit < 0:
         raise ValueError("max_crops must be non-negative")
     detail_evidence = _detail_crop_evidence(evidence, crop_limit)
     detail_ids = {item.person.candidate_id for item in detail_evidence}
+    aliases = {
+        item.person.candidate_id: f"P{index:02d}"
+        for index, item in enumerate(evidence, start=1)
+    }
     images: list[object] = []
+    visual_refs: dict[str, str] = {}
     for camera_id in sorted({item.person.camera_id for item in evidence}):
         frame = round_.frames.get(camera_id)
-        if frame is not None:
+        if frame is None:
+            continue
+        image_number = len(images) + 1
+        camera_crops = tuple(
+            (aliases[item.person.candidate_id], _context_crop(frame, item))
+            for item in detail_evidence
+            if item.person.camera_id == camera_id
+        )
+        if pack_cameras:
+            images.append(
+                pack_camera_evidence(_annotated_view(frame, evidence), camera_crops)
+            )
+            for item in detail_evidence:
+                if item.person.camera_id == camera_id:
+                    visual_refs[item.person.candidate_id] = (
+                        f"IMAGE_{image_number}:tile={aliases[item.person.candidate_id]}"
+                    )
+        else:
             images.append(_annotated_view(frame, evidence))
-    for item in detail_evidence:
-        frame = round_.frames.get(item.person.camera_id)
-        if frame is not None:
-            images.append(_context_crop(frame, item))
+            for item in detail_evidence:
+                if item.person.camera_id != camera_id:
+                    continue
+                images.append(_context_crop(frame, item))
+                visual_refs[item.person.candidate_id] = (
+                    f"IMAGE_{image_number},detail=IMAGE_{len(images)}"
+                )
+        for item in evidence:
+            if item.person.camera_id == camera_id:
+                visual_refs.setdefault(
+                    item.person.candidate_id, f"IMAGE_{image_number}:overview"
+                )
 
     rows = []
     for index, item in enumerate(evidence, start=1):
@@ -677,6 +699,7 @@ def _assemble_board(
                     f"camera={item.person.camera_id}",
                     f"pose={item.person.pose_class}",
                     f"confidence={item.person.confidence:.3f}",
+                    f"visual={visual_refs.get(item.person.candidate_id, 'none')}",
                     f"anchor={anchor.class_name if anchor else 'none'}",
                     f"anchor_id={anchor.candidate_id if anchor else 'none'}",
                     (
@@ -866,7 +889,7 @@ def select_sar_candidate(
     requested = command.situation.value if command.situation else None
     if command.target_type != "person" or requested is None:
         log.info(
-            "[qwen] skipped reason=incomplete_sar_request target_type=%s situation=%s",
+            "[vlm] skipped reason=incomplete_sar_request target_type=%s situation=%s",
             command.target_type,
             requested,
         )
@@ -879,7 +902,7 @@ def select_sar_candidate(
             "not_a_complete_sar_request",
         )
     if not round_.people:
-        log.info("[qwen] skipped reason=no_person_candidates")
+        log.info("[vlm] skipped reason=no_person_candidates")
         return SarSelectionResult(
             SelectionStatus.NO_MATCH,
             None,
@@ -893,17 +916,17 @@ def select_sar_candidate(
     shortlist = shortlist_for_verifier(ranked, command, command_text, projector)
     poses = _named_pose_classes(command_text, command)
     log.info(
-        "[qwen] shortlist n=%d of %d poses=%s landmark=%s",
+        "[vlm] shortlist n=%d of %d poses=%s landmark=%s",
         len(shortlist),
         len(ranked),
         ",".join(sorted(poses)) or "all",
         command.landmark or "none",
     )
-    if len(shortlist) <= 1:
+    if verifier is None and len(shortlist) <= 1:
         item = shortlist[0] if shortlist else ranked[0]
         reason = "unique_shortlist" if shortlist else "empty_shortlist"
         log.info(
-            "[qwen] skipped reason=%s candidate=%s",
+            "[vlm] skipped reason=%s candidate=%s",
             reason,
             item.person.candidate_id,
         )
@@ -920,10 +943,20 @@ def select_sar_candidate(
             prompt=board.prompt if board is not None else None,
         )
 
-    board = _assemble_board(command_text, command, round_, shortlist, None)
+    contenders = shortlist if shortlist else ranked
+    board = _assemble_board(command_text, command, round_, contenders, None)
     metrics = None
     if verifier is not None:
         try:
+            method = str(getattr(verifier, "method", "qwen"))
+            board = _assemble_board(
+                command_text,
+                command,
+                round_,
+                contenders,
+                len(contenders) if method == "qwen_remote" else None,
+                pack_cameras=method == "qwen_remote",
+            )
             (parsed, raw_output) = call_verifier(
                 verifier,
                 board,
@@ -933,11 +966,11 @@ def select_sar_candidate(
             metrics = _verifier_metrics(verifier, board)
             selected = next(
                 item.person
-                for item in board.evidence
+                for item in contenders
                 if item.person.candidate_id == candidate_id
             )
             log.info(
-                "[qwen] validated output candidate=%s situation=%s backend=%s output=%s",
+                "[vlm] validated output candidate=%s situation=%s backend=%s output=%s",
                 candidate_id,
                 evidence_situation,
                 str(getattr(verifier, "method", "qwen")),
@@ -952,7 +985,8 @@ def select_sar_candidate(
                 "valid_model_output",
                 raw_output,
                 metrics,
-                board.prompt,
+                getattr(verifier, "last_prompt", board.prompt),
+                tuple(board.images),
             )
         except Exception as exc:
             metrics = _verifier_metrics(verifier, board)
@@ -964,7 +998,7 @@ def select_sar_candidate(
                 " ".join(raw_output.split()) if isinstance(raw_output, str) else None
             )
             log.warning(
-                "[qwen] verifier failed backend=%s error=%s detail=%s output=%s; "
+                "[vlm] verifier failed backend=%s error=%s detail=%s output=%s; "
                 "using deterministic fallback",
                 str(getattr(verifier, "method", "qwen")),
                 type(exc).__name__,
@@ -974,7 +1008,7 @@ def select_sar_candidate(
     else:
         fallback_reason = "verifier_not_configured"
         raw_output = None
-        log.info("[qwen] verifier not configured; using deterministic fallback")
+        log.info("[vlm] verifier not configured; using deterministic fallback")
 
     best = _fallback_pick(shortlist, ranked)
     return _selected_from_item(

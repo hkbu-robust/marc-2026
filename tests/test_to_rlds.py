@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import sys
 import tempfile
+import types
 import unittest
 
 import numpy as np
@@ -19,6 +21,35 @@ if _DEMO not in sys.path:
 
 
 class ToRldsStatsTests(unittest.TestCase):
+    def test_builder_splits_whole_episodes_deterministically(self):
+        fake_tfds = types.ModuleType("tensorflow_datasets")
+        fake_tfds.core = types.SimpleNamespace(
+            GeneratorBasedBuilder=object,
+            Version=lambda value: value,
+        )
+        old = sys.modules.get("tensorflow_datasets")
+        sys.modules["tensorflow_datasets"] = fake_tfds
+        try:
+            path = os.path.join(_DEMO, "manip_dataset", "marc_pnp_dataset_builder.py")
+            spec = importlib.util.spec_from_file_location("marc_pnp_builder_test", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            if old is None:
+                sys.modules.pop("tensorflow_datasets", None)
+            else:
+                sys.modules["tensorflow_datasets"] = old
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for index in range(20):
+                open(os.path.join(tmp, f"episode_{index:04d}.npz"), "wb").close()
+            pattern = os.path.join(tmp, "episode_*.npz")
+            train, val = module.split_episode_paths(pattern)
+            again = module.split_episode_paths(pattern)
+        self.assertEqual((18, 2), (len(train), len(val)))
+        self.assertFalse(set(train) & set(val))
+        self.assertEqual((train, val), again)
+
     def test_build_stats_schema(self):
         rng = np.random.default_rng(0)
         actions = rng.normal(scale=[0.02, 0.02, 0.02, 0.05, 0.05, 0.05, 1.0], size=(50, 7))
@@ -34,7 +65,7 @@ class ToRldsStatsTests(unittest.TestCase):
         self.assertEqual(50, stats[DEFAULT_UNNORM_KEY]["num_transitions"])
         self.assertEqual(3, stats[DEFAULT_UNNORM_KEY]["num_trajectories"])
         self.assertIn("proprio", stats[DEFAULT_UNNORM_KEY])
-        self.assertEqual("ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip",
+        self.assertEqual("ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip_0_closed_1_open",
                          stats["action_convention"])
         self.assertEqual(256, stats["n_bins"])
 
@@ -92,8 +123,12 @@ class ToRldsStatsTests(unittest.TestCase):
             npz = np.load(os.path.join(out, "episodes", "episode_0000.npz"), allow_pickle=True)
             self.assertEqual((4, 16, 16, 3), npz["image"].shape)
             self.assertEqual((4, 7), npz["action"].shape)
+            np.testing.assert_array_equal(npz["action"][:, -1], [1, 1, 0, 0])
             self.assertEqual((4, 7), npz["state"].shape)
             self.assertEqual((4, 4), npz["ee_quat"].shape)
+            self.assertTrue(os.path.isfile(
+                os.path.join(out, "marc_pnp_dataset_builder.py")
+            ))
 
 
 if __name__ == "__main__":

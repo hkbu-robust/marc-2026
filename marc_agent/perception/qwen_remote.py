@@ -1,14 +1,15 @@
-"""Remote vLLM adapter for Stage 1 Qwen SAR verification."""
+"""Remote vLLM adapter for Stage 1 Qwen verification."""
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Mapping, TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -18,8 +19,42 @@ from marc_agent.perception.qwen_runtime import QwenRemoteConfig
 
 if TYPE_CHECKING:
     from marc_agent.perception.sar_selection import CandidateBoard
+    from marc_agent.types import CctvDetectionRound
 
 log = logging.getLogger("marc_agent.qwen_remote")
+
+MAX_REMOTE_IMAGES = 6
+SCENE_MAX_TOKENS = 192
+def pack_camera_evidence(overview: object, crops: tuple[tuple[str, object], ...]):
+    """Fit one camera overview and all of its labeled crops into one image."""
+    from PIL import Image, ImageDraw
+
+    canvas = Image.new("RGB", (960, 960), "black")
+    overview = overview.copy()
+    overview.thumbnail((960, 520))
+    canvas.paste(overview, ((960 - overview.width) // 2, 0))
+    if not crops:
+        return canvas.crop((0, 0, 960, overview.height))
+
+    columns = min(4, len(crops))
+    rows = (len(crops) + columns - 1) // columns
+    tile_width = 960 // columns
+    tile_height = (960 - overview.height) // rows
+    draw = ImageDraw.Draw(canvas)
+    for index, (label, crop) in enumerate(crops):
+        x = (index % columns) * tile_width
+        y = overview.height + (index // columns) * tile_height
+        image = crop.copy()
+        image.thumbnail((tile_width - 8, tile_height - 8))
+        canvas.paste(image, (x + (tile_width - image.width) // 2, y + 4))
+        draw.text(
+            (x + 6, y + 6),
+            label,
+            fill="yellow",
+            stroke_width=2,
+            stroke_fill="black",
+        )
+    return canvas
 
 
 class QwenRemoteError(RuntimeError):
@@ -57,6 +92,58 @@ class QwenRemoteMetrics:
     latency_ms: float
 
 
+@dataclass(frozen=True)
+class _SceneBoard:
+    images: tuple[object, ...]
+    prompt: str
+
+    @property
+    def candidate_ids(self) -> tuple[str, ...]:
+        return ()
+
+
+def _scene_board(
+    round_: "CctvDetectionRound", command_text: str = ""
+) -> tuple[str, _SceneBoard] | None:
+    """Build compact, mission-aware all-camera visual evidence."""
+    from PIL import Image
+
+    digest = hashlib.sha256()
+    images = []
+    labels = []
+    for camera_id in sorted(round_.frames):
+        frame = round_.frames[camera_id]
+        rgb = frame.rgb
+        if rgb is None:
+            continue
+        image = (
+            rgb.convert("RGB")
+            if hasattr(rgb, "convert")
+            else Image.fromarray(rgb, mode="RGB")
+        )
+        digest.update(camera_id.encode("utf-8"))
+        # ponytail: perceptual cache key; use exact frame hashes if tiny changes matter.
+        digest.update(image.resize((64, 64)).tobytes())
+        image = image.copy()
+        image.thumbnail((960, 960))
+        images.append(image)
+        labels.append(f"IMAGE_{len(images)}={camera_id}")
+    if not images:
+        return None
+    digest.update(command_text.encode("utf-8"))
+    prompt = (
+        f"Mission: {command_text or 'unspecified'}. Inspect every supplied camera for "
+        "visual evidence relevant to this mission, including small target objects, people, "
+        "places, and spatial relations. "
+        "Images map to cameras in this exact order: " + ", ".join(labels) + ". "
+        "Output exactly one line per camera in image order, starting with its exact "
+        "CAMERA_ID. After the ID use at most 14 words covering place, people/actions, "
+        "key objects/relations, and empty/occupied areas. Do not solve a mission or "
+        "invent hidden details."
+    )
+    return digest.hexdigest(), _SceneBoard(tuple(images), prompt)
+
+
 def _post(url: str, body: bytes, headers: Mapping[str, str], timeout_s: float) -> bytes:
     request = Request(url, data=body, headers=dict(headers), method="POST")
     try:
@@ -67,7 +154,9 @@ def _post(url: str, body: bytes, headers: Mapping[str, str], timeout_s: float) -
             raise QwenRemoteAuthenticationError(
                 f"vLLM rejected the configured API key (HTTP {exc.code})"
             ) from exc
-        raise QwenRemoteServerError(f"vLLM returned HTTP {exc.code}") from exc
+        detail = exc.read(512).decode("utf-8", errors="replace").strip()
+        suffix = f": {detail}" if detail else ""
+        raise QwenRemoteServerError(f"vLLM returned HTTP {exc.code}{suffix}") from exc
     except (TimeoutError, socket.timeout) as exc:
         raise QwenRemoteTimeout(
             f"vLLM did not respond within {timeout_s:.1f}s"
@@ -186,6 +275,9 @@ class RemoteQwenSarVerifier:
         self.last_metrics: QwenRemoteMetrics | None = None
         self.budget_timeout_s: float | None = None
         self.last_finish_reason: str | None = None
+        self._scene_cache: dict[str, str] = {}
+        self._scene_description: str | None = None
+        self.last_prompt: str | None = None
 
     def set_budget_timeout(self, timeout_s: float) -> None:
         self.budget_timeout_s = float(timeout_s)
@@ -193,12 +285,48 @@ class RemoteQwenSarVerifier:
     def retry_longer(self, board: "CandidateBoard") -> str:
         """Re-post with more tokens after a truncated reply failed to parse."""
         return self._complete(
-            board,
+            self._with_scene_reference(board),
             max_tokens=max(LENGTH_RETRY_TOKENS, int(self.config.max_new_tokens)),
         )
 
     def __call__(self, board: "CandidateBoard") -> str:
-        return self._complete(board)
+        return self._complete(self._with_scene_reference(board))
+
+    def prepare_scene(
+        self, round_: "CctvDetectionRound", command_text: str = ""
+    ) -> str | None:
+        """Describe mission evidence in every available camera."""
+        prepared = _scene_board(round_, command_text)
+        if prepared is None:
+            self._scene_description = None
+            return None
+        key, board = prepared
+        self._scene_description = None
+        description = self._scene_cache.get(key)
+        if description is None:
+            description = self._complete(board, max_tokens=SCENE_MAX_TOKENS)
+            self._scene_cache[key] = description
+            if len(self._scene_cache) > 8:
+                self._scene_cache.pop(next(iter(self._scene_cache)))
+            log.info("[qwen-remote] scene-cache miss cameras=%d", len(board.images))
+        else:
+            log.info("[qwen-remote] scene-cache hit cameras=%d", len(board.images))
+        self._scene_description = description
+        return description
+
+    def _with_scene_reference(self, board: "CandidateBoard") -> "CandidateBoard":
+        description = self._scene_description
+        if not description:
+            return board
+        prompt = (
+            "Cached all-camera scene reference (descriptive evidence only):\n"
+            f"{description}\n\n"
+            "Compare the original request with every camera description, identify the "
+            "best-aligned camera internally, then complete this finite-ID selection. "
+            "Do not explain your reasoning.\n\n"
+            f"{board.prompt}"
+        )
+        return replace(board, prompt=prompt)
 
     def _timeout_s(self) -> tuple[float, int]:
         timeout_s = min(
@@ -218,6 +346,12 @@ class RemoteQwenSarVerifier:
         *,
         max_tokens: int | None = None,
     ) -> str:
+        self.last_prompt = board.prompt
+        if len(board.images) > MAX_REMOTE_IMAGES:
+            raise QwenRemoteResponseError(
+                f"candidate board has {len(board.images)} images; "
+                f"batch it to at most {MAX_REMOTE_IMAGES}"
+            )
         body = build_remote_payload(board, self.config, max_tokens=max_tokens)
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",

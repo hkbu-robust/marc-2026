@@ -178,11 +178,13 @@ class SarSelectionTests(unittest.TestCase):
 
     def test_board_keeps_every_person_and_requested_anchor(self):
         board = build_candidate_board(self.text, self.command, _round())
-        self.assertEqual(("rig_a:person_bending:0",), board.candidate_ids)
-        self.assertEqual(2, len(board.images))
+        self.assertEqual("rig_a:person_bending:0", board.candidate_ids[0])
+        self.assertIn("rig_a:person_walking:0", board.candidate_ids)
+        self.assertEqual(3, len(board.images))
+        self.assertEqual((512, 512), board.images[-1].size)
         self.assertIn("rig_a:trash_can:0", board.prompt)
         self.assertIn(self.text, board.prompt)
-        self.assertNotIn("rig_a:person_walking:0", board.prompt)
+        self.assertIn("rig_a:person_walking:0", board.prompt)
 
     def test_crop_limit_never_removes_a_candidate_from_the_board(self):
         board = build_candidate_board(
@@ -193,13 +195,13 @@ class SarSelectionTests(unittest.TestCase):
         )
         self.assertEqual(
             ("rig_a:person_bending:0", "rig_a:person_bending:1"),
-            board.candidate_ids,
+            board.candidate_ids[:2],
         )
         self.assertEqual(2, len(board.images))  # one annotated camera + one crop
-        self.assertNotIn("rig_a:person_walking:0", board.prompt)
+        self.assertIn("rig_a:person_walking:0", board.prompt)
         self.assertIn("detail_crop=no", board.prompt)
         self.assertIn("middle token of each CANDIDATE_ID is the detector pose", board.prompt)
-        self.assertIn("Do not prefer P01", board.prompt)
+        self.assertIn("ordered by weak detector and scene evidence", board.prompt)
 
     def test_verifier_can_select_a_candidate_outside_the_crop_budget(self):
         with patch(
@@ -220,15 +222,15 @@ class SarSelectionTests(unittest.TestCase):
                 self.text,
                 self.command,
                 _two_bending_round(),
-                verifier=lambda board: "P01",
+                verifier=lambda board: "rig_a:person_bending:0",
             )
         self.assertEqual(SelectionStatus.SELECTED, result.status)
         self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
         self.assertIsNone(result.evidence_situation)
         self.assertEqual("qwen", result.method)
         self.assertEqual("qwen", result.verifier_metrics.backend)
-        self.assertEqual(4, result.verifier_metrics.image_count)
-        self.assertIn("output=P01", "\n".join(captured.output))
+        self.assertEqual(5, result.verifier_metrics.image_count)
+        self.assertIn("output=rig_a:person_bending:0", "\n".join(captured.output))
 
     def test_invalid_model_output_uses_deterministic_fallback(self):
         with self.assertLogs("marc_agent.sar_selection", level="INFO") as captured:
@@ -304,7 +306,7 @@ class SarSelectionTests(unittest.TestCase):
     def test_board_prefixes_numbered_aliases(self):
         board = build_candidate_board(self.text, self.command, _round())
         self.assertIn("P01 | rig_a:person_bending:0", board.prompt)
-        self.assertNotIn("P02 |", board.prompt)
+        self.assertIn("P02 | rig_a:person_walking:0", board.prompt)
 
     def test_output_parser_accepts_split_camera_pipe(self):
         board = (
@@ -351,7 +353,7 @@ class SarSelectionTests(unittest.TestCase):
 
         self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
         self.assertEqual("deterministic_fallback", result.method)
-        self.assertEqual("unique_shortlist", result.reason)
+        self.assertEqual("verifier_not_configured", result.reason)
 
     def test_sitting_on_trash_can_beats_closer_standing_person(self):
         text = "Find the person sitting on top of the trash can in the parking lot."
@@ -399,7 +401,7 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:person_sitting:0", result.selected.candidate_id)
         self.assertEqual("abnormal", result.requested_situation)
         self.assertEqual("deterministic_fallback", result.method)
-        self.assertEqual("unique_shortlist", result.reason)
+        self.assertEqual("verifier_not_configured", result.reason)
 
     def test_round_pipeline_returns_selection_without_coordinates(self):
         def detector(client, *, stub_path=None):
@@ -511,7 +513,7 @@ class SarSelectionTests(unittest.TestCase):
 
     def test_remote_startup_health_is_visible_and_does_not_log_key(self):
         env = {
-            "MARC_SAR_DETECTOR": "qwen",
+            "MARC_SAR_DETECTOR": "qwen-remote",
             "MARC_QWEN_BACKEND": "remote",
             "MARC_QWEN_BASE_URL": "http://workstation:8000/v1",
             "MARC_QWEN_API_KEY": "private-test-key",
@@ -764,25 +766,21 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:person_prone:0", evidence[0].person.candidate_id)
         self.assertIsNone(evidence[0].anchor)
 
-    def test_two_camera_shortlist_is_score_neutral(self):
+    def test_two_camera_shortlist_keeps_weaker_alternatives(self):
         board = build_candidate_board(self.text, self.command, _two_bending_round())
-        self.assertEqual(
-            ("rig_a:person_bending:0", "rig_b:person_bending:0"),
-            board.candidate_ids,
-        )
-        self.assertIn("P01 | rig_a:person_bending:0", board.prompt)
-        self.assertIn("P02 | rig_b:person_bending:0", board.prompt)
-        self.assertNotIn("rig_a:person_walking:0", board.prompt)
+        self.assertEqual("rig_b:person_bending:0", board.candidate_ids[0])
+        self.assertIn("rig_a:person_bending:0", board.candidate_ids)
+        self.assertIn("rig_a:person_walking:0", board.candidate_ids)
         result = select_sar_candidate(
             self.text,
             self.command,
             _two_bending_round(),
-            verifier=lambda _board: "P01",
+            verifier=lambda _board: "rig_a:person_bending:0",
         )
         self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
         self.assertEqual("qwen", result.method)
 
-    def test_world_near_drops_far_same_camera_landmark_match(self):
+    def test_world_near_keeps_far_same_camera_landmark_match_for_verifier(self):
         from marc_agent.perception.sar_selection import candidate_evidence
 
         round_ = CctvDetectionRound(
@@ -811,7 +809,7 @@ class SarSelectionTests(unittest.TestCase):
         shortlist = shortlist_for_verifier(
             ranked, self.command, self.text, projector
         )
-        self.assertEqual(("rig_a:person_bending:0",), tuple(
+        self.assertEqual(("rig_a:person_bending:0", "rig_a:person_bending:1"), tuple(
             item.person.candidate_id for item in shortlist
         ))
         self.assertIsNotNone(shortlist[0].world_dist_m)
@@ -821,7 +819,7 @@ class SarSelectionTests(unittest.TestCase):
         )
         self.assertIn("world_xy=", board.prompt)
         self.assertIn("world_dist_m=", board.prompt)
-        self.assertNotIn("rig_a:person_bending:1", board.prompt)
+        self.assertIn("rig_a:person_bending:1", board.prompt)
 
     def test_no_pose_words_keeps_every_person(self):
         text = "Find the most critical person in the parking lot."
@@ -832,18 +830,86 @@ class SarSelectionTests(unittest.TestCase):
             board.candidate_ids,
         )
 
-    def test_unique_shortlist_skips_verifier(self):
+    def test_unique_shortlist_calls_configured_verifier(self):
         calls = []
         result = select_sar_candidate(
             self.text,
             self.command,
             _round(),
-            verifier=lambda board: calls.append(board) or "P01",
+            verifier=lambda board: calls.append(board) or (
+                "rig_a:person_bending:0|emergency"
+            ),
         )
-        self.assertEqual([], calls)
+        self.assertEqual(1, len(calls))
         self.assertEqual("rig_a:person_bending:0", result.selected.candidate_id)
-        self.assertEqual("unique_shortlist", result.reason)
-        self.assertEqual("deterministic_fallback", result.method)
+        self.assertEqual("valid_model_output", result.reason)
+        self.assertEqual("qwen", result.method)
+
+    def test_remote_verifier_compares_every_shortlisted_person_in_one_request(self):
+        text = "Find the person lying face-down and motionless."
+        command = parse_command(text)
+        people = [
+            _person(
+                f"rig_a:person_prone:{index}",
+                "person_prone",
+                (20.0 + 60 * index, 120.0, 60.0 + 60 * index, 220.0),
+                0.9 - 0.01 * index,
+            )
+            for index in range(8)
+        ]
+        round_ = CctvDetectionRound(
+            people=people,
+            frames={"rig_a": _frame("rig_a")},
+            camera_ids=["rig_a"],
+        )
+        seen = set()
+        calls = []
+
+        class Verifier:
+            method = "qwen_remote"
+            last_metrics = None
+            last_finish_reason = "stop"
+
+            def __call__(self, board):
+                calls.append(board)
+                seen.update(board.candidate_ids)
+                assert len(board.candidate_ids) == 8
+                assert len(board.images) == 1
+                assert "visual=IMAGE_1:tile=P08" in board.prompt
+                desired = "rig_a:person_prone:7"
+                return desired if desired in board.candidate_ids else board.candidate_ids[0]
+
+        result = select_sar_candidate(text, command, round_, verifier=Verifier())
+        self.assertEqual("rig_a:person_prone:7", result.selected.candidate_id)
+        self.assertEqual({person.candidate_id for person in people}, seen)
+        self.assertEqual(1, len(calls))
+
+    def test_remote_verifier_keeps_pose_mismatches_for_visual_review(self):
+        text = "Find the person lying face-down and motionless."
+        command = parse_command(text)
+        round_ = CctvDetectionRound(
+            people=[
+                _person("rig_a:person_prone:0", "person_prone", (20, 120, 60, 220)),
+                _person("rig_a:person_walking:0", "person_walking", (80, 80, 130, 260)),
+            ],
+            frames={"rig_a": _frame("rig_a")},
+            camera_ids=["rig_a"],
+        )
+        seen = []
+
+        class Verifier:
+            method = "qwen_remote"
+            last_metrics = None
+            last_finish_reason = "stop"
+
+            def __call__(self, board):
+                seen.extend(board.candidate_ids)
+                return board.candidate_ids[0]
+
+        select_sar_candidate(text, command, round_, verifier=Verifier())
+        self.assertEqual(
+            ["rig_a:person_prone:0", "rig_a:person_walking:0"], seen
+        )
 
     def test_fallback_after_bad_qwen_stays_on_shortlist(self):
         with self.assertLogs("marc_agent.sar_selection", level="INFO"):
@@ -891,7 +957,8 @@ class SarSelectionTests(unittest.TestCase):
             camera_ids=["rig_a", "rig_b"],
         )
         board = build_candidate_board(text, command, round_)
-        self.assertEqual(("rig_b:person_bending:0",), board.candidate_ids)
+        self.assertEqual("rig_b:person_bending:0", board.candidate_ids[0])
+        self.assertIn("rig_a:person_lying_down:0", board.candidate_ids)
 
     def test_bench_face_down_keeps_lying_and_prone(self):
         text = "Find the person lying face-down on the bench near the taxi."
@@ -938,7 +1005,7 @@ class SarSelectionTests(unittest.TestCase):
         board = build_candidate_board(text, command, round_)
         self.assertEqual(
             ("rig_a:person_lying_down:0", "rig_b:person_prone:0"),
-            board.candidate_ids,
+            board.candidate_ids[:2],
         )
         calls = []
         result = select_sar_candidate(
@@ -950,9 +1017,9 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual("rig_b:person_prone:0", result.selected.candidate_id)
         self.assertEqual("valid_model_output", result.reason)
-        self.assertNotIn("rig_a:person_bending:0", board.candidate_ids)
+        self.assertIn("rig_a:person_bending:0", board.candidate_ids)
 
-    def test_world_gate_drops_far_same_pose_and_skips_verifier(self):
+    def test_world_geometry_does_not_drop_far_same_pose_before_verifier(self):
         text = "Find the person bent over near the trash can who needs urgent help."
         command = parse_command(text)
         near_box = (300.0, 150.0, 380.0, 280.0)
@@ -995,7 +1062,7 @@ class SarSelectionTests(unittest.TestCase):
             projector,
         )
         self.assertEqual(
-            ("cam_a:person_bending:0",),
+            ("cam_a:person_bending:0", "cam_b:person_bending:0"),
             tuple(item.person.candidate_id for item in shortlist),
         )
         self.assertAlmostEqual(1.7, shortlist[0].world_dist_m, places=2)
@@ -1004,12 +1071,14 @@ class SarSelectionTests(unittest.TestCase):
             text,
             command,
             round_,
-            verifier=lambda board: calls.append(board) or "cam_b:person_bending:0",
+            verifier=lambda board: calls.append(board) or (
+                "cam_a:person_bending:0|emergency"
+            ),
             projector=projector,
         )
-        self.assertEqual([], calls)
+        self.assertEqual(1, len(calls))
         self.assertEqual("cam_a:person_bending:0", result.selected.candidate_id)
-        self.assertEqual("unique_shortlist", result.reason)
+        self.assertEqual("valid_model_output", result.reason)
 
     def test_lying_on_bench_with_prone_does_not_skip_verifier(self):
         text = "Near the taxi, find the person lying down on top of the bench."
@@ -1047,7 +1116,7 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual("rig_a:person_prone:1", result.selected.candidate_id)
         self.assertNotEqual("unique_shortlist", result.reason)
 
-    def test_fallen_by_bicycle_keeps_prostrate_not_walking(self):
+    def test_fallen_by_bicycle_ranks_prostrate_before_walking(self):
         text = "Find the person fallen on the ground next to the toppled bicycle."
         command = parse_command(text)
         round_ = CctvDetectionRound(
@@ -1084,15 +1153,13 @@ class SarSelectionTests(unittest.TestCase):
             camera_ids=["rig_a"],
         )
         board = build_candidate_board(text, command, round_)
-        self.assertEqual(
-            {
-                "rig_a:person_bending:0",
-                "rig_a:person_lying_down:0",
-                "rig_a:person_prone:0",
-            },
-            set(board.candidate_ids),
+        self.assertIn("toppled bicycle is not an upright bicycle", board.prompt)
+        self.assertLess(
+            board.candidate_ids.index("rig_a:person_lying_down:0"),
+            board.candidate_ids.index("rig_a:person_walking:0"),
         )
-        self.assertNotIn("rig_a:person_walking:0", board.candidate_ids)
+        self.assertIn("rig_a:person_prone:0", board.candidate_ids)
+        self.assertIn("rig_a:person_walking:0", board.candidate_ids)
 
 
 if __name__ == "__main__":

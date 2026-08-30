@@ -41,7 +41,7 @@ docker compose up        # builds, then starts the agent (the organizer scores w
 ```
 
 - **Separate machines**: the participant app runs on **separate, dedicated hardware** from the platform. The two machines share the same LAN and the **same `ROS_DOMAIN_ID`**, and DDS goes over the network (UDP). `network_mode: host` makes discovery happen on the machine NIC.
-- GPU: the participant machine's GPU is used for VLA inference (`deploy.resources` -- requires nvidia-container-toolkit). Remove that block if not needed.
+- GPU: the agent uses this machine's `nvidia` container runtime (requires nvidia-container-toolkit).
 - Because CCTV video is transmitted over the network, a gigabit+ LAN is recommended.
 - Submission: push to your private repository's `master` branch, tag the submission commit, and add the `marc-challenge-office` account as a collaborator -> the organizers clone it and run `docker compose up` (teams are scored one at a time, in sequence). Keep the token in the compose file of your private repository only (never in a public repository). See the Submission Guide for the full procedure.
 
@@ -62,7 +62,7 @@ Even without `pip install`ing `marc_sdk`, `launch.sh` adds the SDK path (the sta
 ## Behavior (non-interactive / automatic)
 
 1. **Registration** -> SESSION_ACK
-2. **Stage 1 candidate stage**: parse `voice_command` -> fetch every discovered CCTV once -> YOLO objects/people -> query-conditioned SAR selection. It records a pixel-space candidate handoff; #8/#9 still own object-relation choice, world projection, and submission.
+2. **Stage 1 candidate stage**: parse `voice_command` -> fetch every discovered CCTV once -> GPU YOLO objects/people -> cached all-camera Qwen scene description -> Qwen validates YOLO classes and selects the command-aligned target/anchor -> GPU YOLO refresh of the selected camera -> world projection and submission.
 3. **Stage 2**: `task_description` -> mock VLA -> `submit_stage2_grounding()` -> on reveal, occupancy D* Lite + lidar to the
    target -> arm pick -> D* Lite to the owner zone -> `task_complete()`
 4. **End**: log the final score
@@ -73,21 +73,29 @@ Stage 1 candidate settings:
 |---|---|---|
 | `MARC_STAGE1_DETECTOR` | bundled YOLO when present | `yolo` for live candidates; `stub` is test-only |
 | `MARC_SAR_DETECTOR` | `qwen` | Base and submission Compose pin Qwen verification on |
-| `MARC_QWEN_BACKEND` | `local` | Base and submission Compose pin in-process Transformers; only the explicit remote overlay changes it |
+| `MARC_QWEN_BACKEND` | `remote` in demo | The demo uses the OpenAI-compatible Qwen vLLM on this host; root submission Compose remains local Qwen |
 | `MARC_QWEN_MODEL_DIR` | `/agent/models/runtime/stage1-sar-qwen/model` | Complete pinned local Transformers snapshot |
-| `MARC_QWEN_BASE_URL` | -- | Remote vLLM URL including `/v1`, e.g. `http://192.168.1.20:8000/v1` |
-| `MARC_QWEN_API_KEY` | -- | Bearer key configured on the vLLM server; never written to metrics |
-| `MARC_QWEN_MODEL` | `qwen3-vl-8b` | Name supplied through vLLM `--served-model-name` |
+| `MARC_QWEN_BASE_URL` | `http://127.0.0.1:8000/v1` in demo | Remote vLLM URL including `/v1` |
+| `STREAM` | `false` | `true` selects `http://10.0.0.200:8000/v1`; otherwise Qwen uses localhost |
+| `MARC_QWEN_API_KEY` | local vLLM key in demo | Bearer key configured on the vLLM server; never written to metrics |
+| `MARC_QWEN_MODEL` | `qwen3-vl-8b` in demo | Name supplied through vLLM `--served-model-name` |
 | `MARC_QWEN_TIMEOUT_S` | `90` | Remote request budget before deterministic fallback; wall wait is also capped |
 | `MARC_QWEN_WALL_TIMEOUT_S` | `12` | Per-attempt HTTP wait cap; retries once when remaining budget covers two attempts |
 | `MARC_QWEN_MAX_NEW_TOKENS` | `48` | Local and remote generation budget; 8 tokens truncates `TARGET_ID\|ANCHOR_ID` |
 | `MARC_QWEN_MAX_CROPS` | `12` | Per-person crops; annotated camera views still cover every candidate |
 | `MARC_STAGE1_METRICS_PATH` | `artifacts/stage1_rounds.jsonl` | Per-round candidate counts, latency, selection method, and failures |
 
-### Qwen on the participant/platform machine
+### Qwen on the demo host
 
-The standard root and demo Compose files now force local Qwen, so stale exported
-remote URL/backend variables cannot silently send inference to another workstation.
+The standard `demo/docker-compose.yml` uses the host-network vLLM endpoint at
+`http://127.0.0.1:8000/v1`, serving `qwen3-vl-8b`. Start that service before
+`docker compose up`; the existing remote adapter handles the OpenAI-compatible API.
+Use `STREAM=true docker compose up --build agent` when vLLM is on the machine at
+`10.0.0.200`; the flag overrides `MARC_QWEN_BASE_URL` for that run.
+
+### Local Qwen override
+
+The root submission Compose file still forces local Qwen.
 The root submission build bakes the pinned model into the image and needs no Qwen
 environment variables at runtime.
 
@@ -113,7 +121,7 @@ Start vLLM on the workstation:
 
 ```bash
 conda activate marc
-vllm serve "$HOME/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct" \
+VLLM_BATCH_INVARIANT=1 vllm serve "$HOME/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct" \
   --host 0.0.0.0 --port 8000 \
   --served-model-name qwen3-vl-8b \
   --dtype bfloat16 --gpu-memory-utilization 0.90 \
@@ -130,9 +138,11 @@ docker compose -f demo/docker-compose.yml \
   -f demo/docker-compose.qwen-remote.yml up --build agent
 ```
 
-Remote mode sends lossless PNG data URLs plus the finite candidate prompt. It does not stream raw
-CCTV video, and any connection, authentication, timeout, response, or grammar failure uses
-the same deterministic candidate fallback. The remote compose overlay also sets the image
+Remote mode first caches a compact, command-independent description of all camera views, then
+includes that reference with every finite-ID target/anchor selection prompt. The winning camera
+is re-run through GPU YOLO before either box is projected. It does not stream raw CCTV video,
+and any connection, authentication, timeout, response, or grammar failure uses the same
+deterministic candidate fallback. The remote compose overlay also sets the image
 build arg so `--build` does not Hub-pull the 17.5 GB local snapshot. This mode is for
 practice; submission cannot depend on a separately started workstation process.
 

@@ -22,6 +22,7 @@ from marc_agent.perception.qwen_remote import (
 )
 from marc_agent.perception.qwen_runtime import QwenRemoteConfig
 from marc_agent.perception.sar_selection import CandidateBoard
+from marc_agent.types import CctvDetectionRound, CctvFrame
 
 
 def _config() -> QwenRemoteConfig:
@@ -44,6 +45,60 @@ def _board() -> CandidateBoard:
 
 
 class QwenRemoteTests(unittest.TestCase):
+    def test_all_camera_scene_description_is_cached_and_used_for_selection(self):
+        prompts = []
+        max_tokens = []
+
+        def post(_url, body, _headers, _timeout):
+            payload = json.loads(body)
+            prompt = payload["messages"][0]["content"][-1]["text"]
+            prompts.append(prompt)
+            max_tokens.append(payload["max_tokens"])
+            output = (
+                "rig_a: a park with a seated person; rig_b: an empty road"
+                if "Inspect every supplied camera" in prompt
+                else "rig_a:person_prone:0|emergency"
+            )
+            return json.dumps(
+                {"choices": [{"message": {"content": output}}]}
+            ).encode("utf-8")
+
+        verifier = RemoteQwenSarVerifier(_config(), post=post)
+        scene = CctvDetectionRound(
+            frames={
+                "rig_b": CctvFrame(
+                    "rig_b", 32, 24, Image.new("RGB", (32, 24), "blue")
+                ),
+                "rig_a": CctvFrame(
+                    "rig_a", 32, 24, Image.new("RGB", (32, 24), "green")
+                ),
+            }
+        )
+
+        verifier.prepare_scene(scene, "Find the collapsed person in the park.")
+        self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
+        verifier.prepare_scene(scene, "Find the collapsed person in the park.")
+        self.assertEqual("rig_a:person_prone:0|emergency", verifier(_board()))
+
+        self.assertEqual(3, len(prompts))
+        self.assertIn("IMAGE_1=rig_a, IMAGE_2=rig_b", prompts[0])
+        self.assertIn("Mission: Find the collapsed person", prompts[0])
+        self.assertIn("Cached all-camera scene reference", prompts[1])
+        self.assertIn("rig_b: an empty road", prompts[1])
+        self.assertEqual(prompts[-1], verifier.last_prompt)
+        self.assertEqual(192, max_tokens[0])
+
+    def test_verifier_rejects_unbatched_multimodal_requests(self):
+        image = Image.new("RGB", (8, 8))
+        board = CandidateBoard(
+            images=(image,) * 13,
+            prompt="choose",
+            evidence=(),
+        )
+        verifier = RemoteQwenSarVerifier(_config(), post=lambda *_args: b"")
+        with self.assertRaisesRegex(QwenRemoteResponseError, "batch it to at most 6"):
+            verifier(board)
+
     def test_payload_contains_lossless_png_image_and_deterministic_generation(self):
         image = Image.new("RGB", (32, 24), color=(20, 40, 60))
         board = CandidateBoard(

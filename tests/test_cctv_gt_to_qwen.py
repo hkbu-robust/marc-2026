@@ -315,7 +315,7 @@ class SarLabelTests(unittest.TestCase):
         self.assertIn("distance=", user)
         self.assertIn("overlap=", user)
         self.assertIn(cid, user)
-        self.assertEqual(row["messages"][1]["content"], f"{cid}|abnormal")
+        self.assertEqual(row["messages"][1]["content"], "P02")
 
     def test_missing_recipe_target_camera_emits_no_sar(self):
         walker = _det("person_walking", "object", [100, 300, 180, 500],
@@ -348,8 +348,9 @@ class SarLabelTests(unittest.TestCase):
         try:
             scene = Path(tmp) / "scene_00001"
             scene.mkdir()
-            (scene / "cam_tgt.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-            (scene / "cam_walk.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            from PIL import Image
+            Image.new("RGB", (1280, 720)).save(scene / "cam_tgt.png")
+            Image.new("RGB", (1280, 720)).save(scene / "cam_walk.png")
             person = _det("person_prone", "object", [10, 20, 30, 40],
                           xyz=(0.0, 0.0, 16.7))
             person["recipe_id"] = "sar07_parking_prone"
@@ -375,22 +376,43 @@ class SarLabelTests(unittest.TestCase):
             self.assertTrue((out / "val_sar.jsonl").exists())
             self.assertTrue((out / "train_obj.jsonl").exists())
             self.assertTrue((out / "val_obj.jsonl").exists())
-            self.assertFalse((out / "train.jsonl").exists())
+            self.assertTrue((out / "train.jsonl").exists())
+            self.assertTrue((out / "val.jsonl").exists())
+            self.assertTrue((out / "coverage.json").exists())
+            registry = json.loads((out / "dataset_info.json").read_text())
+            self.assertEqual(
+                registry["marc_qwen_train"]["columns"]["messages"],
+                "messages",
+            )
             sar_lines = (out / "train_sar.jsonl").read_text().strip().splitlines()
             self.assertEqual(len(sar_lines), 1)
             sar = json.loads(sar_lines[0])
             user = sar["messages"][0]["content"]
             self.assertIn("Original request:", user)
             self.assertIn("Candidates:", user)
-            self.assertIn("|accident", sar["messages"][1]["content"])
+            self.assertRegex(sar["messages"][1]["content"], r"^P\d{2}$")
             obj_text = (out / "train_obj.jsonl").read_text()
             self.assertTrue(obj_text.strip())
             self.assertIn("disposable_cup", obj_text)
             self.assertNotIn("|accident", obj_text)
+            obj = json.loads(obj_text.splitlines()[0])
+            self.assertIn("YOLO class labels are fallible priors", obj["messages"][0]["content"])
+            self.assertRegex(obj["messages"][1]["content"], r"^cam_tgt:disposable_cup:\d+$")
+            self.assertTrue(obj["images"][0].startswith("images/"))
+            self.assertTrue((out / obj["images"][0]).is_file())
+            sharegpt_out = Path(tmp) / "sharegpt"
+            q.convert(tmp, str(sharegpt_out), 0.0, 4, 0, "sharegpt")
+            registry = json.loads(
+                (sharegpt_out / "dataset_info.json").read_text()
+            )
+            self.assertEqual(
+                registry["marc_qwen_train"]["columns"]["messages"],
+                "conversations",
+            )
         finally:
             shutil.rmtree(tmp)
 
-    def test_sar_assistant_is_id_pipe_situation_without_coords(self):
+    def test_sar_assistant_is_runtime_numbered_id_without_coords(self):
         person = _det("person_prone", "object", [10, 20, 30, 40])
         walker = _det("person_walking", "object", [100, 100, 200, 300])
         people = [walker, person]
@@ -405,7 +427,7 @@ class SarLabelTests(unittest.TestCase):
             candidate_id=cid, candidate_ids=ids)
         assistant = row["messages"][1]["content"]
         user = row["messages"][0]["content"]
-        self.assertEqual(assistant, f"{cid}|accident")
+        self.assertEqual(assistant, "P01")
         self.assertNotIn("grounding", assistant)
         self.assertNotIn("coord", assistant.lower())
         self.assertIn(cid, user)
@@ -441,6 +463,25 @@ class SarLabelTests(unittest.TestCase):
         self.assertTrue(q._is_long_umbrella("closedlongumbrella"))
         self.assertFalse(q._is_long_umbrella("umbrella"))
         self.assertFalse(q._is_long_umbrella("master_chef_can"))
+
+    def test_coverage_check_detects_a_missing_recipe(self):
+        from collections import Counter
+
+        objects = Counter(set(q.MISSION_OBJECT_TYPES) - set(q._SKIPPED_OBJECTS))
+        landmarks = Counter(q.LANDMARK_TYPES)
+        relations = Counter(q.TEMPLATES)
+        recipes = Counter(q._load_recipes())
+        situations = Counter(
+            recipe["situation"] for recipe in q._load_recipes().values()
+        )
+        recipes.pop("sar01_trash_sit")
+
+        missing = q._coverage_missing(
+            objects, landmarks, relations, situations, recipes,
+            Counter({f"cam_{i}": 1 for i in range(6)}), 6,
+        )
+
+        self.assertEqual(missing, ["recipe:sar01_trash_sit"])
 
 
 if __name__ == "__main__":

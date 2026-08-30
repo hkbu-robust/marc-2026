@@ -555,6 +555,8 @@ def implicit_anchor_classes(parsed: ParsedCommand, text: str = "") -> frozenset[
         return frozenset({parsed.landmark})
     if uses_vehicle_anchor(parsed, text):
         return VEHICLE_LANDMARKS
+    if parsed.scene_hint in PARKING_SCENES:
+        return PARKED_VEHICLE_LANDMARKS
     if parsed.scene_hint == "park":
         return SEATING_LANDMARKS
     return frozenset()

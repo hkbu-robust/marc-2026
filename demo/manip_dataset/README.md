@@ -5,7 +5,7 @@ Two client profiles talk to the same sim (`bash simulation-platform/marc.sh mani
 | Profile | Service | What it is for |
 |---|---|---|
 | **`manip-pick`** | `agent-manip-pick` | Test GraspGen-X (**G**) or wrist-YOLO (**H**) grip + basket drop. No HDF5. |
-| `tools` | `agent-manip-probe` | Record OpenVLA demos (HDF5). Manual grasp + **P** place. |
+| `tools` | `agent-manip-probe` | Record OpenVLA RLDS source + GraspGenX grasp captures. Manual grasp + **P** place. |
 
 ## GraspGen-X pick tester (no dataset)
 
@@ -31,7 +31,8 @@ Dockerfile/image changes still need `--build`. If a previous build is stuck on
 ## Dataset collector
 
 Keyboard-driven demonstration collector against the MARC **manip-trainer** profile.
-Produces raw HDF5 episodes for later OpenVLA LoRA fine-tuning.
+Produces raw HDF5 episodes for OpenVLA and records the successful/failed EE grasp
+pose needed to label later GraspGenX data.
 
 ## Run (dataset collector)
 
@@ -152,7 +153,10 @@ views that made it into the file. Episodes recorded before this change used
 `image_base`/`image_gripper` for the left eyes; `to_rlds.py` still reads those.
 
 **Action convention:** EE delta in arm_base  
-`[dx, dy, dz, droll, dpitch, dyaw, grip]` with `grip` in `{0,1}`.
+Raw HDF5 uses `[dx, dy, dz, droll, dpitch, dyaw, close_intent]`, with
+`close_intent=1`. The RLDS converter flips only that last label to OpenVLA/OXE's
+canonical `0=closed, 1=open`. The physical `q_grip` remains proprioception and is
+never used as an action token, so the arm's `0.68` close ceiling is not rescaled.
 
 ### Which camera trains the policy
 
@@ -208,10 +212,68 @@ python3 -m manip_dataset.to_rlds \
   --camera auto
 ```
 
-`--camera auto` exports each episode's recorded `primary_camera`; pass `base` or `gripper`
-to force a view (it falls back to the other one if the requested view is absent).
+`--camera auto` exports each episode's recorded `primary_camera`; pass an explicit
+view such as `base_left` or `gripper_left` to force one (with a recorded-view fallback).
 
-Produces `episodes/episode_XXXX.npz`, `manifest.json`, and `dataset_statistics.json` nested under `marc_pnp` with OpenVLA `action.{q01,q99,min,max,mean,std,mask}` (gripper `mask=false`). Point LoRA fine-tuning at `unnorm_key=marc_pnp` so decode uses the same bounds as inference. This repo does not run training.
+Produces `episodes/episode_XXXX.npz`, `manifest.json`,
+`dataset_statistics.json`, and a self-contained `marc_pnp_dataset_builder.py`.
+Materialize the actual TFDS/RLDS dataset from an OpenVLA environment:
+
+```bash
+python datasets/marc_pnp_rlds/marc_pnp_dataset_builder.py \
+  --manual-dir datasets/marc_pnp_rlds \
+  --data-dir datasets/tfds
+```
+
+The builder emits deterministic episode-level `train`/`val` splits (90/10), so frames
+from one episode cannot leak into both. It registers as `marc_pnp:1.1.0`; image key is
+`image`, state key is `state`, language key is `language_instruction`, and
+`unnorm_key=marc_pnp`.
+
+## Fine-tune OpenVLA with augmentation and early stopping
+
+Use an official OpenVLA checkout. The launcher makes a patched training copy under the
+work directory; it does not edit that checkout. Training uses upstream color/crop image
+augmentation, evaluates the unaugmented `val` episodes every 500 optimizer steps, keeps
+the best LoRA adapter, stops after five non-improving checks, then merges that adapter
+into a directly loadable Hugging Face model.
+
+```bash
+OPENVLA_DIR=/path/to/openvla \
+OPENVLA_WORK_DIR=/path/to/a-large-writable-volume/marc-openvla \
+training/train_openvla_lora.sh /path/to/tfds-root
+```
+
+Defaults use micro-batch 2 plus 8-way gradient accumulation and
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to leave VRAM headroom. Override with
+`OPENVLA_BATCH_SIZE`, `OPENVLA_GRAD_ACCUM`, `OPENVLA_VAL_STEPS`, or
+`OPENVLA_EARLY_STOP_PATIENCE`. The default work directory is
+`/tmp/marc-openvla`, and the launcher refuses a read-only target or one with less
+than 20 GiB free. On this machine `/mnt/data` is currently mounted read-only, so
+do not use it unless it is remounted writable. The merged model is written to
+`$OPENVLA_WORK_DIR/final-model`.
+
+To run it in the agent:
+
+```bash
+MARC_PICK_POLICY=openvla \
+MARC_OPENVLA_MODEL_DIR=/path/to/marc-openvla/final-model \
+docker compose -f demo/docker-compose.yml up --build agent
+```
+
+## GraspGenX capture boundary
+
+Each success and failure now stores `grasp_capture` in `meta.json`: the first
+latched-grasp (or final attempted) EE pose in `arm_base`, outcome, and gripper.
+This preserves the demonstrated grasp without deriving yaw from depth.
+
+It is intentionally **not** labeled as a train-ready GraspGenX dataset yet.
+The upstream GraspGenX loader additionally requires the exact object mesh and
+an object-relative 4x4 grasp transform. The manipulation API exposes neither
+the spawned object's mesh path nor its exact pose, so manufacturing that
+transform from YOLO/depth would train on the same unreliable estimate this
+dataset is meant to replace. Join the recorded arm-base grasp pose to an exact
+trainer-side object pose/mesh export before running GraspGenX training.
 
 `language_instruction` is pick-only (`"pick up the tumbler"`). Place (`P`) is still used as a keep-filter but is not in the action labels, so the text does not mention the basket.
 
