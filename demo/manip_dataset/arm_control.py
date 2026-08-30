@@ -89,17 +89,22 @@ DEFAULT_GRIP_RAMP_S = 1.2    # seconds from open to the full close command
 DEFAULT_GRIP_EXTRA = 0.02    # rad of extra bite past first contact (0 = stop dead)
 DEFAULT_GRIP_STOP_ON_GRASP = True
 DEFAULT_READY_OPEN_GRIP = False  # ready pose holds whatever the gripper was commanded to
-# Basket placement. The basket sits directly behind the arm (pnp_params place_fwd is
-# negative), so the trip there is a joint-1 rotation of 180 deg at carry height with
-# every other joint frozen — no Cartesian path that IK can solve with the arm folded
-# through itself.
-DEFAULT_PLACE_YAW = np.pi
+# Basket sits behind the arm. Cartesian IK to a behind-the-shoulder XYZ with
+# the ready-pose orientation commands joint 5 past its URDF stop (±2.09 rad);
+# the wrist never follows and the proximal joints fold through the forearm.
+# Joint-1 π at carry height (same elbow/wrist as the front lift) scoops into
+# the basket without moving J5. MARC_PLACE_YAW defaults to π.
+DEFAULT_PLACE_YAW = float(np.pi)
+DEFAULT_PLACE_APEX_FWD = 0.05
+DEFAULT_PLACE_APEX_UP = 0.50
 DEFAULT_PLACE_SPEED = 0.5    # rad/s per joint; joint 1's URDF limit is 1.396
 DEFAULT_PLACE_IK_GUARD = 1.2  # rad any joint may move from its IK seed before the
                               # solution is treated as a branch jump and refused
-# The 180 deg rotation is ~6s of ticks. Recording all of them would make the swing
-# most of the episode and bury the part a policy has to learn (approach and grasp),
-# so scripted joint moves log every Nth tick. The release dwell is never decimated.
+ARM_JOINT_LOWER = np.array([-6.2832, -2.24, -2.57, -6.2832, -2.09, -6.2832])
+ARM_JOINT_UPPER = np.array([6.2832, 2.24, 2.57, 6.2832, 2.09, 6.2832])
+# The overhead fold is several seconds of ticks. Recording all of them would bury
+# the part a policy has to learn (approach and grasp), so scripted joint moves log
+# every Nth tick. The release dwell is never decimated.
 DEFAULT_PLACE_REC_EVERY = 3
 # OpenVLA pretrains on third-person views, and the base camera is static during
 # ARM_TELEOP (base is parked), so only the arm and object move in frame.
@@ -138,6 +143,8 @@ class TeleopConfig:
     grip_extra: float = DEFAULT_GRIP_EXTRA
     grip_stop_on_grasp: bool = DEFAULT_GRIP_STOP_ON_GRASP
     place_yaw: float = DEFAULT_PLACE_YAW
+    place_apex_fwd: float = DEFAULT_PLACE_APEX_FWD
+    place_apex_up: float = DEFAULT_PLACE_APEX_UP
     place_speed: float = DEFAULT_PLACE_SPEED
     place_ik_guard: float = DEFAULT_PLACE_IK_GUARD
     place_rec_every: int = DEFAULT_PLACE_REC_EVERY
@@ -181,6 +188,8 @@ class TeleopConfig:
                 "MARC_GRIP_STOP_ON_GRASP", DEFAULT_GRIP_STOP_ON_GRASP
             ),
             place_yaw=_env_float("MARC_PLACE_YAW", DEFAULT_PLACE_YAW),
+            place_apex_fwd=_env_float("MARC_PLACE_APEX_FWD", DEFAULT_PLACE_APEX_FWD),
+            place_apex_up=_env_float("MARC_PLACE_APEX_UP", DEFAULT_PLACE_APEX_UP),
             place_speed=_env_float(
                 "MARC_PLACE_SPEED", float(p.get("carry_speed", DEFAULT_PLACE_SPEED))
             ),
@@ -237,6 +246,11 @@ def _shortest_joint_delta(q0: np.ndarray, q1: np.ndarray) -> np.ndarray:
     """Element-wise shortest angular delta from q0 to q1 (rad)."""
     d = np.asarray(q1, dtype=np.float64) - np.asarray(q0, dtype=np.float64)
     return (d + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def clamp_arm_q(q: np.ndarray) -> np.ndarray:
+    """Clip a 6-vector to the Gen3 URDF joint limits."""
+    return np.clip(np.asarray(q, dtype=np.float64), ARM_JOINT_LOWER, ARM_JOINT_UPPER)
 
 
 class ArmTeleop:
@@ -723,8 +737,8 @@ class ArmTeleop:
         Every waypoint is a joint vector, so nothing here can flip an IK branch or
         drive the wrist through the forearm; the arm sweeps between two poses that are
         each known to be safe. `wrap` takes the shortest angular path per joint, which
-        is what you want coming back from an arbitrary teleop pose but *not* for the
-        deliberate 180 deg swing (a half turn wraps to the other direction).
+        is what you want coming back from an arbitrary teleop pose. Scoop yaw legs
+        use wrap off so joint 1 interpolates +π, not a random shortest wrap.
         """
         dt = 1.0 / self.cfg.rate_hz
         q0 = read_arm_q(self._client)
@@ -779,22 +793,25 @@ class ArmTeleop:
         target = np.asarray(target, dtype=np.float64)
         quat = arm_kin.R_to_quat(self.kin.fk(q_seed)[:3, :3])
         q = arm_kin.unwrap(arm_kin.ik_solve(self.kin, target, quat, q_seed), q_seed)
+        q = clamp_arm_q(q)
         err = float(np.linalg.norm(target - self.kin.fk(q)[:3, 3]))
         dev = float(np.max(np.abs(q - q_seed)))
         if err < self.cfg.settle_tol_m * 2.0 and dev <= float(self.cfg.place_ik_guard):
-            self._log(f"  [place] {label} solved: err={err:.3f}m dev={dev:.2f} rad")
+            self._log(
+                f"  [place] {label} solved: err={err:.3f}m dev={dev:.2f} rad "
+                f"j5={float(q[4]):+.3f} j6={float(q[5]):+.3f}"
+            )
             return q
         self._log(f"  [place] {label} REJECTED: err={err:.3f}m dev={dev:.2f} rad "
                   f"(guard {self.cfg.place_ik_guard:.2f})")
         return None
 
-    def _place_poses(self) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        """The three joint poses the place needs: front-high, over-basket, in-basket.
+    def _place_poses(self):
+        """Lift, yaw joint 1 by π at carry height, drop. Joint 5 stays in limits.
 
-        Only joint 1 differs between front-high and over-basket, so the trip around the
-        robot is a single-joint sweep at `carry_up` — the same height and the same idea
-        as the arc in `arm_pick.py`, which is the one path known to clear the chassis
-        and the basket rim.
+        This is a scoop: the same elbow/wrist as the front lift, rotated about
+        the shoulder. Cartesian IK to a behind-the-shoulder XYZ is still avoided.
+        If the drop IK is rejected, return None and keep holding.
         """
         p = self._place_params
         q_home = np.asarray(arm_kin.DEFAULT_ARM_Q, dtype=np.float64)
@@ -806,7 +823,8 @@ class ArmTeleop:
         if q_lift is None:
             return None
         q_over = q_lift.copy()
-        q_over[0] += float(self.cfg.place_yaw)
+        q_over[0] += np.pi
+        q_over = clamp_arm_q(q_over)
         q_drop = self._guarded_ik(
             "in-basket",
             [float(p["place_fwd"]), float(p["place_lat"]), float(p["place_up"])],
@@ -817,16 +835,13 @@ class ArmTeleop:
         return q_lift, q_over, q_drop
 
     def place_in_basket(self, on_step: Optional[Callable[[dict, np.ndarray], None]] = None) -> int:
-        """Squeeze, lift, rotate to the basket, drop, rotate back.
+        """Keep the latched squeeze, scoop (joint-1 π at carry height) into the basket, drop, reverse.
 
         Dataset collection passes `on_step=None`: place is hard-coded, so its ticks must
         not enter the training set. Pass a callback only when you want those steps logged.
 
-        Every move is a joint-space interpolation between two poses that differ only
-        modestly, and the trip around the robot is a pure joint-1 rotation at carry
-        height. Cartesian tracking was the problem, not the solution: a straight line
-        to a point behind the shoulder has no safe interpolation, and IK kept solving
-        it with the arm folded through itself.
+        Yaw legs use wrap=False so interpolation is +π. Cartesian tracking to a point
+        behind the shoulder is still avoided.
         """
         if read_arm_q(self._client) is None:
             self._log("[place] no joint_states")
@@ -835,29 +850,38 @@ class ArmTeleop:
         q_home = np.asarray(arm_kin.DEFAULT_ARM_Q, dtype=np.float64)
         poses = self._place_poses()
         if poses is None:
-            self._log("[place] cannot solve the basket poses — nothing moved, still "
+            self._log("[place] cannot solve the scoop basket poses — nothing moved, still "
                       "holding (check pnp_params place_fwd/place_lat/place_up/carry_up)")
             return 0
         q_lift, q_over, q_drop = poses
         speed = float(self.cfg.place_speed)
         dwell = max(float(self.cfg.grip_dwell_s), 0.4)
-        self._log(f"[place] yaw={self.cfg.place_yaw:.3f} rad at {speed:.2f} rad/s, "
-                  f"carry z={float(self._place_params['carry_up']):.3f}")
+        ee_over = self.kin.fk(q_over)[:3, 3]
+        self._log(
+            "[place] scoop j1=%.2f j5=%.2f ee=(%.3f,%.3f,%.3f) at %.2f rad/s, carry z=%.3f"
+            % (
+                float(q_over[0]),
+                float(q_over[4]),
+                float(ee_over[0]),
+                float(ee_over[1]),
+                float(ee_over[2]),
+                speed,
+                float(self._place_params["carry_up"]),
+            )
+        )
 
         n = 0
         q_now = read_arm_q(self._client)
         self._place_quat = arm_kin.R_to_quat(self.kin.fk(q_now)[:3, :3])
-        # Let the fingers settle before anything moves, but do NOT re-close to the full
-        # command: grip_cmd is already the value that achieved the hold, and squeezing
-        # past contact is what ejects the object.
-        if self.closing:
+        # Keep the latched squeeze. Publishing json/env close after contact ejects
+        # the object. grip_target already means "closed" even if grip_cmd is 0.33.
+        if self.closing or self._closed_since_last_open:
             n += self._grip_segment("hold", self.grip_cmd, on_step, dwell,
                                     intent=self.cfg.grip_close)
         else:
             self._log("[place] gripper is open — closing before the move")
             n += self._grip_click(self.cfg.grip_close, on_step)
         self._log(f"[place] holding={self.refresh_grasp()} at grip={self.grip_cmd:.3f}")
-        n += self._joint_move("fold to ready", q_home, on_step, speed, wrap=True)
         n += self._joint_move("raise to carry height", q_lift, on_step, speed)
         n += self._joint_move("rotate over basket", q_over, on_step, speed)
         n += self._joint_move("lower into basket", q_drop, on_step, speed)

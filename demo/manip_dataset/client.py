@@ -35,6 +35,11 @@ class ManipTrainerClient(MARCClient):
         self._log("[MANIP-TRAINER] using direct ROS 2 connection (handshake bypassed)")
         return True
 
+    @property
+    def is_running(self) -> bool:
+        """Practice trainer has no Stage 2 mission clock; stay up until disconnect."""
+        return not self._shutdown
+
 
 CAMERA_TOPIC_SUFFIXES = (
     "base_camera/left/image",

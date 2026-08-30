@@ -20,6 +20,7 @@ from marc_agent.navigation_runtime import (
     Stage2Navigator,
     _frontal_escape,
     _plan_attempts,
+    _ram_bumper_disc,
 )
 from marc_agent.retrieval_state import search_area_approach_goal
 
@@ -102,6 +103,7 @@ class FakeClient:
         lidar_origin_max_m=None,
         lidar_until_s=None,
         lidar_world_xyz=None,
+        immobile=False,
     ):
         self._pose = [float(start[0]), float(start[1]), float(start[2])]
         self._t = 0.0
@@ -118,16 +120,18 @@ class FakeClient:
         self._lidar_origin_max_m = lidar_origin_max_m
         self._lidar_until_s = lidar_until_s
         self._lidar_left_origin = False
+        self._immobile = bool(immobile)
 
     def now_s(self):
         return self._t
 
     def sleep(self, dt):
         dt = float(dt)
-        yaw = self._pose[2]
-        self._pose[0] += self._v * math.cos(yaw) * dt
-        self._pose[1] += self._v * math.sin(yaw) * dt
-        self._pose[2] += self._w * dt
+        if not self._immobile:
+            yaw = self._pose[2]
+            self._pose[0] += self._v * math.cos(yaw) * dt
+            self._pose[1] += self._v * math.sin(yaw) * dt
+            self._pose[2] += self._w * dt
         self._t += dt
         if self.stop_after_s is not None and self._t >= float(self.stop_after_s):
             self.is_running = False
@@ -252,6 +256,8 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertIn("expected_intent=Intent.BRING", src)
         self.assertIn("MARC_STAGE2_MOCK_VLA", src)
         self.assertIn("STAGE2_INFLATION_M = 0.55", src)
+        self.assertIn("peek_yolo_handoff", src)
+        self.assertIn("handoff_fn", src)
 
     def test_unknown_cells_are_not_traversable(self):
         grid = np.full((20, 40), -1, dtype=np.int8)
@@ -951,6 +957,106 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(cmd)
         self.assertLess(cmd[0], 0.0)
         self.assertEqual(0.0, cmd[1])
+
+    def test_inside_disc_aborts_before_approach_edge(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        start = [5.0, 5.0, 0.0]
+        client = FakeClient(start, occ=occ)
+        nav = Stage2Navigator(
+            client, dt=0.10, inflation_m=0.0, exclude_m=0.4,
+            stuck_time_s=30.0, replan_cap=20,
+        )
+        result = nav.navigate_to(
+            (16.0, 5.0), 5.0, leg="search", tol=0.7,
+            search_xy=(5.0, 5.0), search_radius=2.0,
+        )
+        self.assertEqual("reached", result.status.value)
+        self.assertEqual("inside_disc", result.reason)
+        pose = client.get_world_pose()
+        self.assertLess(math.hypot(pose[0] - 5.0, pose[1] - 5.0), 0.05)
+        self.assertTrue(all(v <= 1e-9 for v, _w in client.cmds))
+
+    def test_handoff_fn_true_on_tick_two(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([2.0, 5.0, 0.0], occ=occ)
+        nav = Stage2Navigator(
+            client, dt=0.10, inflation_m=0.0, exclude_m=0.4,
+            stuck_time_s=30.0, replan_cap=20,
+        )
+        ticks = [0]
+
+        def handoff(_pose):
+            ticks[0] += 1
+            return ticks[0] >= 2
+
+        result = nav.navigate_to(
+            (16.0, 5.0), 5.0, leg="search", tol=0.7, handoff_fn=handoff,
+        )
+        self.assertEqual("reached", result.status.value)
+        self.assertEqual("yolo_seen", result.reason)
+        self.assertGreaterEqual(ticks[0], 2)
+
+    def test_ram_unstick_stamps_overlay_reverses_and_detours(self):
+        from marc_agent.lidar_safety import DISC_R, STOP_X_MAX
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        start = (2.0, 5.0, 0.0)
+        disc = _ram_bumper_disc(start)
+        self.assertAlmostEqual(disc[0], start[0] + STOP_X_MAX)
+        self.assertAlmostEqual(disc[1], start[1])
+        self.assertAlmostEqual(disc[2], DISC_R)
+        # Live occupancy is 5 cm; a 0.5 m test grid would let the start hole eat the bumper disc.
+        grid = np.zeros((200, 400), dtype=np.int8)
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.05, 0.0, 0.0)
+        planner.stamp_overlay([disc], now_s=1.0)
+        planner.clear_start_hole((start[0], start[1]), exclude_m=0.20)
+        self.assertFalse(planner.cell_free(disc[0], disc[1], 0.0))
+
+        occ = _Occ(grid, 0.05, 0.0, 0.0)
+        client = FakeClient([2.0, 5.0, 0.0], occ=occ, immobile=True)
+        nav = Stage2Navigator(
+            client, dt=0.10, inflation_m=0.0, exclude_m=0.4,
+            stuck_time_s=30.0, replan_cap=20,
+        )
+        result = nav.navigate_to((16.0, 5.0), 8.0, leg="search", tol=0.7)
+        self.assertTrue(client.cmds)
+        fwd_i = next(
+            (i for i, (v, _w) in enumerate(client.cmds) if v > 0.05), None,
+        )
+        self.assertIsNotNone(fwd_i, "expected a forward command before ram")
+        rev_i = next(
+            (
+                i for i, (v, w) in enumerate(client.cmds)
+                if i > fwd_i and v < -0.05 and abs(w) < 0.15
+            ),
+            None,
+        )
+        self.assertIsNotNone(rev_i, "expected straight reverse after forward stuck")
+        self.assertGreaterEqual(result.replan_count, 1)
+        self.assertIsNotNone(result.path)
+        self.assertGreaterEqual(len(result.path), 2)
+
+    def test_inplace_turn_does_not_ram_unstick(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([2.0, 5.0, math.pi], occ=occ, immobile=True)
+        nav = Stage2Navigator(
+            client, dt=0.10, inflation_m=0.0, exclude_m=0.4,
+            stuck_time_s=30.0, replan_cap=20,
+        )
+        nav.navigate_to((16.0, 5.0), 3.0, leg="search", tol=0.7)
+        self.assertTrue(client.cmds)
+        self.assertTrue(
+            all(v > -0.05 for v, _w in client.cmds),
+            "in-place rotate must not reverse, got %s" % client.cmds[:12],
+        )
+        self.assertTrue(
+            any(abs(w) > 0.05 and abs(v) < 0.05 for v, w in client.cmds),
+            "expected in-place yaw commands",
+        )
 
 
 if __name__ == "__main__":

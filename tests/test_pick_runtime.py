@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import math
 import os
 import unittest
 from types import SimpleNamespace
 
+import numpy as np
 import yaml
 
-from marc_agent.pick_runtime import PickRuntime, PickResult
+from marc_agent.pick_runtime import PickRuntime, PickResult, clamp_grasp_xyz
 from marc_agent.retrieval_state import RetrievalState
 
 
@@ -51,6 +53,24 @@ class ScriptClient:
 
     def send_arm_command(self, *args, **kwargs):
         return None
+
+
+def _cloud_target(fwd=0.40, lat=0.0, z=-0.30):
+    """Near-field target with a bbox crop large enough for GraspGen-X."""
+    depth = np.full((48, 64), 0.55, dtype=np.float32)
+    return SimpleNamespace(
+        fwd=fwd,
+        lat=lat,
+        z=z,
+        valid=True,
+        name="tumbler",
+        depth=depth,
+        bbox_xyxy=(8, 8, 56, 40),
+        k=(50.0, 50.0, 32.0, 24.0),
+        rgb_shape=(48, 64),
+        R=None,
+        t=None,
+    )
 
 
 class PickRuntimeTests(unittest.TestCase):
@@ -180,15 +200,14 @@ class PickRuntimeTests(unittest.TestCase):
         runtime._ik_grasp = lambda target: seen.append(
             (float(target.fwd), float(target.lat), float(target.z))
         )
-        target = SimpleNamespace(fwd=0.40, lat=0.0, z=-0.30, valid=True, name="tumbler")
-        result = runtime.run(target)
+        result = runtime.run(_cloud_target())
         self.assertTrue(result.ok)
         self.assertEqual([(0.41, 0.02, -0.27)], seen)
 
-    def test_graspgenx_missing_weights_still_runs_ik(self):
+    def test_graspgenx_none_skips_ik(self):
         client = ScriptClient()
-        client.grasping = True
-        client.basket = True
+        client.grasping = False
+        client.basket = False
         seen = []
         runtime = PickRuntime(
             client, log=lambda _m: None,
@@ -202,15 +221,36 @@ class PickRuntimeTests(unittest.TestCase):
         )
         target = SimpleNamespace(fwd=0.40, lat=0.0, z=-0.30, valid=True, name="tumbler")
         result = runtime.run(target)
-        self.assertTrue(result.ok)
-        self.assertEqual([(0.40, 0.0, -0.30)], seen)
+        self.assertFalse(result.ok)
+        self.assertEqual("no_grasp", result.reason)
+        self.assertEqual(1, result.attempts)
+        self.assertEqual([], seen)
         self.assertEqual("graspgenx", result.policy)
 
+    def test_graspgenx_empty_cloud_skips_ik(self):
+        client = ScriptClient()
+        client.grasping = False
+        client.basket = False
+        seen = []
+        runtime = PickRuntime(
+            client, log=lambda _m: None,
+            max_attempts=1, policy="graspgenx",
+            place_fn=lambda: None,
+            recover_fn=lambda: None,
+            poll_dt=0.0, grasp_poll=1, basket_poll=1,
+            grasp_generator=lambda _cloud: (0.41, 0.02, -0.27),
+        )
+        runtime._ik_grasp = lambda target: seen.append(
+            (float(target.fwd), float(target.lat), float(target.z))
+        )
+        target = SimpleNamespace(fwd=0.40, lat=0.0, z=-0.30, valid=True, name="tumbler")
+        result = runtime.run(target)
+        self.assertFalse(result.ok)
+        self.assertEqual("no_grasp", result.reason)
+        self.assertEqual(1, result.attempts)
+        self.assertEqual([], seen)
+
     def test_graspgenx_matrix_sets_grasp_yaw(self):
-        import math
-
-        import numpy as np
-
         client = ScriptClient()
         client.grasping = True
         client.basket = True
@@ -238,12 +278,174 @@ class PickRuntimeTests(unittest.TestCase):
                 float(getattr(target, "grasp_yaw", float("nan"))),
             )
         )
-        target = SimpleNamespace(fwd=0.40, lat=0.0, z=-0.30, valid=True, name="tumbler")
-        result = runtime.run(target)
+        result = runtime.run(_cloud_target())
         self.assertTrue(result.ok)
         self.assertEqual(1, len(seen))
         self.assertAlmostEqual(0.41, seen[0][0], places=6)
         self.assertAlmostEqual(yaw, seen[0][3], places=6)
+
+    def test_clamp_grasp_xyz_raises_z_to_floor(self):
+        got = clamp_grasp_xyz((0.41, 0.02, -0.44), (0.40, 0.0, -0.22), -0.28)
+        self.assertAlmostEqual(0.41, got[0], places=6)
+        self.assertAlmostEqual(0.02, got[1], places=6)
+        self.assertAlmostEqual(-0.28, got[2], places=6)
+
+    def test_clamp_grasp_xyz_keeps_xy(self):
+        loc = (0.40, 0.0, -0.22)
+        got = clamp_grasp_xyz((0.48, 0.10, -0.22), loc, -0.28)
+        self.assertAlmostEqual(0.48, got[0], places=6)
+        self.assertAlmostEqual(0.10, got[1], places=6)
+        self.assertAlmostEqual(-0.22, got[2], places=6)
+
+    def test_graspgenx_deep_z_uses_floor_not_rim(self):
+        client = ScriptClient()
+        client.grasping = True
+        client.basket = True
+        seen = []
+        runtime = PickRuntime(
+            client, log=lambda _m: None,
+            max_attempts=1, policy="graspgenx",
+            place_fn=lambda: None,
+            recover_fn=lambda: None,
+            poll_dt=0.0, grasp_poll=1, basket_poll=1,
+            grasp_generator=lambda _cloud: (0.41, 0.02, -0.44),
+        )
+        runtime._ik_grasp = lambda target: seen.append(
+            (float(target.fwd), float(target.lat), float(target.z))
+        )
+        result = runtime.run(_cloud_target(z=-0.22))
+        self.assertTrue(result.ok)
+        self.assertEqual(1, len(seen))
+        self.assertAlmostEqual(0.41, seen[0][0], places=6)
+        self.assertAlmostEqual(0.02, seen[0][1], places=6)
+        self.assertAlmostEqual(-0.28, seen[0][2], places=2)
+        self.assertNotAlmostEqual(-0.22, seen[0][2], places=2)
+
+    def test_graspgenx_xy_not_snapped_to_bbox(self):
+        client = ScriptClient()
+        client.grasping = True
+        client.basket = True
+        seen = []
+        runtime = PickRuntime(
+            client, log=lambda _m: None,
+            max_attempts=1, policy="graspgenx",
+            place_fn=lambda: None,
+            recover_fn=lambda: None,
+            poll_dt=0.0, grasp_poll=1, basket_poll=1,
+            grasp_generator=lambda _cloud: (0.45, 0.04, -0.22),
+        )
+        runtime._ik_grasp = lambda target: seen.append(
+            (float(target.fwd), float(target.lat), float(target.z))
+        )
+        result = runtime.run(_cloud_target(z=-0.22))
+        self.assertTrue(result.ok)
+        self.assertEqual(1, len(seen))
+        self.assertAlmostEqual(0.45, seen[0][0], places=6)
+        self.assertAlmostEqual(0.04, seen[0][1], places=6)
+
+    def test_graspgenx_far_from_yolo_skips_ik(self):
+        client = ScriptClient()
+        client.grasping = False
+        client.basket = False
+        seen = []
+        runtime = PickRuntime(
+            client, log=lambda _m: None,
+            max_attempts=1, policy="graspgenx",
+            place_fn=lambda: None,
+            recover_fn=lambda: None,
+            poll_dt=0.0, grasp_poll=1, basket_poll=1,
+            grasp_generator=lambda _cloud: (0.35, -0.176, -0.059),
+        )
+        runtime._ik_grasp = lambda target: seen.append(
+            (float(target.fwd), float(target.lat), float(target.z))
+        )
+        result = runtime.run(_cloud_target(fwd=0.251, lat=-0.005, z=-0.016))
+        self.assertFalse(result.ok)
+        self.assertEqual("no_grasp", result.reason)
+        self.assertEqual(1, result.attempts)
+        self.assertEqual([], seen)
+
+    def test_graspgenx_aerial_z_skips_ik(self):
+        client = ScriptClient()
+        client.grasping = False
+        client.basket = False
+        seen = []
+        runtime = PickRuntime(
+            client, log=lambda _m: None,
+            max_attempts=1, policy="graspgenx",
+            place_fn=lambda: None,
+            recover_fn=lambda: None,
+            poll_dt=0.0, grasp_poll=1, basket_poll=1,
+            grasp_generator=lambda _cloud: (0.40, 0.0, 0.128),
+        )
+        runtime._ik_grasp = lambda target: seen.append(
+            (float(target.fwd), float(target.lat), float(target.z))
+        )
+        result = runtime.run(_cloud_target(z=-0.023))
+        self.assertFalse(result.ok)
+        self.assertEqual("no_grasp", result.reason)
+        self.assertEqual([], seen)
+
+    def test_graspgenx_out_of_reach_skips_ik(self):
+        client = ScriptClient()
+        client.grasping = False
+        client.basket = False
+        seen = []
+        runtime = PickRuntime(
+            client, log=lambda _m: None,
+            max_attempts=1, policy="graspgenx",
+            place_fn=lambda: None,
+            recover_fn=lambda: None,
+            poll_dt=0.0, grasp_poll=1, basket_poll=1,
+            grasp_generator=lambda _cloud: (0.60, 0.20, -0.22),
+        )
+        runtime._ik_grasp = lambda target: seen.append(
+            (float(target.fwd), float(target.lat), float(target.z))
+        )
+        result = runtime.run(_cloud_target(z=-0.22))
+        self.assertFalse(result.ok)
+        self.assertEqual("no_grasp", result.reason)
+        self.assertEqual(1, result.attempts)
+        self.assertEqual([], seen)
+
+    def test_practice_client_picks_when_is_running_false(self):
+        client = ScriptClient()
+        client.is_running = False
+        client.grasping = True
+        client.basket = True
+        grasped = []
+        runtime = PickRuntime(
+            client, log=lambda _m: None,
+            max_attempts=1, policy="ik",
+            grasp_fn=lambda t: grasped.append(t),
+            place_fn=lambda: None,
+            recover_fn=lambda: None,
+            poll_dt=0.0, grasp_poll=1, basket_poll=1,
+        )
+        target = SimpleNamespace(fwd=0.40, lat=0.0, z=-0.30, valid=True)
+        result = runtime.run(target)
+        self.assertTrue(result.ok)
+        self.assertEqual("ok", result.reason)
+        self.assertEqual(1, len(grasped))
+
+    def test_stage2_session_end_is_timeout(self):
+        client = ScriptClient()
+        client.is_running = False
+        client._stage2_active = True
+        grasped = []
+        runtime = PickRuntime(
+            client, log=lambda _m: None,
+            max_attempts=1, policy="ik",
+            grasp_fn=lambda t: grasped.append(t),
+            place_fn=lambda: None,
+            recover_fn=lambda: None,
+            poll_dt=0.0, grasp_poll=1, basket_poll=1,
+        )
+        target = SimpleNamespace(fwd=0.40, lat=0.0, z=-0.30, valid=True)
+        result = runtime.run(target)
+        self.assertFalse(result.ok)
+        self.assertEqual("timeout", result.reason)
+        self.assertEqual([], grasped)
 
 
 if __name__ == "__main__":

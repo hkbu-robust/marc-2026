@@ -41,7 +41,8 @@ WORKDIR /metacom2026
 
 # Platform runtime dependencies - installed into IsaacSim's bundled Python (numpy/yaml included by default).
 # Training stacks like torch/stable-baselines3 are trainer-only -> not installed in the platform image.
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir packaging netifaces pyyaml pillow
+# Host network: BuildKit's default RUN DNS cannot resolve pypi.org on this host.
+RUN --network=host /isaac-sim/python.sh -m pip install --no-cache-dir packaging netifaces pyyaml pillow
 
 # Public practice scenarios shipped = marc2026_chungmu + marc2026_demo (PUBLIC_SCENARIOS.txt allowlist).
 # Default = marc2026_chungmu (participant full set: includes answers -> self-scoring possible).

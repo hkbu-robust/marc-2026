@@ -211,6 +211,8 @@ class WaypointSequence:
         ``move``         - approach the waypoint via cart (straight-line tracking) or joint (joint interpolation)
         ``dwell``        - after reaching, wait for hold seconds (gripper latch)
         ``settle_end``   - command the default pose again, wait, then go idle
+                           (skipped when the gripper is latched so a pick can
+                           scoop from lift instead of folding to ready)
     """
 
     def __init__(self, kin, default_arm_q, default_quat, pos_step, joint_step,
@@ -379,6 +381,10 @@ class WaypointSequence:
     def _advance(self, arm_q: np.ndarray, now: float) -> None:
         self._idx += 1
         if self._idx >= len(self._waypoints):
+            if self._grip > 1e-3:
+                self._phase = None
+                self._log.info("all waypoints done — holding at last pose")
+                return
             self._phase = "settle_end"
             self._log.info("all waypoints done — returning to default pose")
             return

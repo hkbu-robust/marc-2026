@@ -2,7 +2,8 @@
 
 Weights and gripper assets are downloaded at **Docker build**, not stored in git.
 The loader is offline-only: it never clones Hugging Face and never downloads on
-import. A missing package or unloadable snapshot falls back to analytic IK.
+import. A missing package, empty object cloud, or unloadable snapshot fails
+closed (the arm does not fall back to analytic IK on a bbox-center pixel).
 
 ## Pins
 
@@ -41,8 +42,12 @@ Default gripper is `robotiq_2f_140` (Kinova Gen3 + Robotiq 2F-140).
 
 ## Action convention
 
-The pick seam crops the ego depth cloud inside the near-field bbox, asks
-GraspGen-X for a 6-DoF grasp, uses the translation in **arm_base**
-`(fwd, lat, z)` as the IK target, and maps the 4x4 XY closing axis to
-``grasp_yaw`` for the pre/descend/grasp/lift waypoints. Basket place keeps
-the default EE quaternion.
+The pick seam crops the ego depth cloud inside an **inset** near-field bbox
+(the box is a mask, not the motion goal), asks GraspGen-X for up to 32 6-DoF
+grasps (`min_grasps=1`, `max_tries=1`), and **keeps only TCPs within 8 cm XY
+of the YOLO localize** that are not aerial (z above the object / arm-base)
+and not flipped (`|yaw| > 0.9`). z is raised to the pavement floor if the
+sample goes below it. After the pre waypoint, wrist depth may lower z along
+the camera axis (skips are logged). A failed or far sample does not move the
+arm. Basket place copies the **latched** squeeze and scoops with joint-1 π
+at carry height (not a tuck, and not a re-close to json/env grip).

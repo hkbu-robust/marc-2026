@@ -17,10 +17,14 @@ if _DEMO not in sys.path:
     sys.path.insert(0, _DEMO)
 
 from nearfield import (  # noqa: E402
+    MissingDetector,
     NearFieldAcquire,
+    PEEK_RANGE_PAD_M,
     apply_lidar_gate,
+    choose_lock_depth,
     gated_cmd_vel,
     localize_detection,
+    peek_yolo_handoff,
     pick_nearfield_candidate,
 )
 
@@ -138,6 +142,178 @@ class NearFieldHandoffTests(unittest.TestCase):
         clear = advise(None)
         lin, _ang = apply_lidar_gate(0.15, 0.0, clear)
         self.assertGreater(lin, 0.0)
+
+
+class _RgbMsg:
+    def __init__(self, arr):
+        h, w = arr.shape[:2]
+        self.height = h
+        self.width = w
+        self.encoding = "rgb8"
+        self.step = w * 3
+        self.data = np.ascontiguousarray(arr, dtype=np.uint8).tobytes()
+
+
+class _DepthMsg:
+    def __init__(self, arr):
+        h, w = arr.shape[:2]
+        self.height = h
+        self.width = w
+        self.encoding = "32fc1"
+        self.data = np.ascontiguousarray(arr, dtype=np.float32).tobytes()
+
+
+class _PeekClient:
+    def __init__(self, rgb, depth):
+        self._rgb = rgb
+        self._depth = depth
+        self.cmds = []
+
+    def get_robot_image(self, *_a, **_k):
+        return self._rgb
+
+    def get_robot_depth(self, *_a, **_k):
+        return self._depth
+
+    def get_world_pose(self):
+        return (0.0, 0.0, 0.0)
+
+    def send_cmd_vel(self, linear_x=0.0, angular_z=0.0, **_k):
+        self.cmds.append((float(linear_x), float(angular_z)))
+
+    def sleep(self, _dt):
+        return None
+
+
+class _PeekDetector:
+    def __init__(self, candidates, boom=False):
+        self.candidates = candidates
+        self.boom = boom
+        self.calls = 0
+
+    def load(self):
+        return True
+
+    def set_target(self, _ttype):
+        return None
+
+    def detect_candidates(self, rgb, _ttype):
+        self.calls += 1
+        if self.boom:
+            raise AssertionError("detect must not run when pose is out of peek range")
+        return {
+            "status": "ok",
+            "candidates": self.candidates,
+            "rgb_shape": rgb.shape[:2],
+        }
+
+
+class PeekYoloHandoffTests(unittest.TestCase):
+    def test_skips_when_pose_is_beyond_peek_pad(self):
+        det = _PeekDetector([], boom=True)
+        rgb = _RgbMsg(np.zeros((48, 64, 3), dtype=np.uint8))
+        depth = _DepthMsg(np.full((48, 64), 1.5, dtype=np.float32))
+        client = _PeekClient(rgb, depth)
+        far = (0.0 + 3.0 + PEEK_RANGE_PAD_M + 1.0, 0.0, 0.0)
+        self.assertFalse(
+            peek_yolo_handoff(client, det, far, (0.0, 0.0), 3.0, "tumbler")
+        )
+        self.assertEqual(0, det.calls)
+
+    def test_hands_off_when_bbox_depth_is_in_range(self):
+        box = {"xyxy": [20, 10, 40, 30], "confidence": 0.9, "class_name": "tumbler"}
+        det = _PeekDetector([box])
+        rgb = _RgbMsg(np.zeros((48, 64, 3), dtype=np.uint8))
+        depth = _DepthMsg(np.full((48, 64), 1.5, dtype=np.float32))
+        client = _PeekClient(rgb, depth)
+        pose = (5.0, 0.0, 0.0)
+        self.assertTrue(
+            peek_yolo_handoff(client, det, pose, (0.0, 0.0), 3.0, "tumbler")
+        )
+        self.assertEqual(1, det.calls)
+
+    def test_existing_skip_too_far_and_yolo_may_center_fixtures_stay(self):
+        center = (0.0, 0.0)
+        far = (15.0, 0.0)
+        self.assertEqual(
+            "skip_too_far",
+            nearfield_start_reason(False, far, center, 3.0, 0.7),
+        )
+        self.assertFalse(yolo_may_center(True, far, center, 3.0, 15.0, 0.7))
+        self.assertTrue(yolo_may_center(True, (3.5, 0.0), center, 3.0, 2.0, 0.7))
+
+
+class NearFieldSnapshotTests(unittest.TestCase):
+    def _client(self, depth_m=0.40, rgb=None, depth=None):
+        if rgb is None:
+            rgb = _RgbMsg(np.zeros((48, 64, 3), dtype=np.uint8))
+        if depth is None:
+            depth = _DepthMsg(np.full((48, 64), float(depth_m), dtype=np.float32))
+        return _PeekClient(rgb, depth)
+
+    def test_snapshot_valid_without_reveal_disc(self):
+        box = {
+            "xyxy": [20, 10, 40, 30],
+            "confidence": 0.9,
+            "class_name": "tumbler",
+            "class_id": 0,
+        }
+        det = _PeekDetector([box])
+        client = self._client(0.40)
+        target = NearFieldAcquire(client, detector=det).snapshot("tumbler")
+        self.assertTrue(target.valid)
+        self.assertEqual("tumbler", target.name)
+        self.assertEqual(1, det.calls)
+        self.assertTrue(all(lin == 0.0 for lin, _ang in client.cmds))
+
+    def test_snapshot_fail_closed_without_box(self):
+        det = _PeekDetector([])
+        target = NearFieldAcquire(self._client(), detector=det).snapshot("tumbler")
+        self.assertFalse(target.valid)
+        self.assertEqual("not_detected", target.reason)
+
+    def test_snapshot_fail_closed_without_depth(self):
+        box = {
+            "xyxy": [20, 10, 40, 30],
+            "confidence": 0.9,
+            "class_name": "tumbler",
+            "class_id": 0,
+        }
+        det = _PeekDetector([box])
+        client = self._client()
+        client._depth = None
+        target = NearFieldAcquire(client, detector=det).snapshot("tumbler")
+        self.assertFalse(target.valid)
+        self.assertEqual("no_depth", target.reason)
+        self.assertEqual(0, det.calls)
+
+    def test_snapshot_fail_closed_when_detector_missing(self):
+        target = NearFieldAcquire(
+            self._client(), detector=MissingDetector("no_weights"),
+        ).snapshot("tumbler")
+        self.assertFalse(target.valid)
+        self.assertEqual("no_weights", target.reason)
+
+    def test_snapshot_out_of_reach_is_invalid(self):
+        box = {
+            "xyxy": [20, 10, 40, 30],
+            "confidence": 0.9,
+            "class_name": "tumbler",
+            "class_id": 0,
+        }
+        det = _PeekDetector([box])
+        target = NearFieldAcquire(self._client(5.0), detector=det).snapshot("tumbler")
+        self.assertFalse(target.valid)
+        self.assertEqual("out_of_reach", target.reason)
+
+    def test_choose_lock_depth_prefers_chassis_360(self):
+        rgb = (480, 640)
+        self.assertEqual(
+            (360, 640),
+            choose_lock_depth([(480, 640), (360, 640), (480, 640)], rgb),
+        )
+        self.assertEqual((480, 640), choose_lock_depth([(480, 640)], rgb))
+        self.assertIsNone(choose_lock_depth([], rgb))
 
 
 if __name__ == "__main__":

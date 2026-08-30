@@ -23,6 +23,8 @@ services:
       dockerfile: demo/Dockerfile
       target: agent
       network: host
+      entitlements:
+        - network.host
       args:
         # Base demo runs Qwen in-process. The explicit remote overlay can replace this.
         MARC_QWEN_BACKEND: local
@@ -78,6 +80,9 @@ services:
       context: ..
       dockerfile: demo/Dockerfile
       target: manip-probe
+      network: host
+      entitlements:
+        - network.host
     image: marc-agent-manip-probe:local
     network_mode: host
     working_dir: /agent/demo
@@ -117,6 +122,57 @@ services:
               count: all
               capabilities: [gpu]
 
+  # GraspGen-X pick + basket against manip-trainer. No HDF5. No Qwen Hub pull.
+  #   bash simulation-platform/marc.sh manip-trainer
+  #   cd demo && docker compose --profile manip-pick up --build agent-manip-pick
+  agent-manip-pick:
+    profiles: ["manip-pick"]
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+      target: manip-probe
+      network: host
+      entitlements:
+        - network.host
+      args:
+        # Pick tester does not run Stage 1 SAR. Same skip as docker-compose.qwen-remote.yml.
+        MARC_QWEN_BACKEND: remote
+    image: marc-agent-manip-pick:local
+    network_mode: host
+    working_dir: /agent/demo
+    stdin_open: true
+    tty: true
+    env_file:
+      - .env
+    environment:
+      MARC_TEAM_ID:  "${MARC_TEAM_ID:-u1}"
+      MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
+      FASTRTPS_DEFAULT_PROFILES_FILE: "/agent/demo/fastdds.xml"
+      PYTHONPATH: "/agent:/agent/demo"
+      PYTHONUNBUFFERED: "1"
+      MARC_PICK_POLICY: graspgenx
+      MARC_GRASPGENX_WEIGHTS: "/agent/models/runtime/graspgenx"
+      GRASPGENX_CHECKPOINT_DIR: "/agent/models/runtime/graspgenx"
+      GRASPGENX_GRIPPER_CFG_DIR: "/agent/models/runtime/graspgenx/grippers"
+      MARC_GRASPGENX_GRIPPER: "${MARC_GRASPGENX_GRIPPER:-robotiq_2f_140}"
+    volumes:
+      - ./weights:/agent/demo/weights
+      - ../marc_agent:/agent/marc_agent
+      - ./manip_dataset:/agent/demo/manip_dataset
+      - ./nearfield.py:/agent/demo/nearfield.py
+      - ./arm_pick.py:/agent/demo/arm_pick.py
+      - ./pnp_params.json:/agent/demo/pnp_params.json
+    command: ["python3", "/agent/demo/handshake_manip_pick_client.py"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   # Practice Stage 2 with YOLO. Graded `agent` already includes torch, CCTV YOLO, Qwen, and GraspGen-X.
   #   MARC_TEAM_ID=... docker compose up --build agent-nearfield
   agent-nearfield:
@@ -125,6 +181,9 @@ services:
       context: ..
       dockerfile: demo/Dockerfile
       target: manip-probe
+      network: host
+      entitlements:
+        - network.host
     image: marc-agent-manip-probe:local
     network_mode: host
     working_dir: /agent/demo

@@ -16,8 +16,15 @@ from typing import Optional
 
 import numpy as np
 
-from marc_agent.lidar_safety import CLEAR_FAR, advise, overlay_discs, pointcloud2_xyz
-from marc_agent.retrieval_state import DEFAULT_GOAL_TOLERANCE
+from marc_agent.lidar_safety import (
+    CLEAR_FAR,
+    DISC_R,
+    STOP_X_MAX,
+    advise,
+    overlay_discs,
+    pointcloud2_xyz,
+)
+from marc_agent.retrieval_state import DEFAULT_GOAL_TOLERANCE, close_enough_to_search
 
 _DEMO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo")
 if _DEMO not in sys.path:
@@ -39,6 +46,8 @@ BACKUP_V = 0.20
 YAW_BIAS_GAIN = 0.5
 RESUME_M = 1.20
 BACKUP_LOOK_M = (0.5, 1.0, 1.5)
+RAM_STUCK_S = 2.0
+RAM_LINEAR_MIN = 0.05
 
 
 class NavStatus(str, Enum):
@@ -51,6 +60,7 @@ class NavStatus(str, Enum):
 
 class ReplanReason:
     STALL = "stall"
+    RAM = "ram"
     PATH_BLOCKED = "path_blocked"
     GOAL_RETARGET = "goal_retarget"
     FRONTAL = "frontal"
@@ -58,6 +68,13 @@ class ReplanReason:
     NO_PATH = "no_path"
     REPLAN_CAP = "replan_cap"
     FIRST_PLAN = "first_plan"
+
+
+def _ram_bumper_disc(pose):
+    """World disc at the bumper so overlay survives the 0.20 m start hole."""
+    x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
+    cc, ss = math.cos(yaw), math.sin(yaw)
+    return (x + STOP_X_MAX * cc, y + STOP_X_MAX * ss, DISC_R)
 
 
 def _occupancy_cell_free(planner, x, y) -> bool:
@@ -303,13 +320,18 @@ class Stage2Navigator:
         return None
 
     def navigate_to(self, goal_xy, deadline_s, *, leg: str = "search",
-                    tol=DEFAULT_GOAL_TOLERANCE, extra_obstacles=None) -> NavigationResult:
+                    tol=DEFAULT_GOAL_TOLERANCE, extra_obstacles=None,
+                    search_xy=None, search_radius=0.0,
+                    handoff_fn=None) -> NavigationResult:
         """Follow occupancy D* Lite until inside ``tol`` of ``goal_xy``.
 
         ``goal_xy`` and ``tol`` may be callables so a late Stage 2 reveal can retarget.
-        Live lidar stamps overlay discs so D* detours unmarked cars, and still
-        scales or reverses in the chassis corridor. Off-road / unknown start stays
-        fail-closed (zero, no_path). ``extra_obstacles`` is a test hook of world discs.
+        Abort early when the chassis is inside the reveal disc or ``handoff_fn``
+        sees the tumbler, so near-field YOLO can start without driving to the
+        approach edge. Live lidar stamps overlay discs so D* detours unmarked
+        cars, and still scales or reverses in the chassis corridor. Off-road /
+        unknown start stays fail-closed (zero, no_path). ``extra_obstacles`` is
+        a test hook of world discs.
         """
         client = self.client
         extra = list(extra_obstacles or [])
@@ -332,6 +354,8 @@ class Stage2Navigator:
         had_map = False
         had_path = False
         stop_latched = False
+        last_cmd_linear = 0.0
+        handoff_warned = False
 
         while client.is_running and client.now_s() < deadline_s:
             pose = client.get_world_pose()
@@ -343,8 +367,19 @@ class Stage2Navigator:
             cur_goal = resolve_xy(goal_xy)
             cur_tol = resolve_tol(tol, default=DEFAULT_GOAL_TOLERANCE)
             last_goal_xy = cur_goal
+            disc_xy = resolve_xy(search_xy) if search_xy is not None else None
+            disc_r = float(search_radius or 0.0)
+            if close_enough_to_search((x, y), disc_xy, disc_r, cur_tol):
+                client.send_cmd_vel(0.0, 0.0)
+                log.info("[STAGE2] %s inside_disc at (%.2f, %.2f)", leg, x, y)
+                return NavigationResult(
+                    NavStatus.REACHED, reason="inside_disc", replan_count=n_replan,
+                    goal_xy=cur_goal, pose_xy=(x, y), leg=leg,
+                    path=self.last_path, last_method=self.last_method,
+                )
             if cur_goal is None:
                 client.send_cmd_vel(0.0, 0.0)
+                last_cmd_linear = 0.0
                 client.sleep(self.dt)
                 continue
             dist = math.hypot(cur_goal[0] - x, cur_goal[1] - y)
@@ -383,6 +418,7 @@ class Stage2Navigator:
             elif not math.isfinite(advice.ahead_m) or advice.ahead_m >= RESUME_M:
                 stop_latched = False
             bumper_hot = bool(advice.stop or stop_latched)
+            ram_hot = False
             need_replan = follower is None
             replan_reason = ReplanReason.FIRST_PLAN if need_replan else ""
             if last_goal is None or math.hypot(
@@ -404,9 +440,41 @@ class Stage2Navigator:
                 replan_reason = ReplanReason.FRONTAL
             prev_frontal = bumper_hot
 
+            if callable(handoff_fn):
+                try:
+                    if handoff_fn((x, y, yaw)):
+                        client.send_cmd_vel(0.0, 0.0)
+                        log.info("[STAGE2] %s yolo_seen at (%.2f, %.2f)", leg, x, y)
+                        return NavigationResult(
+                            NavStatus.REACHED, reason="yolo_seen",
+                            replan_count=n_replan, goal_xy=cur_goal, pose_xy=(x, y),
+                            leg=leg, path=self.last_path, last_method=self.last_method,
+                        )
+                except Exception:
+                    if not handoff_warned:
+                        log.warning("[Stage2] %s handoff_fn failed", leg, exc_info=True)
+                        handoff_warned = True
+
             if last_xy is not None:
-                if math.hypot(x - last_xy[0], y - last_xy[1]) > self.stuck_move_m:
+                moved = math.hypot(x - last_xy[0], y - last_xy[1]) > self.stuck_move_m
+                if moved:
                     last_progress_t = client.now_s()
+                elif (
+                    last_cmd_linear > RAM_LINEAR_MIN
+                    and not bumper_hot
+                    and client.now_s() - last_progress_t >= RAM_STUCK_S
+                ):
+                    log.info("[Stage2] %s ram unstick -> stamp overlay, reverse, replan", leg)
+                    last_reason = ReplanReason.RAM
+                    ram_hot = True
+                    need_replan = True
+                    replan_reason = ReplanReason.RAM
+                    last_progress_t = client.now_s()
+                    if planner.ready:
+                        planner.stamp_overlay(
+                            [_ram_bumper_disc((x, y, yaw))], now_s=now_s,
+                        )
+                        planner.clear_start_hole((x, y), exclude_m=0.20)
                 elif client.now_s() - last_progress_t > self.stuck_time_s:
                     log.info("[Stage2] %s stall -> replan", leg)
                     need_replan = True
@@ -432,12 +500,14 @@ class Stage2Navigator:
                         logged_no_map = True
                     follower = None
                     client.send_cmd_vel(0.0, 0.0)
+                    last_cmd_linear = 0.0
                     client.sleep(self.dt)
                     continue
                 counts_cap = replan_reason == ReplanReason.PATH_BLOCKED or (
                     had_path
                     and replan_reason in (
                         ReplanReason.STALL,
+                        ReplanReason.RAM,
                         ReplanReason.FRONTAL,
                         ReplanReason.GOAL_RETARGET,
                     )
@@ -481,12 +551,16 @@ class Stage2Navigator:
                                     gr, gc, gv, goal_trav)
                         last_log_t = now_s
                     cmd = _frontal_escape(planner, (x, y, yaw), bumper_hot)
+                    if cmd is None and ram_hot:
+                        cmd = _reverse_on_road(planner, (x, y, yaw))
                     if cmd is None and _should_backup(planner, (x, y, yaw), advice):
                         cmd = _reverse_on_road(planner, (x, y, yaw))
                     if cmd is not None:
                         client.send_cmd_vel(cmd[0], cmd[1])
+                        last_cmd_linear = cmd[0]
                     else:
                         client.send_cmd_vel(0.0, 0.0)
+                        last_cmd_linear = 0.0
                     client.sleep(self.dt)
                     continue
 
@@ -507,6 +581,8 @@ class Stage2Navigator:
                 linear, angular = 0.0, 0.0
 
             cmd = _frontal_escape(planner, (x, y, yaw), bumper_hot)
+            if cmd is None and ram_hot:
+                cmd = _reverse_on_road(planner, (x, y, yaw))
             if cmd is not None:
                 linear, angular = cmd
             else:
@@ -525,6 +601,7 @@ class Stage2Navigator:
                             linear, angular, imu=imu, dt=self.dt)
 
             client.send_cmd_vel(linear_x=linear, angular_z=angular)
+            last_cmd_linear = linear
 
             now = client.now_s()
             if now - last_log_t >= 1.0:

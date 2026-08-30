@@ -1,7 +1,8 @@
-"""GraspGen-X pick seam: object cloud -> 6-DoF arm_base grasp, then IK.
+"""GraspGen-X pick seam: cropped depth cloud -> 6-DoF arm_base grasp, then IK.
 
-A missing package or checkpoint logs once and returns ``None`` so the caller
-falls back to analytic IK. Do not download weights at runtime.
+A missing package, empty cloud, failed sample, or TCP far from the YOLO
+object returns ``None`` so the caller fails closed (no analytic IK to a
+bbox-center pixel). Do not download weights at runtime.
 """
 
 from __future__ import annotations
@@ -9,10 +10,15 @@ from __future__ import annotations
 import logging
 import math
 import os
+import sys
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 import numpy as np
+
+_DEMO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo")
+if _DEMO not in sys.path:
+    sys.path.insert(0, _DEMO)
 
 log = logging.getLogger("participant_app")
 
@@ -25,6 +31,17 @@ DEFAULT_WEIGHTS_DIR = os.path.join(
 _WEIGHT_SUFFIXES = (".pth", ".pt", ".ckpt", ".safetensors")
 GenerateFn = Callable[[np.ndarray], object]
 _generator: Optional[GenerateFn] = None
+# A 1-point bbox-center cloud is not an object. Fail closed below this.
+MIN_CLOUD_POINTS = 32
+# Same 10% pad as near-field localize so table pixels do not seed side grasps.
+CROP_BBOX_INSET = 0.10
+# Ranked TCP must sit on the YOLO object, not a table patch 17 cm away.
+GRASP_XY_MAX_M = 0.08
+# Aerial TCPs (above the object / arm-base) are not pinch poses.
+GRASP_Z_ABOVE_YOLO_M = 0.05
+GRASP_Z_MAX_M = 0.02
+# Tool-Z yaw far from fingers-forward (~0) is a side/back grasp that misses lift.
+GRASP_YAW_MAX_RAD = 0.9
 
 
 @dataclass(frozen=True)
@@ -34,6 +51,8 @@ class Grasp6DoF:
     xyz: tuple[float, float, float]
     matrix: Optional[np.ndarray] = None
     score: float = 0.0
+    n_keep: int = 1
+    dyolo: float = 0.0
 
 
 def checkpoint_dir(path: Optional[str] = None) -> str:
@@ -92,6 +111,7 @@ def crop_depth_cloud(
     rgb_shape=None,
     *,
     stride: int = 2,
+    inset: float = CROP_BBOX_INSET,
 ) -> np.ndarray:
     """Unproject depth pixels inside ``bbox_xyxy`` to camera-optical metres."""
     if depth is None or bbox_xyxy is None or k is None:
@@ -107,6 +127,11 @@ def crop_depth_cloud(
         sy = h / max(1.0, float(rgb_shape[0]))
         sx = w / max(1.0, float(rgb_shape[1]))
         x1, x2, y1, y2 = x1 * sx, x2 * sx, y1 * sy, y2 * sy
+    bw, bh = x2 - x1, y2 - y1
+    pad_x = float(np.clip(inset, 0.0, 0.45)) * bw
+    pad_y = float(np.clip(inset, 0.0, 0.45)) * bh
+    x1, x2 = x1 + pad_x, x2 - pad_x
+    y1, y2 = y1 + pad_y, y2 - pad_y
     ix1 = max(0, int(math.floor(x1)))
     iy1 = max(0, int(math.floor(y1)))
     ix2 = min(w, int(math.ceil(x2)))
@@ -136,8 +161,26 @@ def _pinhole(k) -> tuple[float, float, float, float]:
     return 500.0, 500.0, 320.0, 240.0
 
 
+def optical_cloud_to_arm_base(optical, R=None, t=None) -> np.ndarray:
+    """Camera-optical Nx3 -> arm_base. ``R``/``t`` optional (REP-103 fallback)."""
+    pts = np.asarray(optical, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[0] == 0 or pts.shape[1] < 3:
+        return np.zeros((0, 3), dtype=np.float32)
+    try:
+        from nearfield import car_to_arm_base, optical_to_car_base
+    except Exception:
+        return np.zeros((0, 3), dtype=np.float32)
+    converted = []
+    for ox, oy, oz in pts[:, :3]:
+        fwd_c, lat_c, up_c = optical_to_car_base(
+            float(ox), float(oy), float(oz), R=R, t=t
+        )
+        converted.append(car_to_arm_base(fwd_c, lat_c, up_c))
+    return np.asarray(converted, dtype=np.float32)
+
+
 def points_from_target(target, client=None) -> np.ndarray:
-    """Object cloud in arm_base, falling back to the localized contact point."""
+    """Object cloud in arm_base. Empty when the crop is too thin to sample."""
     depth = getattr(target, "depth", None)
     bbox = getattr(target, "bbox_xyxy", None)
     k = getattr(target, "k", None)
@@ -148,26 +191,116 @@ def points_from_target(target, client=None) -> np.ndarray:
         except Exception:
             depth = None
     optical = crop_depth_cloud(depth, bbox, k, rgb_shape)
-    rotation = getattr(target, "R", None)
-    translation = getattr(target, "t", None)
-    if optical.size and rotation is not None:
-        try:
-            from nearfield import car_to_arm_base, optical_to_car_base
+    if int(optical.shape[0]) < MIN_CLOUD_POINTS:
+        return np.zeros((0, 3), dtype=np.float32)
+    cloud = optical_cloud_to_arm_base(
+        optical,
+        R=getattr(target, "R", None),
+        t=getattr(target, "t", None),
+    )
+    if int(cloud.shape[0]) < MIN_CLOUD_POINTS:
+        return np.zeros((0, 3), dtype=np.float32)
+    return cloud
 
-            converted = []
-            for ox, oy, oz in optical:
-                fwd_c, lat_c, up_c = optical_to_car_base(
-                    float(ox), float(oy), float(oz), R=rotation, t=translation
-                )
-                converted.append(car_to_arm_base(fwd_c, lat_c, up_c))
-            if converted:
-                return np.asarray(converted, dtype=np.float32)
-        except Exception:
-            pass
-    fwd = float(getattr(target, "fwd", 0.0) or 0.0)
-    lat = float(getattr(target, "lat", 0.0) or 0.0)
-    z = float(getattr(target, "z", 0.0) or 0.0)
-    return np.array([[fwd, lat, z]], dtype=np.float32)
+
+def _wrap_pi(yaw: float) -> float:
+    a = float(yaw)
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
+    return a
+
+
+def select_grasp_index(grasps, conf) -> int:
+    """Index into ``grasps``. ``conf`` may be longer than top-k ``grasps``."""
+    n = len(grasps) if grasps is not None else 0
+    if n <= 0:
+        return 0
+    if conf is None:
+        return 0
+    scores = np.asarray(conf).reshape(-1)
+    if scores.size == 0:
+        return 0
+    if scores.size == n:
+        return int(np.argmax(scores))
+    return 0
+
+
+def select_grasp_near(
+    grasps,
+    conf,
+    near_xyz,
+    max_xy_m: float = GRASP_XY_MAX_M,
+    max_z_above_yolo_m: float = GRASP_Z_ABOVE_YOLO_M,
+    z_max_m: float = GRASP_Z_MAX_M,
+    yaw_max_rad: float = GRASP_YAW_MAX_RAD,
+) -> Optional[Grasp6DoF]:
+    """Highest-confidence in-band TCP within ``max_xy_m`` of ``near_xyz`` XY, or None.
+
+    Drops aerial z (above YOLO z + margin, or above ``z_max_m``). If any remaining
+    grasp has ``|yaw| <= yaw_max_rad``, flipped/side grasps are dropped; otherwise
+    fail closed.
+    """
+    if grasps is None or len(grasps) == 0 or near_xyz is None:
+        return None
+    nx, ny = float(near_xyz[0]), float(near_xyz[1])
+    yolo_z = None
+    if len(near_xyz) > 2 and near_xyz[2] is not None:
+        yolo_z = float(near_xyz[2])
+    scores = None if conf is None else np.asarray(conf).reshape(-1)
+    kept = []
+    for i, raw in enumerate(grasps):
+        pose = as_grasp(raw)
+        if pose is None:
+            continue
+        dyolo = math.hypot(pose.xyz[0] - nx, pose.xyz[1] - ny)
+        if dyolo > float(max_xy_m):
+            continue
+        z = float(pose.xyz[2])
+        if z > float(z_max_m):
+            continue
+        if yolo_z is not None and z > yolo_z + float(max_z_above_yolo_m):
+            continue
+        yaw = grasp_yaw_from_matrix(pose.matrix)
+        yaw_abs = abs(_wrap_pi(yaw)) if yaw is not None else 0.0
+        score = 0.0
+        if scores is not None and i < int(scores.size):
+            score = float(scores[i])
+        kept.append((pose, score, float(dyolo), yaw_abs))
+    if not kept:
+        return None
+    in_yaw = [row for row in kept if row[3] <= float(yaw_max_rad)]
+    if not in_yaw:
+        return None
+    in_yaw.sort(key=lambda row: (row[3], -row[1]))
+    pose, score, dyolo, _yaw = in_yaw[0]
+    return Grasp6DoF(
+        xyz=pose.xyz,
+        matrix=pose.matrix,
+        score=score,
+        n_keep=len(in_yaw),
+        dyolo=dyolo,
+    )
+
+
+def _unpack_grasps(raw):
+    """Normalize a generator return into ``(grasps, conf)``."""
+    if raw is None:
+        return [], None
+    if isinstance(raw, Grasp6DoF):
+        return [raw], None
+    if isinstance(raw, tuple) and len(raw) == 2:
+        grasps, conf = raw
+        if np.ndim(grasps) == 0 or (
+            isinstance(grasps, (int, float, np.floating, np.integer))
+        ):
+            return [raw], None
+        return grasps, conf
+    arr = np.asarray(raw, dtype=np.float64)
+    if arr.ndim == 3 and arr.shape[-2:] == (4, 4):
+        return arr, None
+    return [raw], None
 
 
 def _client_depth(client):
@@ -218,17 +351,28 @@ def best_grasp(
     points: np.ndarray,
     *,
     generate_fn: Optional[GenerateFn] = None,
+    near_xyz=None,
+    max_xy_m: float = GRASP_XY_MAX_M,
 ) -> Optional[Grasp6DoF]:
-    """Return the best 6-DoF grasp in the same frame as ``points``, or None."""
+    """Return the best 6-DoF grasp in the same frame as ``points``, or None.
+
+    When ``near_xyz`` is set, TCPs farther than ``max_xy_m`` in XY, aerial z,
+    or flipped yaw are dropped.
+    """
     generator = generate_fn if generate_fn is not None else load_graspgenx()
     if generator is None:
         return None
     try:
-        pose = generator(np.asarray(points, dtype=np.float32))
+        raw = generator(np.asarray(points, dtype=np.float32))
     except Exception as exc:
-        log.warning("[graspgenx] generate failed (%s) -- IK fallback", exc)
+        log.warning("[graspgenx] generate failed (%s) -- fail closed", exc)
         return None
-    return as_grasp(pose)
+    grasps, conf = _unpack_grasps(raw)
+    if grasps is None or len(grasps) == 0:
+        return None
+    if near_xyz is None:
+        return as_grasp(grasps[select_grasp_index(grasps, conf)])
+    return select_grasp_near(grasps, conf, near_xyz, max_xy_m=max_xy_m)
 
 
 def load_graspgenx(path: Optional[str] = None) -> Optional[GenerateFn]:
@@ -238,7 +382,7 @@ def load_graspgenx(path: Optional[str] = None) -> Optional[GenerateFn]:
         return _generator
     directory = checkpoint_dir(path)
     if not has_checkpoint(directory):
-        log.warning("[graspgenx] no weights at %s -- IK fallback", directory)
+        log.warning("[graspgenx] no weights at %s -- fail closed", directory)
         return None
     os.environ.setdefault("GRASPGENX_CHECKPOINT_DIR", directory)
     try:
@@ -246,7 +390,7 @@ def load_graspgenx(path: Optional[str] = None) -> Optional[GenerateFn]:
         from graspgenx.samplers import run_planner_on_object
         from graspgenx.utils.checkpoint_io import load_model_cfg
     except Exception as exc:
-        log.warning("[graspgenx] import failed (%s) -- IK fallback", exc)
+        log.warning("[graspgenx] import failed (%s) -- fail closed", exc)
         return None
     try:
         cfg = load_model_cfg(
@@ -261,22 +405,35 @@ def load_graspgenx(path: Optional[str] = None) -> Optional[GenerateFn]:
             raise FileNotFoundError("GraspGen-X gripper assets are missing")
         sampler = GraspGenXSampler(cfg, gripper, assets_dir=assets)
     except Exception as exc:
-        log.warning("[graspgenx] load failed (%s) -- IK fallback", exc)
+        log.warning("[graspgenx] load failed (%s) -- fail closed", exc)
         return None
 
     def generate(points: np.ndarray):
-        grasps, conf, _tags, _obb = run_planner_on_object(
-            np.asarray(points, dtype=np.float32),
-            sampler,
-            planner="diffusion",
-            num_grasps=32,
-            grasp_threshold=-1.0,
-            topk_num_grasps=1,
-        )
+        kwargs = {
+            "planner": "diffusion",
+            "num_grasps": 32,
+            "grasp_threshold": -1.0,
+            "topk_num_grasps": 32,
+            "min_grasps": 1,
+            "max_tries": 1,
+        }
+        try:
+            grasps, conf, _tags, _obb = run_planner_on_object(
+                np.asarray(points, dtype=np.float32),
+                sampler,
+                **kwargs,
+            )
+        except TypeError:
+            kwargs.pop("min_grasps", None)
+            kwargs.pop("max_tries", None)
+            grasps, conf, _tags, _obb = run_planner_on_object(
+                np.asarray(points, dtype=np.float32),
+                sampler,
+                **kwargs,
+            )
         if grasps is None or len(grasps) == 0:
             return None
-        idx = int(np.argmax(conf)) if conf is not None and len(conf) else 0
-        return grasps[idx]
+        return grasps, conf
 
     _generator = generate
     return generate
