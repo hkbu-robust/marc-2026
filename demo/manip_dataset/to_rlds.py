@@ -39,6 +39,15 @@ from marc_agent.openvla_actions import (  # noqa: E402
     build_dataset_statistics,
     resize_rgb,
 )
+from manip_dataset.openvla_dataset import (  # noqa: E402
+    ACTION_DIM,
+    PROPRIO_DIM,
+    SCHEMA_VERSION,
+    TFDS_VERSION,
+    build_openvla_state,
+    validate_export,
+    validate_pick_metadata,
+)
 try:
     import h5py
 except ImportError as e:  # pragma: no cover
@@ -58,11 +67,17 @@ _PREFERENCE = ("image_base_left", "image_gripper_left", "image_base_right",
 
 
 def _pick_image_key(steps, camera: str) -> str:
-    """Resolve the requested view, falling back to whichever one was recorded."""
+    """Resolve one training view; an explicit request never changes cameras."""
     preferred = str(steps.attrs.get("primary_camera", "base_left")) if camera == "auto" \
         else camera
     wanted = f"image_{preferred}"
-    order = [wanted, _LEGACY.get(wanted)] + [k for k in _PREFERENCE if k != wanted]
+    exact = [wanted, _LEGACY.get(wanted)]
+    for key in exact:
+        if key and key in steps:
+            return key
+    if camera != "auto":
+        raise ValueError(f"episode has no requested RGB view: {preferred}")
+    order = [k for k in _PREFERENCE if k != wanted]
     order += [_LEGACY[k] for k in _PREFERENCE if k in _LEGACY]
     for key in order:
         if key and key in steps:
@@ -93,7 +108,12 @@ def _load_episode(ep_dir: str, camera: str = "auto") -> Tuple[dict, dict]:
     return meta, data
 
 
-def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str = "auto"):
+def convert(
+    in_dir: str,
+    out_dir: str,
+    image_size: int = IMAGE_SIZE,
+    camera: str = "base_left",
+):
     episode_out = os.path.join(out_dir, "episodes")
     os.makedirs(episode_out, exist_ok=True)
     for name in os.listdir(episode_out):
@@ -119,8 +139,11 @@ def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str
             if not meta_peek.get("success", False):
                 continue
             meta, data = _load_episode(ep_dir, camera)
-            if data["action"].ndim != 2 or data["action"].shape[1] != 7:
-                raise ValueError(f"action must have shape (N, 7), got {data['action'].shape}")
+            instruction, object_name, task = validate_pick_metadata(meta)
+            if data["action"].ndim != 2 or data["action"].shape[1] != ACTION_DIM:
+                raise ValueError(
+                    f"action must have shape (N, {ACTION_DIM}), got {data['action'].shape}"
+                )
             if not np.isfinite(data["action"]).all():
                 raise ValueError("action contains non-finite values")
             grip = data["action"][:, -1]
@@ -134,10 +157,9 @@ def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str
             [_resize_rgb(data["image"][i], image_size) for i in range(len(data["action"]))],
             axis=0,
         )
-        # proprio state for OpenVLA-style observation.state: q_arm(6) + grip
-        state = np.concatenate(
-            [data["q_arm"], data["q_grip"].reshape(-1, 1)], axis=1
-        ).astype(np.float32)
+        # StateEncoding.JOINT is always 7 joint slots plus gripper. MARC has
+        # six arm joints, so the seventh joint slot is explicitly zero padded.
+        state = build_openvla_state(data["q_arm"], data["q_grip"])
 
         # Raw teleop intent is 1=close. OpenVLA/OXE is 0=closed, 1=open.
         actions = np.asarray(data["action"], dtype=np.float32).copy()
@@ -150,18 +172,20 @@ def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str
             action=actions,
             ee_pos=data["ee_pos"],
             ee_quat=data["ee_quat"],
-            language_instruction=meta.get("language_instruction", ""),
-            object_name=meta.get("object_name", ""),
-            task=meta.get("task", "pick"),
+            language_instruction=instruction,
+            object_name=object_name,
+            task=task,
+            includes_place=np.bool_(False),
         )
         episodes.append({
             "index": idx,
             "source": name,
             "path": f"episodes/episode_{idx:04d}.npz",
             "num_steps": int(data["action"].shape[0]),
-            "language_instruction": meta.get("language_instruction", ""),
-            "object_name": meta.get("object_name", ""),
-            "task": meta.get("task", "pick"),
+            "language_instruction": instruction,
+            "object_name": object_name,
+            "task": task,
+            "includes_place": False,
             "camera": data["image_key"],
         })
         all_actions.append(actions)
@@ -186,13 +210,27 @@ def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str
     with open(os.path.join(out_dir, "dataset_statistics.json"), "w") as f:
         json.dump(stats, f, indent=2)
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
-        json.dump({"episodes": episodes}, f, indent=2)
+        json.dump({
+            "schema_version": SCHEMA_VERSION,
+            "action_dim": ACTION_DIM,
+            "state_dim": PROPRIO_DIM,
+            "tfds_version": TFDS_VERSION,
+            "episodes": episodes,
+        }, f, indent=2)
     shutil.copyfile(
         os.path.join(os.path.dirname(__file__), "marc_pnp_dataset_builder.py"),
         os.path.join(out_dir, "marc_pnp_dataset_builder.py"),
     )
+    report = validate_export(
+        out_dir,
+        expected_camera=None if camera == "auto" else camera,
+    )
     action_block = stats[DEFAULT_UNNORM_KEY]["action"]
     print(f"[done] {len(episodes)} episodes -> {out_dir}")
+    print(
+        f"[valid] OpenVLA source contract: state={PROPRIO_DIM}D, "
+        f"action={ACTION_DIM}D, {report.transitions} transitions"
+    )
     print(f"[stats] action_q01={action_block['q01']}")
     print(f"[stats] action_q99={action_block['q99']}")
     print(f"[stats] action_mask={action_block['mask']}")
@@ -206,8 +244,8 @@ def main():
     ap.add_argument(
         "--camera",
         choices=CAMERA_CHOICES,
-        default="auto",
-        help="view exported as `image` (auto = each episode's recorded primary_camera)",
+        default="base_left",
+        help="view exported as `image` (default: base_left; explicit views fail if absent)",
     )
     args = ap.parse_args()
     convert(args.in_dir, args.out_dir, args.image_size, args.camera)

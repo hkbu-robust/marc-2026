@@ -80,6 +80,17 @@ services:
       context: ..
       dockerfile: demo/Dockerfile
       target: manip-probe
+      # Dockerfile dependency installs use RUN --network=host. BuildKit treats
+      # that separately from the service's runtime network_mode and requires
+      # an explicit build entitlement.
+      network: host
+      entitlements:
+        - network.host
+      args:
+        # Dataset collection uses near-field YOLO, not the stage-1 Qwen model.
+        # This selects fetch_runtime_weights.py's skip path instead of baking
+        # the multi-gigabyte local Qwen snapshot into the probe image.
+        MARC_QWEN_BACKEND: remote
     image: marc-agent-manip-probe:local
     network_mode: host
     working_dir: /agent/demo

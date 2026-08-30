@@ -26,12 +26,27 @@ log = logging.getLogger("participant_app")
 ARM_BASE_FWD = 0.18
 CAMERA = "base_left"
 DEPTH_WHICH = "base"
+# The base RGB messages are stamped ``base_camera`` while this robot's TF tree
+# names the same optical frame ``Base_Camera_Center``.  Keep a measured fallback
+# so startup ordering or that alias mismatch can never turn camera-relative XYZ
+# into an arm command.  Translation is camera -> arm_base_link, in metres.
+BASE_CAMERA_TF_FRAME = "Base_Camera_Center"
+BASE_CAMERA_TO_ARM_T = np.array([0.22134, 0.0, -0.04833], dtype=np.float64)
+BASE_CAMERA_TO_ARM_R = np.array(
+    [
+        [-0.00000347, -0.34200427, 0.93969840],
+        [-1.00000000, 0.00001970, 0.00000347],
+        [-0.00001970, -0.93969840, -0.34200427],
+    ],
+    dtype=np.float64,
+)
 TICK_S = 0.10
 LOCK_FRAMES = 12
 CRAWL_MPS = 0.15
 MAX_STEP_M = 0.04
-STOP_M = 0.55
-ALREADY_NEAR_M = 0.45
+# Calibrated arm-base forward range, shared conceptually with depth_approach.
+STOP_M = 0.56
+ALREADY_NEAR_M = 0.52
 CENTER_TOL = 0.05
 REALIGN = 0.12
 ALIGN_HOLD = 2
@@ -257,6 +272,16 @@ def optical_to_car_base(x, y, z, R=None, t=None):
         q = Rm @ p + tm
         return float(q[0]), float(q[1]), float(q[2])
     return float(z), float(-x), float(-y)
+
+
+def base_camera_to_car_transform():
+    """Measured base-camera optical transform in the downstream car frame.
+
+    Localization converts car -> arm by subtracting ``ARM_BASE_FWD``.  Add that
+    offset here so the measured camera -> arm translation is applied exactly once.
+    """
+    t = BASE_CAMERA_TO_ARM_T + np.array([ARM_BASE_FWD, 0.0, 0.0])
+    return BASE_CAMERA_TO_ARM_R.copy(), t
 
 
 def car_to_arm_base(fwd, lat, up, arm_base_fwd=ARM_BASE_FWD):
@@ -695,6 +720,7 @@ class NearFieldAcquire:
             bbox = None if det is None else det.get("bbox")
             err = None if det is None or n_obj <= 0 else det.get("error")
             d_obj = None
+            fwd_obj = None
             if n_obj > 0 and bbox is not None and depth is not None:
                 d_obj = depth_in_bbox(depth, bbox, det.get("rgb_shape") or rgb.shape[:2])
 
@@ -712,9 +738,10 @@ class NearFieldAcquire:
                     d_obj = None
                 else:
                     last = cand
-                    near = d_obj is not None and d_obj <= STOP_M
+                    fwd_obj = float(cand.fwd)
+                    near = fwd_obj <= STOP_M
                     centered = err is not None and abs(float(err)) <= REALIGN
-                    already = d_obj is not None and d_obj < ALREADY_NEAR_M
+                    already = fwd_obj < ALREADY_NEAR_M
                     if cand.valid and (already or (near and centered)):
                         self._stop()
                         self._dump_frame("localized", rgb, bbox, cand.name)
@@ -730,7 +757,7 @@ class NearFieldAcquire:
                 radius,
                 d_obj,
             )
-            lin, ang = self._command(now, n_obj, err, d_obj, may_center=may_center)
+            lin, ang = self._command(now, n_obj, err, fwd_obj, may_center=may_center)
             if self._phase != prev_phase:
                 self._dump_frame(self._phase, rgb, bbox, "" if det is None else (det.get("name") or ""))
             lin, ang = gated_cmd_vel(pose, lin, ang, hint_xy, radius, dt=dt)
@@ -775,12 +802,14 @@ class NearFieldAcquire:
         self._phase_t0 = now
         self._align_ok = 0
 
-    def _command(self, now: float, n_obj: int, err, d_obj, *, may_center: bool = True) -> tuple:
+    def _command(self, now: float, n_obj: int, err, fwd_obj,
+                 *, may_center: bool = True) -> tuple:
+        """Command using calibrated arm-base forward, never raw optical depth."""
         if not may_center:
             return 0.0, 0.0
         since = now - self._phase_t0
-        has = n_obj > 0 and err is not None and d_obj is not None
-        if d_obj is not None and n_obj > 0 and d_obj < ALREADY_NEAR_M:
+        has = n_obj > 0 and err is not None and fwd_obj is not None
+        if fwd_obj is not None and n_obj > 0 and fwd_obj < ALREADY_NEAR_M:
             return 0.0, 0.0
 
         if not has:
@@ -791,7 +820,7 @@ class NearFieldAcquire:
                 self._enter("scan", now)
             return 0.0, self._scan_sign * SCAN_YAW
 
-        if abs(float(err)) <= CENTER_TOL and d_obj is not None and d_obj <= STOP_M:
+        if abs(float(err)) <= CENTER_TOL and fwd_obj is not None and fwd_obj <= STOP_M:
             return 0.0, 0.0
 
         if self._phase == "scan":
@@ -918,22 +947,31 @@ class NearFieldAcquire:
             self._tf[child] = (parent, t, R)
 
     def _cam_to_car(self, rgb_msg):
-        """Return (R, t) mapping optical camera coords into car_base, or (None, None)."""
+        """Return a calibrated mapping from base-camera optical to car_base."""
         frame = ""
         if rgb_msg is not None:
             frame = (getattr(getattr(rgb_msg, "header", None), "frame_id", "") or "").lstrip("/")
-        if not frame or not self._tf:
-            return None, None
-        T = _compose_tf(self._tf, frame, "car_base")
+        tf_frame = frame
+        if frame == "base_camera" and BASE_CAMERA_TF_FRAME in self._tf:
+            tf_frame = BASE_CAMERA_TF_FRAME
+        T = None if not tf_frame or not self._tf else _compose_tf(
+            self._tf, tf_frame, "car_base"
+        )
         if T is None:
-            T = _compose_tf(self._tf, frame, "arm_base_link")
+            T = None if not tf_frame or not self._tf else _compose_tf(
+                self._tf, tf_frame, "arm_base_link"
+            )
             if T is not None:
                 R, t = T
                 # T maps camera -> arm_base; shift +X so optical_to_car_base stays in car_base
                 # (car_to_arm_base then subtracts ARM_BASE_FWD once).
                 t = np.asarray(t, dtype=np.float64) + np.array([ARM_BASE_FWD, 0.0, 0.0])
                 return R, t
-            return None, None
+            log.warning(
+                "[nearfield] no TF for image frame %r; using calibrated base camera",
+                frame or "<empty>",
+            )
+            return base_camera_to_car_transform()
         return T
 
 

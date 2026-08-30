@@ -14,9 +14,13 @@ import numpy as np
 
 from nearfield import (
     ARM_BASE_FWD,
+    BASE_CAMERA_TO_ARM_R,
+    BASE_CAMERA_TO_ARM_T,
+    BASE_CAMERA_TF_FRAME,
     MissingDetector,
     NearFieldAcquire,
     _candidate_detection,
+    base_camera_to_car_transform,
     depth_in_bbox,
     gated_cmd_vel,
     localize_detection,
@@ -113,6 +117,30 @@ def test_optical_to_arm_base_known_Rt():
            "R,t identity offset got %s" % ((f2, l2, u2),))
 
 
+def test_base_camera_calibration_and_tf_alias():
+    # The formerly used origin-free fallback would report 0.505 - 0.18 = 0.325m.
+    # The measured transform correctly places that centre-ray point around 0.696m.
+    R, t = base_camera_to_car_transform()
+    p_car = R @ np.array([0.0, 0.0, 0.505]) + t
+    p_arm = p_car - np.array([ARM_BASE_FWD, 0.0, 0.0])
+    _check(abs(p_arm[0] - 0.696) < 0.01, "calibrated fwd=%s" % p_arm[0])
+    _check(p_arm[2] < -0.20, "camera pitch/height must affect z, got %s" % p_arm[2])
+
+    acq = NearFieldAcquire.__new__(NearFieldAcquire)
+    acq._tf = {
+        BASE_CAMERA_TF_FRAME: (
+            "arm_base_link",
+            BASE_CAMERA_TO_ARM_T.copy(),
+            BASE_CAMERA_TO_ARM_R.copy(),
+        )
+    }
+    msg = type("Msg", (), {})()
+    msg.header = type("Header", (), {"frame_id": "base_camera"})()
+    R_alias, t_alias = acq._cam_to_car(msg)
+    _check(np.allclose(R_alias, BASE_CAMERA_TO_ARM_R), "base_camera alias rotation")
+    _check(np.allclose(t_alias, t), "base_camera alias translation")
+
+
 def test_gated_cmd_zeros_linear_outside_disc():
     hint = (0.0, 0.0)
     # Inside, a small step stays in: keep linear.
@@ -197,7 +225,7 @@ def test_candidate_selection_needs_depth_and_prefers_hint_distance():
 def test_no_depth_never_commands_linear_motion():
     acq = NearFieldAcquire.__new__(NearFieldAcquire)
     acq._phase, acq._phase_t0, acq._align_ok, acq._scan_sign = "align", 0.0, 1, 1.0
-    linear, _ = acq._command(1.0, n_obj=1, err=0.0, d_obj=None)
+    linear, _ = acq._command(1.0, n_obj=1, err=0.0, fwd_obj=None)
     _check(linear == 0.0, "missing depth must never command positive linear motion")
 
 
@@ -206,6 +234,7 @@ def main():
         test_depth_in_bbox_ignores_bad_center_pixel,
         test_radius_gate_rejects_far_box,
         test_optical_to_arm_base_known_Rt,
+        test_base_camera_calibration_and_tf_alias,
         test_gated_cmd_zeros_linear_outside_disc,
         test_fixture_box_localizes,
         test_missing_detector_fail_closed,

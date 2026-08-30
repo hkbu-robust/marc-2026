@@ -85,17 +85,39 @@ and yaw each scene so boxes are not glued to one patch of the image.
 
 1. Arm moves to a **joint-space ready** pose (`MARC_READY_J1…J6`), then teleop uses EE-delta IK.
 2. **MANUAL_BASE** — `i/k/j/l` place and aim the chassis; `A` starts auto-approach.
-3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** and **prefers 360×640 chassis depth** when that shape is in the lock window. Then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **arm-base forward** from the same localize as pick (`MARC_APPROACH_STOP_M`, default 0.26 m). After that it keeps crawling until that forward range is at pick range (`MARC_APPROACH_ALREADY_NEAR`, default 0.16 m); wall-clock `OVERRUN_M / speed` is only a cap, because the practice sim often closes much slower than `cmd_vel`. No extra crawl if already closer than `ALREADY_NEAR` (`C` cancels).
+3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** and **prefers 360×640 chassis depth** when that shape is in the lock window. Then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **arm-base forward using the calibrated pitched/offset base-camera transform** (`MARC_APPROACH_STOP_M`, default 0.56 m). After that it keeps crawling until that forward range is at pick range (`MARC_APPROACH_ALREADY_NEAR`, default 0.44 m); wall-clock `OVERRUN_M / speed` is only a cap, because the practice sim often closes much slower than `cmd_vel`. No extra crawl if already closer than `ALREADY_NEAR` (`C` cancels).
    Each tick logs `err` (box vs image center), `obj=used/raw`, `name`/`conf`, `fwd` (arm-base), and `d` (bbox depth). `obj=0/0` means YOLO saw nothing; `obj=0/3` means boxes existed but were skipped (e.g. `person`).
    Inference is always restricted to the exact `MARC_TARGET_OBJECT`; an unsupported target fails closed and never falls back to all classes. RGB is passed as a PIL image. Lock dumps PNGs under `datasets/yolo_debug/`.
-4. **ARM_TELEOP** — EE nudges + grip; steps are recorded with live images.
-   Closing (`v`) **ramps** over `MARC_GRIP_RAMP` and stops the instant `gripper/holding`
-   goes true, plus `MARC_GRIP_EXTRA` rad of bite. `MARC_GRIP_CLOSE` is only the ceiling:
-   commanding it and holding it there keeps squeezing after contact, and the sim resolves
-   that penetration by ejecting the object — which reads as the grasp slipping out. The
-   log prints the value it actually settled at. Because that value can land *below* half
-   of `grip_close`, "is the gripper closed" tracks the commanded intent (`grip_target`),
-   not the published number, or an early stop would silently unlatch the grasp.
+4. The collector takes the same validated near-field RGB-D snapshot as
+   `agent-manip-picker` and calls the shared `stage_for_openvla()` deterministic
+   forward/align/view sequence. **ARM_TELEOP** unlocks only after that sequence succeeds;
+   deterministic staging is not recorded, so the first demonstration action starts from
+   the same base-camera pose where OpenVLA receives control at runtime. If localization
+   or deterministic staging fails, the collector automatically returns to ready, settles
+   the camera, and retries with a fresh snapshot up to three total attempts before falling
+   back to `MANUAL_BASE`.
+
+   Tissue and sunblock have an additional near-range lock because their detector
+   confidence can be intermittent. Once an exact detection of the requested class is
+   centered within 10 cm beyond the approach stop range, missed frames reuse its box only
+   while fresh depth still maps to the same world coordinate within 15 cm. The class-keyed,
+   coordinate-gated lock is also accepted when the fresh handoff snapshot misses, so
+   deterministic camera entry can still run.
+5. **ARM_TELEOP** — EE nudges + grip; steps are recorded with live images.
+   Closing (`v`) **commands `0.68` immediately** and holds that command;
+   `gripper/holding` does not stop it early. The chassis is held at its
+   captured world pose throughout arm teleop and every blocking policy pick, actively
+   correcting backwards slope drift instead of relying on a zero-velocity command alone.
+   `MARC_GRIP_CLOSE` is the final commanded position and remains clamped below the
+   physical joint limit.
+
+   The `V` pick path uses a narrower learned-policy seam. Before OpenVLA receives its
+   first frame, the arm opens and moves deterministically to a pre-grasp pose above and
+   slightly behind the localized target, where both gripper and object are visible in the
+   base camera. OpenVLA controls only the final approach and close. A `holding=True`
+   signal is not sufficient for success: the runtime lifts the gripper 8 cm and requires
+   the live RGB-D localization to show that the target rose with it. Finger-on-finger
+   contact is opened and restaged instead of triggering the basket motion.
 5. **`P`** — scripted **place in the rear basket**. Hard-coded, so its ticks are **not written
    into the dataset** (no images / actions / joints). The training episode is approach + grasp
    only; `P` exists so `basket/occupied` can go true for the `E` keep filter. Hand nudges
@@ -105,7 +127,8 @@ and yaw each scene so boxes are not glued to one patch of the image.
 
    `keep latched grip` (no re-squeeze) → `raise to carry height` → **`rotate over basket` (joint 1 +π)** → `lower into basket` → `release` → `raise clear` → `rotate back to front` → `fold to ready`.
 
-   Pick already stopped the fingers at contact. Place copies that live squeeze and does **not** command json/env close again — squeezing past contact ejects the object. It also does not fold to the 9 cm ready pose while holding.
+   Place copies the live squeeze command and does **not** start another close ramp. It
+   also does not fold to the 9 cm ready pose while holding.
 
    Why it is built this way: a straight Cartesian line to a point behind the shoulder has no
    collision-free interpolation, and IK will cheerfully return a pose that reaches the basket
@@ -116,9 +139,9 @@ and yaw each scene so boxes are not glued to one patch of the image.
    neighbouring pose, and **refused if it moves any joint more than `MARC_PLACE_IK_GUARD` rad
    from that seed** — a branch jump shows up as a deviation of radians, a real move as tenths.
    If either solve is refused, `P` aborts *before moving* and keeps holding, so you can `N`.
-6. **`E`** — sensor-only keep if grasp was seen after close **and** `basket/occupied` is true; else discard to `datasets/marc_pnp_failed/`.
+6. **`E`** — after `P` finishes, sensor-only keep if grasp was seen after close **and** `basket/occupied` is true; else discard to `datasets/marc_pnp_failed/`. During the blocking `P` motion, `E` is an immediate manual approval: it cancels the remaining scripted placement at the next control tick, holds the measured arm pose, keeps the episode without requiring basket occupancy, opens the gripper, returns home, and resets directly to the next collection cycle. No second `E` is needed.
 
-So a keepable episode is: `A` → grasp with `v` → **`P`** → `E`. Without `P` the basket is never
+So a keepable episode is: `A` → grasp with `v` → **`P` + `E` at any point during/after placement**. Without `P` the basket is never
 filled, so `E` always evaluates `basket=False` and discards. Kept episodes contain only the
 teleop pick steps collected before `P`.
 
@@ -128,41 +151,40 @@ teleop pick steps collected before `P`.
 datasets/marc_pnp/Episode 001/
   episode.hdf5
   meta.json
-  images/
-    base_left/000000.png …
-    base_right/…
-    gripper_left/…
-    gripper_right/…
 ```
 
 Episode folders are named `Episode 001`, `Episode 002`, … (zero-padded, sequential under that
 parent). That matches common OpenVLA / OXE-style corpora better than opaque hashes;
 `to_rlds.py` still emits `episode_XXXX.npz` from whatever source folder name it finds.
 
-Every kept RGB frame is also dumped as a PNG under `images/<view>/`, with the per-view
-totals recorded in `meta.json` as `png_counts`.
+HDF5 `steps/` datasets: `image_base_left`, `q_arm`, `q_grip`, `q_inner`, `ee_pos`,
+`ee_quat`, `grasping`, `action` (7,), `t_sim`, `t_wall`. The camera key follows
+`MARC_PRIMARY_CAM`, but the supported OpenVLA workflow pins it to `base_left`.
 
-HDF5 `steps/` datasets: `image_base_left`, `image_base_right`, `image_gripper_left`,
-`image_gripper_right`, `depth_base`, `depth_gripper`, `q_arm`, `q_grip`, `q_inner`,
-`ee_pos`, `ee_quat`, `grasping`, `action` (7,), `t_sim`, `t_wall`.
-
-Per the API reference each rig is a stereo pair **plus** a depth camera
-(`base_camera/{left,right}/image` + `base_camera/depth/image`, same for `gripper_camera/`),
-so all **six** robot views are written every step. `steps.attrs["rgb_views"]` lists the
-views that made it into the file. Episodes recorded before this change used
-`image_base`/`image_gripper` for the left eyes; `to_rlds.py` still reads those.
+The HDF5 is the single episode source. Per-frame PNG copies, secondary RGB views, and
+depth streams are not written: vanilla OpenVLA fine-tuning loads one primary RGB image,
+no depth, and no proprioception. The two camera-lock diagnostics under
+`datasets/yolo_debug/` remain because they are single startup snapshots rather than one
+copy per transition.
 
 **Action convention:** EE delta in arm_base  
 Raw HDF5 uses `[dx, dy, dz, droll, dpitch, dyaw, close_intent]`, with
 `close_intent=1`. The RLDS converter flips only that last label to OpenVLA/OXE's
 canonical `0=closed, 1=open`. The physical `q_grip` remains proprioception and is
 never used as an action token, so the arm's `0.68` close ceiling is not rescaled.
+One `v` press records exactly one pre-close image paired with close intent; the full
+sensor-confirmed finger ramp still executes physically but its internal control ticks
+are not duplicated as identical training transitions.
+
+**State convention:** OpenVLA `StateEncoding.JOINT` expects eight values: seven
+joint slots followed by gripper state. MARC has six arm joints, so RLDS state is
+`[q1, q2, q3, q4, q5, q6, 0, q_grip]`. The zero is a required padding slot, not
+an extra measured joint.
 
 ### Which camera trains the policy
 
-`MARC_PRIMARY_CAM` (default `base_left`) selects the **training** view out of
-`base_left`, `base_right`, `gripper_left`, `gripper_right`; it is recorded in
-`meta.json`/HDF5 attrs as `primary_camera`. The base rig is the default because:
+`MARC_PRIMARY_CAM` is pinned to `base_left` for the supported dataset path and is
+recorded in `meta.json`/HDF5 attrs as `primary_camera`. The base view is used because:
 
 - OpenVLA's pretraining mixture is overwhelmingly **third-person** RGB, and its
   single-image ViT backbone has seen far fewer wrist views, so a base view is closer to
@@ -170,34 +192,26 @@ never used as an action token, so the arm's `0.68` close ceiling is not rescaled
 - The base is parked during `ARM_TELEOP`, so within a recorded episode the only things
   moving in frame are the arm and the object. Backgrounds stay fixed, which makes the
   image-to-action mapping much easier to learn from few episodes.
-- A base view keeps the object, gripper, and basket visible at once, so approach and
-  place phases are not ambiguous — a wrist camera loses the target as it closes in and
-  can be fully occluded by the grasped object.
+- A base view keeps the object and gripper visible together through approach and close.
+  A wrist camera can lose the target as it closes in or become fully occluded by the
+  grasped object.
 
-The other five views are still written to every episode, so switching later is a re-export
-(`to_rlds.py --camera gripper_left`) rather than a re-collection. A wrist view is mainly
-worth trying as a *second* input if you move to a policy that accepts multiple cameras;
-`base_right` gives you stereo for depth-aware variants.
+Changing to a wrist or multi-image policy now requires recollection by design. Keeping
+unused streams in every episode was not justified for the selected single-image OpenVLA
+experiment and increased one 192-transition episode from roughly 41 MiB of useful
+base-left HDF5 imagery to 424 MiB including unused streams and duplicate PNGs.
 
 ### Duplicate publishers on one camera topic
 
-Some camera topics carry **two publishers at different resolutions and viewpoints**
-(e.g. `base_camera/depth/image` alternating 480×640 and 360×640). The SDK caches one
-message per topic, so a getter returns whichever publisher wrote last. Startup prints
+Some camera topics carry **two publishers at different resolutions and viewpoints**.
+The SDK caches one message per topic, so a getter returns whichever publisher wrote last. Startup prints
 `[probe] camera publishers:` with a publisher count and node name per topic — anything
-above 1 there is the cause. Each view therefore locks the first resolution it sees:
-foreign frames are dropped for the primary view (the step is skipped rather than paired
-with a stale training image) and fall back to the last valid frame for the others, so a
-foreign camera's pixels are never stored under this camera's name.
+above 1 there is the cause. The primary view locks the first resolution it sees; foreign
+frames are dropped so a step is skipped rather than paired with a stale or mislabeled
+training image.
 
-**This cannot fail a write.** At write time the recorder drops any step whose *primary*
-image is off-resolution (the training image is the one thing that may not be faked), then
-puts each secondary view on its dominant resolution by borrowing the nearest good frame —
-capped at `MAX_FILL_FRAC` (10%) of the episode, beyond which the view is dropped rather
-than mostly fabricated. Fill counts are printed and stored in `steps.attrs["filled_frames"]`
-and `meta.json`, so a view that needed patching is visible rather than silent. Before this,
-a single missing gripper frame at episode start made that whole view unstackable and it
-vanished from the file without an error.
+At write time the recorder also drops any step whose primary image differs from the
+episode's dominant shape. No training image is fabricated from a neighbouring frame.
 
 VLA steps start at the first arm teleop subframe after auto-approach stop (base motion is not labeled as VLA actions).
 
@@ -209,14 +223,30 @@ python3 -m manip_dataset.to_rlds \
   --in datasets/marc_pnp \
   --out datasets/marc_pnp_rlds \
   --image-size 224 \
-  --camera auto
+  --camera base_left
 ```
 
-`--camera auto` exports each episode's recorded `primary_camera`; pass an explicit
-view such as `base_left` or `gripper_left` to force one (with a recorded-view fallback).
+`base_left` is pinned for OpenVLA training and export fails if that view is absent; it
+never silently substitutes a gripper-camera image. `--camera auto` remains available for
+deliberately mixed/legacy exports and uses each episode's recorded `primary_camera`.
 
 Produces `episodes/episode_XXXX.npz`, `manifest.json`,
 `dataset_statistics.json`, and a self-contained `marc_pnp_dataset_builder.py`.
+Conversion validates the complete source export before reporting success. It rejects
+episodes with empty object names, non-pick tasks, or language mentioning a place/drop/
+basket phase: scripted `P` actions were intentionally not recorded, so labeling those
+frames as pick-and-place would be incorrect. Older episodes with those labels must not
+be used for fine-tuning; collect fresh episodes after clearing or changing
+`MARC_DATASET_ROOT`.
+
+You can rerun the same validation independently:
+
+```bash
+python3 -m manip_dataset.validate_openvla_dataset \
+  --export datasets/marc_pnp_rlds \
+  --camera base_left
+```
+
 Materialize the actual TFDS/RLDS dataset from an OpenVLA environment:
 
 ```bash
@@ -225,8 +255,23 @@ python datasets/marc_pnp_rlds/marc_pnp_dataset_builder.py \
   --data-dir datasets/tfds
 ```
 
+Then validate both the materialized TFDS dataset and one sample passed through
+OpenVLA's official `RLDSDataset` loader (run this inside that OpenVLA environment):
+
+```bash
+python3 -m manip_dataset.validate_openvla_dataset \
+  --export datasets/marc_pnp_rlds \
+  --tfds-root datasets/tfds \
+  --openvla-dir /path/to/openvla
+```
+
+The TFDS check validates the 8D state directly. Current upstream OpenVLA fine-tuning
+loads image, action, and language but sets `load_proprio=False`; the official-loader
+check therefore verifies the exact fields that training consumes rather than claiming
+that training reads state.
+
 The builder emits deterministic episode-level `train`/`val` splits (90/10), so frames
-from one episode cannot leak into both. It registers as `marc_pnp:1.1.0`; image key is
+from one episode cannot leak into both. It registers as `marc_pnp:1.2.0`; image key is
 `image`, state key is `state`, language key is `language_instruction`, and
 `unnorm_key=marc_pnp`.
 
@@ -312,10 +357,10 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_YOLO_HALF` | `0` | FP16 predict. Off by default (avoids Ultralytics `half` deprecation spam) |
 | `MARC_YOLO_CAM` | `base_left` | RGB camera for centering (`base_left`/`base_right`) |
 | `MARC_TARGET_OBJECT` | `tumbler` | Exact required class; unsupported names fail closed |
-| `MARC_APPROACH_STOP_M` | `0.26` | Stop when arm-base forward (pick localize) is below this (m) |
-| `MARC_APPROACH_ALREADY_NEAR` | `0.16` | Arm-base fwd (m) counted as pick range: no yaw, no overrun |
-| `MARC_APPROACH_CRAWL` | `0.30` | Requested approach speed (m/s); clamped by `MAX_STEP` |
-| `MARC_APPROACH_MAX_STEP` | `0.04` | Max distance travelled per camera frame (m). Caps effective speed to the sensor rate |
+| `MARC_APPROACH_STOP_M` | `0.56` | Stop when calibrated arm-base forward is below this (m) |
+| `MARC_APPROACH_ALREADY_NEAR` | `0.44` | Calibrated arm-base fwd (m) counted as pick range: stops the final crawl 2 cm earlier to preserve the full object in frame |
+| `MARC_APPROACH_CRAWL` | `0.30` (`.env`: `0.80`) | Requested approach speed (m/s); clamped by `MAX_STEP` |
+| `MARC_APPROACH_MAX_STEP` | `0.04` (`.env`: `0.08`) | Max distance travelled per camera frame (m). Caps effective speed to the sensor rate |
 | `MARC_APPROACH_STALE_STOP` | `0.5` | Hold still if no usable RGB/depth for this long (s), instead of driving blind |
 | `MARC_APPROACH_K` | `3` | Persistence frames, counted only on **new** RGB frames |
 | `MARC_APPROACH_PERCENTILE` | `30` | Percentile of depth pixels inside the YOLO box |
@@ -329,7 +374,7 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_APPROACH_ALIGN_HOLD` | `2` | New RGB frames within `CENTER_TOL` required before driving |
 | `MARC_APPROACH_ALIGN_SETTLE` | `0.15` | Stand-still time (s) on entering `ALIGN` so cameras catch up with the pose |
 | `MARC_APPROACH_ALIGN_TIMEOUT` | `0` | If `>0`, log when ALIGN has taken this long — **does not drive anyway** |
-| `MARC_APPROACH_BURST_M` | `0.15` | Straight-line travel (m) per `DRIVE` burst before re-checking centering; `0` disables re-checks |
+| `MARC_APPROACH_BURST_M` | `0.15` (`.env`: `0.25`) | Straight-line travel (m) per `DRIVE` burst before re-checking centering; `0` disables re-checks |
 | `MARC_APPROACH_LAT_MIN_M` | `0.05` | Ignore depths nearer than this inside the YOLO box |
 | `MARC_APPROACH_LAT_MAX_M` | `20.0` | Ignore depths beyond this inside the YOLO box |
 | `MARC_APPROACH_LOG_EVERY` | `1` | Print each N ticks (`0` = off) |
@@ -337,14 +382,28 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_BASE_LIN_BACK` | same as `MARC_BASE_LIN` | Manual base reverse (`k`) speed (m/s) |
 | `MARC_BASE_ANG` | `0.25` | Manual base yaw (`j`/`l`) rate (rad/s) |
 | `MARC_TELEOP_DX` etc. | see `DEFAULT_TELEOP_*` | Arm click step sizes (IK teleop after ready) |
-| `MARC_PRIMARY_CAM` | `base_left` | Training view (`base_left`/`base_right`/`gripper_left`/`gripper_right`; `base`/`gripper` accepted as the left eye). All six views are always recorded |
+| `MARC_PRIMARY_CAM` | `base_left` | Sole RGB view recorded and exported for OpenVLA; keep at `base_left` for train/runtime consistency |
 | `MARC_GRIP_DWELL` | `pnp_params.grip_dwell` (`1.0`) | Seconds a `v`/`b` click holds pose while the fingers travel, so `gripper/holding` can be observed |
-| `MARC_GRIP_RAMP` | `1.2` | Seconds for a close to ramp from open to `MARC_GRIP_CLOSE` |
-| `MARC_GRIP_EXTRA` | `0.02` | Extra rad of bite taken after contact is detected. `0` stops dead on contact |
-| `MARC_GRIP_STOP_ON_GRASP` | `1` | Stop closing as soon as `gripper/holding` goes true. `0` restores commanding the full close and holding it |
-| `MARC_GRIP_CLOSE` | `pnp_params.grip_close` (`0.58`), `.env` sets `0.68` | **Ceiling** for a close, clamped to the `0.703` joint limit — not the value that ends up held, since the ramp stops at contact. The effective value is printed at startup and after each `v` |
+| `MARC_GRIP_RAMP` | `0` | `0` jumps to `MARC_GRIP_CLOSE` on the first control tick; a positive value restores a software ramp over that many seconds |
+| `MARC_GRIP_EXTRA` | `0.04` | Used only when `MARC_GRIP_STOP_ON_GRASP=1`; ignored by the default full-close mode |
+| `MARC_GRIP_CONFIRM_SAMPLES` | `3` | Used only when `MARC_GRIP_STOP_ON_GRASP=1` to reject transient hold signals |
+| `MARC_GRIP_STOP_ON_GRASP` | `0` | `0` always finishes and holds the full close; `1` enables the older sensor-stopped close |
+| `MARC_GRIP_CLOSE` | `pnp_params.grip_close` (`0.58`), `.env` sets `0.68` | Final close command, clamped to the `0.703` joint limit; manual `v` reaches and holds `0.68` with the provided configuration |
+| `MARC_OPENVLA_STAGE_BACK_M` | `0.01` | Deterministic handoff distance behind the target; the 1 cm stand-off keeps the handoff just short of the tumbler |
+| `MARC_OPENVLA_STAGE_MIN_FORWARD_M` | `0.16` | Minimum forward-only clearance from the current ready EE before lateral alignment or descent can begin |
+| `MARC_OPENVLA_STAGE_UP_M` | `0.225` | Handoff height above the target; shortens the final descent by 7 cm from the previous 0.155 m handoff |
+| `MARC_IK_JOINT_STEP` | `0.04` | Maximum DLS joint change per control tick (rad); bounds Cartesian arm speed and prevents IK branch-jump commands |
+| `MARC_OPENVLA_VERIFY_LIFT_M` | `0.08` | Lift applied before visually accepting a candidate OpenVLA grasp |
+| `MARC_OPENVLA_VERIFY_MIN_RISE_M` | `0.035` | Minimum measured target rise required after the verification lift |
+| `MARC_OPENVLA_VERIFY_MAX_XY_DRIFT_M` | `0.12` | Maximum target-localization XY drift allowed during verification |
+| `MARC_BASE_HOLD_POS_KP` | `2.0` | Longitudinal world-pose hold gain used to counter slope drift during manipulation |
+| `MARC_BASE_HOLD_MAX_MPS` | `0.08` | Maximum forward/backward correction speed while holding the manipulation pose |
+| `MARC_BASE_HOLD_DEADBAND_M` | `0.002` | Longitudinal drift tolerated before correction starts |
+| `MARC_BASE_HOLD_YAW_KP` | `1.5` | Heading hold gain during manipulation |
+| `MARC_BASE_HOLD_MAX_RADPS` | `0.15` | Maximum heading correction rate during manipulation |
+| `MARC_BASE_HOLD_YAW_DEADBAND_RAD` | `0.01` | Heading error tolerated before correction starts |
 | `MARC_PLACE_YAW` | `3.1416` | Joint-1 rotation from front to basket. Trim if the drop lands off-centre |
-| `MARC_PLACE_SPEED` | `pnp_params.carry_speed`, `.env` sets `0.5` | Joint rate (rad/s) for `P`. Joint 1's URDF limit is `1.396` |
+| `MARC_PLACE_SPEED` | `pnp_params.carry_speed`, `.env` sets `0.5` | Maximum joint rate (rad/s) for feedback-paced, cosine-eased `P` motion. Joint 1's URDF limit is `1.396` |
 | `MARC_PLACE_IK_GUARD` | `1.2` | Max rad any joint may move from its IK seed before the solution is rejected as a branch jump (which is what folds the arm into itself) |
 | `MARC_PLACE_REC_EVERY` | `3` | Unused for the dataset (`P` is not recorded); kept only if you pass a custom `on_step` to `place_in_basket` |
 | `MARC_READY_J1`…`J6` | `DEFAULT_ARM_Q` = `0, 0.262, -2.094, 0, -0.785, 1.571` | **Joint-space ready start** (rad). Unset = default pose; set any subset to override those joints only. Interpolated once; no Cartesian IK during ready |

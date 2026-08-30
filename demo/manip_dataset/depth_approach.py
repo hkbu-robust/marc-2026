@@ -14,7 +14,12 @@ import numpy as np
 from .images import depth_in_bbox, image_to_depth, image_to_rgb
 from .yolo_detect import YoloConfig, YoloTracker
 
-from nearfield import choose_lock_depth, k_from_info, localize_detection
+from nearfield import (
+    base_camera_to_car_transform,
+    choose_lock_depth,
+    k_from_info,
+    localize_detection,
+)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -63,9 +68,14 @@ DEFAULT_BURST_M = 0.15
 DEFAULT_LAT_MIN_M = 0.05
 DEFAULT_LAT_MAX_M = 20.0
 # Stop once arm-base forward (same metric as pick localize) is this close (m).
-DEFAULT_STOP_M = 0.26
+DEFAULT_STOP_M = 0.56
 # Closer than this: already at pick range — stop with no overrun.
-DEFAULT_ALREADY_NEAR_M = 0.16
+DEFAULT_ALREADY_NEAR_M = 0.44
+INTERMITTENT_LOCK_TARGETS = frozenset(("tissue", "sunblock"))
+TARGET_LOCK_RANGE_PAD_M = 0.10
+TARGET_LOCK_WORLD_RADIUS_M = 0.15
+TARGET_LOCK_LAT_RADIUS_M = 0.10
+TARGET_LOCK_Z_RADIUS_M = 0.12
 # Practice sim often closes ~1 cm/s even when cmd_vel is 0.14 m/s. Overrun
 # therefore stops on arm-base fwd, with this rate only sizing the wall-clock cap.
 OVERRUN_SLOW_MPS = 0.008
@@ -205,12 +215,31 @@ class DepthApproachController:
         self._arrive_now = False
         self._skip_overrun = False
         self._timeout_logged = False
+        self._target_name: Optional[str] = None
+        self._near_lock_det: Optional[dict] = None
+        self._near_lock_target = None
 
     def detector_ready(self) -> bool:
         return self._yolo.model is not None
 
     def set_target(self, name: Optional[str]):
+        target = None if not name else str(name).strip()
+        if target != self._target_name:
+            self._clear_near_lock()
+        self._target_name = target
         self._yolo.set_target(name)
+
+    def _clear_near_lock(self):
+        self._near_lock_det = None
+        self._near_lock_target = None
+
+    def locked_target(self, name: Optional[str]):
+        """Return a maintained near-range intermittent-target localization, if any."""
+        target = None if not name else str(name).strip()
+        if target not in INTERMITTENT_LOCK_TARGETS or target != self._target_name:
+            return None
+        locked = self._near_lock_target
+        return locked if locked is not None and getattr(locked, "valid", False) else None
 
     def ensure_detector(self) -> bool:
         return self._yolo.load()
@@ -259,30 +288,100 @@ class DepthApproachController:
                 info = None
         return k_from_info(info, rgb_shape)
 
-    def _localize_fwd(self, det, depth, rgb_shape) -> Optional[float]:
-        """Arm-base forward of the YOLO box, same helper as pick snapshot."""
+    def _localize_target(self, det, depth, rgb_shape):
+        """Localize one detection with the same camera transform as pick snapshot."""
         if det is None or depth is None or det.get("bbox") is None:
             return None
         shape = det.get("rgb_shape") or rgb_shape
         if shape is None:
             return None
         try:
+            R, t = base_camera_to_car_transform()
+            pose = None
+            getter = getattr(self._client, "get_world_pose", None)
+            if callable(getter):
+                pose = getter()
             loc = localize_detection(
                 det["bbox"],
                 depth,
                 shape,
                 self._camera_k(shape),
-                pose=None,
+                pose=pose,
                 hint_xy=None,
                 hint_radius=None,
                 conf=det.get("conf"),
                 name=det.get("name") or "",
+                R=R,
+                t=t,
             )
         except Exception:
             return None
         if loc.reason not in ("ok", "out_of_reach", "outside_radius"):
             return None
-        return float(loc.fwd)
+        return loc
+
+    def _localize_fwd(self, det, depth, rgb_shape) -> Optional[float]:
+        """Arm-base forward of the YOLO box, same helper as pick snapshot."""
+        loc = self._localize_target(det, depth, rgb_shape)
+        return None if loc is None else float(loc.fwd)
+
+    def _matches_near_lock(self, candidate) -> bool:
+        locked = self._near_lock_target
+        if candidate is None or locked is None or not getattr(candidate, "valid", False):
+            return False
+        old_world = getattr(locked, "world_xy", None)
+        new_world = getattr(candidate, "world_xy", None)
+        if old_world is not None and new_world is not None:
+            return math.dist(old_world, new_world) <= TARGET_LOCK_WORLD_RADIUS_M
+        return (
+            abs(float(candidate.lat) - float(locked.lat)) <= TARGET_LOCK_LAT_RADIUS_M
+            and abs(float(candidate.z) - float(locked.z)) <= TARGET_LOCK_Z_RADIUS_M
+            and float(candidate.fwd) <= float(locked.fwd) + TARGET_LOCK_RANGE_PAD_M
+        )
+
+    def _reuse_near_lock(self, depth, rgb_shape):
+        """Reuse a box only when fresh depth maps to its class-specific lock."""
+        if (
+            self._target_name not in INTERMITTENT_LOCK_TARGETS
+            or self._near_lock_det is None
+        ):
+            return None
+        det = dict(self._near_lock_det)
+        det["rgb_shape"] = rgb_shape or det.get("rgb_shape")
+        candidate = self._localize_target(det, depth, det.get("rgb_shape"))
+        if not self._matches_near_lock(candidate):
+            return None
+        self._near_lock_target = candidate
+        det["status"] = "near_target_lock"
+        det["n_obj"] = 1
+        det["n_raw"] = 0
+        det["near_lock_reused"] = True
+        return det
+
+    def _maybe_lock_near_target(self, det, localized):
+        if (
+            self._target_name not in INTERMITTENT_LOCK_TARGETS
+            or det is None
+            or localized is None
+            or not getattr(localized, "valid", False)
+        ):
+            return
+        max_fwd = max(float(self.cfg.stop_m), float(self.cfg.already_near_m))
+        max_fwd += TARGET_LOCK_RANGE_PAD_M
+        if float(localized.fwd) > max_fwd or abs(float(localized.lat)) > self.cfg.realign:
+            return
+        if self._near_lock_target is not None and not self._matches_near_lock(localized):
+            return
+        first = self._near_lock_target is None
+        self._near_lock_det = dict(det)
+        self._near_lock_det.pop("near_lock_reused", None)
+        self._near_lock_target = localized
+        if first:
+            print(
+                f"[approach] {self._target_name} lock acquired at "
+                f"fwd={localized.fwd:.3f} lat={localized.lat:.3f} "
+                f"z={localized.z:.3f} conf={localized.conf:.2f}"
+            )
 
     def _measure(self) -> Optional[dict]:
         """Read RGB + depth; YOLO on new RGB. None if neither stream is usable."""
@@ -353,6 +452,10 @@ class DepthApproachController:
 
         if rgb is not None and rgb_new:
             det = self._yolo.detect(rgb)
+            if det is None or int(det.get("n_obj") or 0) <= 0:
+                reused = self._reuse_near_lock(depth, rgb_shape)
+                if reused is not None:
+                    det = reused
             self._det = det
         else:
             det = self._det
@@ -385,10 +488,15 @@ class DepthApproachController:
             self._lat_err = float(lat)
 
         fwd = None
+        localized = None
         if n_obj > 0 and det is not None:
-            fwd = self._localize_fwd(det, depth, rgb_shape or (det.get("rgb_shape")))
+            localized = self._localize_target(
+                det, depth, rgb_shape or det.get("rgb_shape")
+            )
+            fwd = None if localized is None else float(localized.fwd)
             if fwd is not None:
                 self._fwd_cached = float(fwd)
+                self._maybe_lock_near_target(det, localized)
             else:
                 fwd = self._fwd_cached
         else:
@@ -406,6 +514,7 @@ class DepthApproachController:
             "conf": None if det is None else det.get("conf"),
             "bbox": None if det is None else det.get("bbox"),
             "area": None if det is None else det.get("area"),
+            "target_locked": bool(det is not None and det.get("near_lock_reused")),
             "is_new": bool(rgb_new),
             "rgb_shape": rgb_shape,
             "depth_shape": depth_shape,
@@ -660,6 +769,7 @@ class DepthApproachController:
 
     def start(self) -> bool:
         """Activate auto-approach. Returns False if YOLO or cameras are unavailable."""
+        self._clear_near_lock()
         if not self._yolo.load():
             self.active = False
             print(f"[approach] YOLO FAILED: {self._yolo._last_fail}")
@@ -805,6 +915,7 @@ class DepthApproachController:
         self._det = None
         self._d_obj_cached = None
         self._fwd_cached = None
+        self._clear_near_lock()
         self._phase = "align"
         self._phase_t0 = None
         self._align_ok = 0
@@ -870,6 +981,8 @@ class DepthApproachController:
                 flags.append("NEAR")
             if self._obj_stop(m):
                 flags.append("STOPD")
+            if m.get("target_locked"):
+                flags.append("TARGET_LOCK")
             fps = None if not self._frame_dt else 1.0 / self._frame_dt
             lat = m.get("lat_err")
             n_obj = int(m.get("lat_n_obj") or 0)

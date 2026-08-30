@@ -27,7 +27,7 @@ def split_episode_paths(pattern, val_fraction=0.1):
 
 
 class MarcPnp(tfds.core.GeneratorBasedBuilder):
-    VERSION = tfds.core.Version("1.1.0")
+    VERSION = tfds.core.Version("1.2.0")
 
     def _info(self):
         return tfds.core.DatasetInfo(
@@ -39,7 +39,8 @@ class MarcPnp(tfds.core.GeneratorBasedBuilder):
                             shape=(None, None, 3), dtype=np.uint8,
                             encoding_format="png",
                         ),
-                        "state": tfds.features.Tensor(shape=(7,), dtype=np.float32),
+                        # OpenVLA StateEncoding.JOINT: seven joint slots + gripper.
+                        "state": tfds.features.Tensor(shape=(8,), dtype=np.float32),
                     }),
                     "action": tfds.features.Tensor(shape=(7,), dtype=np.float32),
                     "discount": tfds.features.Scalar(dtype=np.float32),

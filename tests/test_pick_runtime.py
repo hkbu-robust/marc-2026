@@ -195,6 +195,26 @@ class PickRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(0.04, commands[0]["dpitch"])
         self.assertEqual(0.68, commands[-1]["grip"])
 
+    def test_snapshot_obs_decodes_ros_image_for_openvla(self):
+        client = ScriptClient()
+        pixels = np.arange(18, dtype=np.uint8).reshape(2, 3, 3)
+        image = SimpleNamespace(
+            height=2,
+            width=3,
+            encoding="rgb8",
+            step=9,
+            data=pixels.tobytes(),
+        )
+        client.get_robot_image = lambda _which: image
+        runtime = PickRuntime(client, policy="openvla_remote")
+
+        obs = runtime._snapshot_obs(SimpleNamespace(name="tumbler"))
+
+        self.assertIsInstance(obs.rgb, np.ndarray)
+        self.assertEqual((2, 3, 3), obs.rgb.shape)
+        self.assertEqual(np.uint8, obs.rgb.dtype)
+        np.testing.assert_array_equal(pixels, obs.rgb)
+
     def test_adopt_pick_on_retrieval_state(self):
         state = RetrievalState()
         state.adopt_pick(PickResult(

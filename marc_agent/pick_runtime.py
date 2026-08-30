@@ -293,7 +293,11 @@ class PickRuntime:
         try:
             img = self.client.get_robot_image("base_left")
             if img is not None:
-                rgb = img
+                if isinstance(img, np.ndarray):
+                    rgb = img
+                else:
+                    from manip_dataset.images import image_to_rgb
+                    rgb = image_to_rgb(img)
         except Exception:
             rgb = None
         proprio = None
