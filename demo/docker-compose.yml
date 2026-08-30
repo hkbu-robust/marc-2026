@@ -165,6 +165,7 @@ services:
     volumes:
       - ./weights:/agent/demo/weights
       - ../marc_agent:/agent/marc_agent
+      - ./handshake_manip_pick_client.py:/agent/demo/handshake_manip_pick_client.py:ro
       - ./manip_dataset:/agent/demo/manip_dataset
       - ./nearfield.py:/agent/demo/nearfield.py
       - ./arm_pick.py:/agent/demo/arm_pick.py
