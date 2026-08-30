@@ -99,15 +99,17 @@ class OpenVLAActionTests(unittest.TestCase):
 
     def test_grip_cases(self):
         for case in self.fx["grip_cases"]:
-            signed = case["signed"]
-            with self.subTest(value=case["value"], signed=signed):
+            open_is_high = case["open_is_high"]
+            with self.subTest(value=case["value"], open_is_high=open_is_high):
                 self.assertEqual(
                     bool(case["close"]),
-                    gripper_should_close(case["value"], signed=signed),
+                    gripper_should_close(case["value"], open_is_high=open_is_high),
                 )
                 self.assertAlmostEqual(
                     float(case["cmd"]),
-                    gripper_command(case["value"], signed=signed, close=GRIPPER_CLOSE),
+                    gripper_command(
+                        case["value"], open_is_high=open_is_high, close=GRIPPER_CLOSE,
+                    ),
                 )
 
     def test_nested_stats_round_trip(self):

@@ -24,12 +24,13 @@ from marc_agent.graspgenx_policy import (
 )
 from marc_agent.openvla_actions import (
     ACTION_DIM,
-    GRIPPER_CLOSE,
     gripper_should_close,
     pick_instruction,
 )
 from marc_agent.openvla_policy import (
+    GeometricGraspStub,
     PolicyObservation,
+    load_openvla,
 )
 
 _DEMO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo")
@@ -122,6 +123,7 @@ class PickRuntime:
         recover_fn: Optional[Callable] = None,
         reacquire_fn: Optional[Callable] = None,
         grasp_generator: Optional[Callable] = None,
+        openvla_policy=None,
         poll_dt: float = DEFAULT_POLL_DT,
         grasp_poll: int = DEFAULT_GRASP_POLL,
         basket_poll: int = DEFAULT_BASKET_POLL,
@@ -139,6 +141,8 @@ class PickRuntime:
         self._recover_fn = recover_fn
         self._reacquire_fn = reacquire_fn
         self._grasp_generator = grasp_generator
+        self._openvla_policy = openvla_policy
+        self._openvla_load_attempted = openvla_policy is not None
         self.poll_dt = float(poll_dt)
         self.grasp_poll = int(grasp_poll)
         self.basket_poll = int(basket_poll)
@@ -306,16 +310,10 @@ class PickRuntime:
             instruction=pick_instruction(target),
         )
 
-    def _close_grip_cmd(self) -> float:
-        try:
-            from arm_pick import GRIPPER_CLOSE as close_default, load_params
-            return float(load_params().get("grip_close", close_default))
-        except Exception:
-            return float(GRIPPER_CLOSE)
-
     def _geom_or_openvla_grasp(self, target, policy_obj) -> None:
         arm = self._teleop_arm()
-        close_cmd = self._close_grip_cmd()
+        # TeleopConfig owns the physical calibration and clamps MARC_GRIP_CLOSE.
+        close_cmd = float(arm.cfg.grip_close)
         for _ in range(self.policy_ticks):
             try:
                 if self.client.is_grasping() is True:
@@ -340,9 +338,10 @@ class PickRuntime:
                     return
             except Exception:
                 pass
-            stats = getattr(policy_obj, "stats", None)
-            signed = bool(stats.gripper_signed) if stats is not None else None
-            if gripper_should_close(float(action[6]), signed=signed):
+            # Real OpenVLA uses 0=closed/1=open; the geometric test stub emits
+            # the collector's 1=close command intent.
+            open_is_high = getattr(policy_obj, "stats", None) is not None
+            if gripper_should_close(float(action[6]), open_is_high=open_is_high):
                 arm.apply_delta(grip=close_cmd)
 
     def _apply_graspgenx(self, target) -> bool:
@@ -409,6 +408,8 @@ class PickRuntime:
 
     def unload_generator(self) -> None:
         self._grasp_generator = None
+        self._openvla_policy = None
+        self._openvla_load_attempted = False
 
     def _grasp(self, target) -> None:
         if self._grasp_fn is not None:
@@ -420,9 +421,19 @@ class PickRuntime:
         if self.policy == "graspgenx":
             if not self._apply_graspgenx(target):
                 return
-        elif self.policy in ("openvla", "openvla_geom"):
+        elif self.policy == "openvla_geom":
+            policy_obj = GeometricGraspStub((target.fwd, target.lat, target.z))
+            self._geom_or_openvla_grasp(target, policy_obj)
+            return
+        elif self.policy == "openvla":
+            if not self._openvla_load_attempted:
+                self._openvla_policy = load_openvla()
+                self._openvla_load_attempted = True
+            if self._openvla_policy is not None:
+                self._geom_or_openvla_grasp(target, self._openvla_policy)
+                return
             if not self._openvla_fallback_logged:
-                self._emit("[pick] OpenVLA is not used at pick -- IK")
+                self._emit("[pick] OpenVLA unavailable -- IK fallback")
                 self._openvla_fallback_logged = True
         self._ik_grasp(target)
 

@@ -5,14 +5,29 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import os
 
 import numpy as np
 import tensorflow_datasets as tfds
 
 
+def split_episode_paths(pattern, val_fraction=0.1):
+    """Deterministically split whole episodes; never leak frames across splits."""
+    paths = sorted(glob.glob(pattern))
+    if len(paths) < 2:
+        return paths, []
+    val_count = max(1, round(len(paths) * float(val_fraction)))
+    shuffled = sorted(
+        paths,
+        key=lambda path: hashlib.sha256(os.path.basename(path).encode()).digest(),
+    )
+    val = set(shuffled[:val_count])
+    return [path for path in paths if path not in val], [path for path in paths if path in val]
+
+
 class MarcPnp(tfds.core.GeneratorBasedBuilder):
-    VERSION = tfds.core.Version("1.0.0")
+    VERSION = tfds.core.Version("1.1.0")
 
     def _info(self):
         return tfds.core.DatasetInfo(
@@ -42,10 +57,15 @@ class MarcPnp(tfds.core.GeneratorBasedBuilder):
 
     def _split_generators(self, dl_manager):
         source = os.path.join(str(dl_manager.manual_dir), "episodes", "episode_*.npz")
-        return {"train": self._generate_examples(source)}
+        train, val = split_episode_paths(source)
+        splits = {"train": self._generate_examples(train)}
+        if val:
+            # OpenVLA looks specifically for a split named "val".
+            splits["val"] = self._generate_examples(val)
+        return splits
 
-    def _generate_examples(self, pattern):
-        for path in sorted(glob.glob(pattern)):
+    def _generate_examples(self, paths):
+        for path in paths:
             data = np.load(path, allow_pickle=True)
             count = len(data["action"])
             instruction = str(data["language_instruction"].item())

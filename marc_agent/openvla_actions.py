@@ -23,8 +23,8 @@ DEFAULT_INSTRUCTION = "pick up the object"
 IMAGE_SIZE = 224
 GRIPPER_OPEN = 0.0
 GRIPPER_CLOSE = 0.703
-ACTION_CONVENTION = "ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip"
-# EE dims use q01/q99; gripper stays in [-1, 1] (OpenVLA mask=false).
+ACTION_CONVENTION = "ee_delta_arm_base_dx_dy_dz_droll_dpitch_dyaw_grip_0_closed_1_open"
+# EE dims use q01/q99; canonical binary gripper stays unnormalized (mask=false).
 DEFAULT_ACTION_MASK = (True, True, True, True, True, True, False)
 
 
@@ -108,11 +108,6 @@ class ActionStats:
     @property
     def dim(self) -> int:
         return int(self.q01.size)
-
-    @property
-    def gripper_signed(self) -> bool:
-        """True when the last dim is left in [-1, 1] (mask false)."""
-        return not bool(self.mask[-1])
 
     def to_norm_dict(self) -> dict:
         payload = {
@@ -296,30 +291,20 @@ def tokens_to_action(
     return unnormalize_action(normalized, stats)
 
 
-def gripper_should_close(grip: float, *, signed: Optional[bool] = None) -> bool:
-    """Close command from a decoded gripper scalar.
-
-    OpenVLA's unmasked gripper lives in ``[-1, 1]`` (close iff ``>= 0``).
-    Collector / geometric stub use ``[0, 1]`` (close iff ``>= 0.5``).
-    """
+def gripper_should_close(grip: float, *, open_is_high: bool = True) -> bool:
+    """Interpret canonical OpenVLA ``0=closed, 1=open`` (or an explicit stub)."""
     value = float(grip)
-    if signed is True:
-        return value >= 0.0
-    if signed is False:
-        return value >= 0.5
-    if value < 0.0:
-        return False
-    return value >= 0.5
+    return value < 0.5 if open_is_high else value >= 0.5
 
 
 def gripper_command(
     grip: float,
     *,
-    signed: Optional[bool] = None,
+    open_is_high: bool = True,
     close: float = GRIPPER_CLOSE,
     open_: float = GRIPPER_OPEN,
 ) -> float:
-    if gripper_should_close(grip, signed=signed):
+    if gripper_should_close(grip, open_is_high=open_is_high):
         return float(close)
     return float(open_)
 

@@ -161,6 +161,34 @@ class PickRuntimeTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual("no_grasp", result.reason)
 
+    def test_openvla_policy_runs_instead_of_ik(self):
+        client = ScriptClient()
+        policy = object()
+        runtime = PickRuntime(client, policy="openvla", openvla_policy=policy)
+        used = []
+        runtime._geom_or_openvla_grasp = lambda target, actual: used.append(actual)
+        runtime._ik_grasp = lambda target: self.fail("IK should not run when OpenVLA loaded")
+        runtime._grasp(SimpleNamespace(fwd=0.4, lat=0.0, z=-0.3))
+        self.assertEqual([policy], used)
+
+    def test_openvla_close_uses_teleop_physical_ceiling(self):
+        client = ScriptClient()
+        client.grasping = False
+        commands = []
+        arm = SimpleNamespace(
+            cfg=SimpleNamespace(grip_close=0.68),
+            apply_delta=lambda **kwargs: commands.append(kwargs),
+        )
+        policy = SimpleNamespace(
+            stats=object(),
+            act=lambda _obs: np.array([0, 0, 0, 0, 0, 0, 0], dtype=np.float32),
+        )
+        runtime = PickRuntime(client, policy="openvla", policy_ticks=1)
+        runtime._teleop = arm
+        runtime._snapshot_obs = lambda _target: None
+        runtime._geom_or_openvla_grasp(SimpleNamespace(), policy)
+        self.assertEqual(0.68, commands[-1]["grip"])
+
     def test_adopt_pick_on_retrieval_state(self):
         state = RetrievalState()
         state.adopt_pick(PickResult(

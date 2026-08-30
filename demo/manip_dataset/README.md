@@ -153,7 +153,10 @@ views that made it into the file. Episodes recorded before this change used
 `image_base`/`image_gripper` for the left eyes; `to_rlds.py` still reads those.
 
 **Action convention:** EE delta in arm_base  
-`[dx, dy, dz, droll, dpitch, dyaw, grip]` with `grip` in `{0,1}`.
+Raw HDF5 uses `[dx, dy, dz, droll, dpitch, dyaw, close_intent]`, with
+`close_intent=1`. The RLDS converter flips only that last label to OpenVLA/OXE's
+canonical `0=closed, 1=open`. The physical `q_grip` remains proprioception and is
+never used as an action token, so the arm's `0.68` close ceiling is not rescaled.
 
 ### Which camera trains the policy
 
@@ -209,8 +212,8 @@ python3 -m manip_dataset.to_rlds \
   --camera auto
 ```
 
-`--camera auto` exports each episode's recorded `primary_camera`; pass `base` or `gripper`
-to force a view (it falls back to the other one if the requested view is absent).
+`--camera auto` exports each episode's recorded `primary_camera`; pass an explicit
+view such as `base_left` or `gripper_left` to force one (with a recorded-view fallback).
 
 Produces `episodes/episode_XXXX.npz`, `manifest.json`,
 `dataset_statistics.json`, and a self-contained `marc_pnp_dataset_builder.py`.
@@ -222,9 +225,41 @@ python datasets/marc_pnp_rlds/marc_pnp_dataset_builder.py \
   --data-dir datasets/tfds
 ```
 
-Register `marc_pnp:1.0.0` with OpenVLA using image key `image`, state key
-`state`, language key `language_instruction`, and `unnorm_key=marc_pnp` so
-decode uses the same action bounds.
+The builder emits deterministic episode-level `train`/`val` splits (90/10), so frames
+from one episode cannot leak into both. It registers as `marc_pnp:1.1.0`; image key is
+`image`, state key is `state`, language key is `language_instruction`, and
+`unnorm_key=marc_pnp`.
+
+## Fine-tune OpenVLA with augmentation and early stopping
+
+Use an official OpenVLA checkout. The launcher makes a patched training copy under the
+work directory; it does not edit that checkout. Training uses upstream color/crop image
+augmentation, evaluates the unaugmented `val` episodes every 500 optimizer steps, keeps
+the best LoRA adapter, stops after five non-improving checks, then merges that adapter
+into a directly loadable Hugging Face model.
+
+```bash
+OPENVLA_DIR=/path/to/openvla \
+OPENVLA_WORK_DIR=/path/to/a-large-writable-volume/marc-openvla \
+training/train_openvla_lora.sh /path/to/tfds-root
+```
+
+Defaults use micro-batch 2 plus 8-way gradient accumulation and
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to leave VRAM headroom. Override with
+`OPENVLA_BATCH_SIZE`, `OPENVLA_GRAD_ACCUM`, `OPENVLA_VAL_STEPS`, or
+`OPENVLA_EARLY_STOP_PATIENCE`. The default work directory is
+`/tmp/marc-openvla`, and the launcher refuses a read-only target or one with less
+than 20 GiB free. On this machine `/mnt/data` is currently mounted read-only, so
+do not use it unless it is remounted writable. The merged model is written to
+`$OPENVLA_WORK_DIR/final-model`.
+
+To run it in the agent:
+
+```bash
+MARC_PICK_POLICY=openvla \
+MARC_OPENVLA_MODEL_DIR=/path/to/marc-openvla/final-model \
+docker compose -f demo/docker-compose.yml up --build agent
+```
 
 ## GraspGenX capture boundary
 
