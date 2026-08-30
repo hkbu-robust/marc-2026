@@ -30,18 +30,6 @@ INSTRUCTION_TEMPLATES = [
 DEFAULT_OBJECT = "tumbler"
 
 
-RGB_KEYS = (
-    "image_base_left",
-    "image_base_right",
-    "image_gripper_left",
-    "image_gripper_right",
-)
-DEPTH_KEYS = ("depth_base", "depth_gripper")
-
-# Secondary views may borrow a neighbouring frame for at most this fraction of an
-# episode. Beyond it the view is dropped instead of being mostly fabricated.
-MAX_FILL_FRAC = 0.10
-
 # Folder name for fine-tuning corpora: Episode 001, Episode 002, …
 EPISODE_DIR_RE = re.compile(r"^Episode\s+(\d+)$")
 EPISODE_DIR_FMT = "Episode {:03d}"
@@ -148,8 +136,10 @@ class EpisodeRecorder:
             "t_sim": obs["t_sim"],
             "t_wall": obs["t_wall"],
         }
-        for key in RGB_KEYS + DEPTH_KEYS:
-            step[key] = obs.get(key)
+        # Vanilla OpenVLA consumes one primary RGB stream. Keep exactly that image;
+        # secondary RGB and depth made episodes hundreds of MiB larger but were never
+        # read by conversion or fine-tuning.
+        step[self.primary_key] = obs.get(self.primary_key)
         self.steps.append(step)
 
     def discard(self, save_failed: bool = True) -> Optional[str]:
@@ -196,75 +186,6 @@ class EpisodeRecorder:
               f"{key} shape (kept {keep_shape}, dropped {odd})")
         self.steps = kept
 
-    def _consolidate_views(self) -> Dict[str, int]:
-        """Put every secondary view on one resolution, filling short gaps.
-
-        Only the primary view may drop a step, since that is the training image. A
-        secondary view that misses a few frames (lazy subscription at episode start, or
-        a publisher briefly switching resolution) used to make the whole view
-        unstackable and silently vanish from the episode. Borrowing the nearest good
-        frame keeps the view, and the fill count is written to the file so it is
-        auditable rather than invisible.
-        """
-        n = len(self.steps)
-        filled: Dict[str, int] = {}
-        for key in RGB_KEYS + DEPTH_KEYS:
-            if key == self.primary_key:
-                continue
-            counts: Dict[Any, int] = {}
-            for s in self.steps:
-                v = s.get(key)
-                if v is not None:
-                    shape = np.asarray(v).shape
-                    counts[shape] = counts.get(shape, 0) + 1
-            if not counts:
-                continue
-            keep_shape = max(counts.items(), key=lambda kv: kv[1])[0]
-            good = [
-                i for i, s in enumerate(self.steps)
-                if s.get(key) is not None and np.asarray(s[key]).shape == keep_shape
-            ]
-            bad = n - len(good)
-            if bad == 0:
-                continue
-            if bad > max(1, int(MAX_FILL_FRAC * n)):
-                for s in self.steps:
-                    s[key] = None
-                print(f"[record] {key}: dropped view — {bad}/{n} frames missing or at "
-                      f"another resolution ({dict(counts)})")
-                continue
-            for i, s in enumerate(self.steps):
-                v = s.get(key)
-                if v is not None and np.asarray(v).shape == keep_shape:
-                    continue
-                nearest = min(good, key=lambda j: abs(j - i))
-                s[key] = self.steps[nearest][key]
-            filled[key] = bad
-            print(f"[record] {key}: filled {bad}/{n} frame(s) from neighbours "
-                  f"(locked {keep_shape[1]}x{keep_shape[0]})")
-        return filled
-
-    def _write_pngs(self, out_dir: str, written_rgb: List[str]) -> Dict[str, int]:
-        """Dump every kept RGB frame as PNG next to the HDF5 for inspection / tooling."""
-        images_root = os.path.join(out_dir, "images")
-        counts: Dict[str, int] = {}
-        for key in written_rgb:
-            cam = key.replace("image_", "", 1)
-            cam_dir = os.path.join(images_root, cam)
-            os.makedirs(cam_dir, exist_ok=True)
-            n_ok = 0
-            for i, s in enumerate(self.steps):
-                frame = s.get(key)
-                if frame is None:
-                    continue
-                write_png(os.path.join(cam_dir, f"{i:06d}.png"), frame)
-                n_ok += 1
-            counts[cam] = n_ok
-        total = sum(counts.values())
-        cams = ", ".join(f"{c}={n}" for c, n in counts.items())
-        print(f"[record] wrote {total} PNG(s) under images/ ({cams})")
-        return counts
-
     def _write(self, parent: str) -> str:
         if h5py is None:
             raise RuntimeError("h5py is required to write episodes (pip/apt install h5py)")
@@ -273,12 +194,11 @@ class EpisodeRecorder:
         self._drop_odd_shaped_steps()
         if not self.steps:
             raise RuntimeError("no steps to write")
-        filled = self._consolidate_views()
         eid, out_dir = _next_episode_dir(parent)
         os.makedirs(out_dir, exist_ok=True)
         self.meta["episode_id"] = eid
         self.meta["num_steps"] = len(self.steps)
-        self.meta["filled_frames"] = filled
+        self.meta["filled_frames"] = {}
         self.meta["includes_place"] = False
         self.meta["task"] = "pick"
         grasp_steps = [i for i, step in enumerate(self.steps) if step["grasping"]]
@@ -322,40 +242,16 @@ class EpisodeRecorder:
                 )
                 return True
 
-            # The primary view is the training image; the rest are kept for re-export.
+            # The primary view is the complete OpenVLA visual observation.
             written = []
             if _stack_images(self.primary_key):
                 written.append(self.primary_key)
             else:
                 print(f"[record] WARNING: primary view {self.primary_key} incomplete — "
                       f"episode not usable for OpenVLA training")
-            for key in RGB_KEYS:
-                if key != self.primary_key and _stack_images(key):
-                    written.append(key)
             g.attrs["primary_camera"] = self.primary_camera
             g.attrs["rgb_views"] = ",".join(written)
-            if filled:
-                g.attrs["filled_frames"] = json.dumps(filled)
-            missing = [k for k in RGB_KEYS if k not in written]
-            print(f"[record] rgb views: {', '.join(written) or 'none'}"
-                  + (f"  (missing: {', '.join(missing)})" if missing else ""))
-
-            def _stack_optional(key, dtype):
-                arrays = []
-                for s in self.steps:
-                    v = s.get(key)
-                    if v is None:
-                        return
-                    arrays.append(np.asarray(v, dtype=dtype))
-                if not arrays:
-                    return
-                shapes = {a.shape for a in arrays}
-                if len(shapes) != 1:
-                    return
-                g.create_dataset(key, data=np.stack(arrays, axis=0), compression="gzip")
-
-            for key in DEPTH_KEYS:
-                _stack_optional(key, np.float32)
+            print(f"[record] rgb view: {', '.join(written) or 'none'}")
 
             g.create_dataset("q_arm", data=np.stack([s["q_arm"] for s in self.steps]))
             g.create_dataset("q_grip", data=np.array([s["q_grip"] for s in self.steps], dtype=np.float32))
@@ -375,9 +271,9 @@ class EpisodeRecorder:
             f.attrs["language_instruction"] = self.meta["language_instruction"]
             f.attrs["object_name"] = self.meta.get("object_name", DEFAULT_OBJECT)
 
-        png_counts = self._write_pngs(out_dir, written)
-        self.meta["png_counts"] = png_counts
-        self.meta["images_dir"] = "images"
+        # HDF5 is the single source. Per-frame PNG copies previously duplicated every
+        # RGB byte and are deliberately not emitted.
+        self.meta["png_counts"] = {}
 
         with open(meta_path, "w") as fp:
             json.dump(self.meta, fp, indent=2)

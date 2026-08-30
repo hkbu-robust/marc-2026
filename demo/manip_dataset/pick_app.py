@@ -11,12 +11,14 @@ from marc_agent.gpu_handoff import (
     after_successful_pick,
     before_graspgenx,
     before_reacquire,
-    reload_nearfield_detector,
 )
 from marc_agent.pick_runtime import PickRuntime, pick_policy_name
 
+from .base_hold import StationaryBase
 from .depth_approach import ApproachConfig, DepthApproachController
 from .keyboard import Keyboard
+from .openvla_pick import StagedOpenVLAPickRuntime, openvla_target_is_safe
+from .pick_target import nearfield_for_approach, snapshot_pick_target
 
 
 class Phase(enum.Enum):
@@ -45,7 +47,7 @@ MANUAL_BASE:
   i/k     base forward / back
   j/l     base yaw left / right
   space   stop base
-  A       start auto-approach (Place far)
+  A       start calibrated auto-approach (required before V if target is out of range)
   G       snapshot + GraspGen-X pick + basket drop
   H       wrist-YOLO pick + basket
   V       zero-shot OpenVLA pick + basket
@@ -55,7 +57,7 @@ ANY:
   N       recover / ready pose (nothing is saved)
   ?       help
   Ctrl-C  quit
-Trainer GUI: choose object, Place near (or Place far then A), then G, H, or V.
+Trainer GUI: choose object, use A to enter calibrated OpenVLA range, then press V.
 ===========================================
 """
 
@@ -91,10 +93,7 @@ class PickTestApp:
             arm = ArmTeleop(client, TeleopConfig.from_env())
         self.arm = arm
         if nearfield is None:
-            from nearfield import NearFieldAcquire, YoloDetector
-            nearfield = NearFieldAcquire(
-                client, detector=YoloDetector(self.approach._yolo)
-            )
+            nearfield = nearfield_for_approach(client, self.approach)
         self.nearfield = nearfield
         self._pick = pick_runtime
         default_obj = os.environ.get("MARC_TARGET_OBJECT", TARGET_OBJECTS[0])
@@ -107,6 +106,7 @@ class PickTestApp:
         self.base_lin_back = _env_float("MARC_BASE_LIN_BACK", self.base_lin)
         self.base_ang = _env_float("MARC_BASE_ANG", 0.25)
         self._base_cmd = (0.0, 0.0)
+        self._base_hold = StationaryBase(client, log=print)
         self._running = True
 
     def print_help(self):
@@ -117,6 +117,7 @@ class PickTestApp:
         )
 
     def begin(self):
+        self._base_hold.stop()
         self.client.send_cmd_vel(0.0, 0.0)
         self._base_cmd = (0.0, 0.0)
         self.approach.cancel()
@@ -136,15 +137,22 @@ class PickTestApp:
         self.print_help()
 
     def _set_base(self, lin: float, ang: float):
+        self._base_hold.stop()
         self._base_cmd = (lin, ang)
         self.client.send_cmd_vel(linear_x=lin, angular_z=ang)
 
     def _ensure_pick(self, policy="graspgenx"):
         current = None if self._pick is None else getattr(self._pick, "policy", None)
         if self._pick is None or (current is not None and current != policy):
-            self._pick = PickRuntime(
-                self.client, log=print, policy=policy,
-            )
+            if policy.startswith("openvla"):
+                self._pick = StagedOpenVLAPickRuntime(
+                    self.client,
+                    log=print,
+                    policy=policy,
+                    target_observer=lambda: self.nearfield.snapshot(self.target_object),
+                )
+            else:
+                self._pick = PickRuntime(self.client, log=print, policy=policy)
         return self._pick
 
     def handle_key(self, ch: str):
@@ -202,36 +210,7 @@ class PickTestApp:
             self._openvla_pick()
 
     def _snapshot_target(self):
-        detector = getattr(self.nearfield, "detector", None)
-        reload_nearfield_detector(detector)
-        print("[pick] snapshot %s..." % self.target_object)
-        target = self.nearfield.snapshot(self.target_object)
-        if target is None or not getattr(target, "valid", False):
-            reason = "invalid" if target is None else (target.reason or "invalid")
-            if target is None:
-                print("[pick] snapshot failed (%s)" % reason)
-            else:
-                print(
-                    "[pick] snapshot failed (%s) fwd=%.3f lat=%.3f z=%.3f"
-                    % (
-                        reason,
-                        float(getattr(target, "fwd", 0.0) or 0.0),
-                        float(getattr(target, "lat", 0.0) or 0.0),
-                        float(getattr(target, "z", 0.0) or 0.0),
-                    )
-                )
-            return None
-        print(
-            "[pick] localized %s fwd=%.3f lat=%.3f z=%.3f conf=%.2f"
-            % (
-                getattr(target, "name", "") or self.target_object,
-                float(getattr(target, "fwd", 0.0) or 0.0),
-                float(getattr(target, "lat", 0.0) or 0.0),
-                float(getattr(target, "z", 0.0) or 0.0),
-                float(getattr(target, "conf", 0.0) or 0.0),
-            )
-        )
-        return target
+        return snapshot_pick_target(self.nearfield, self.target_object)
 
     def _print_pick_result(self, result):
         print(
@@ -248,57 +227,67 @@ class PickTestApp:
 
     def _graspgenx_pick(self):
         self._set_base(0.0, 0.0)
-        target = self._snapshot_target()
-        if target is None:
-            return
-        detector = getattr(self.nearfield, "detector", None)
-        before_graspgenx(detector)
-        runtime = self._ensure_pick("graspgenx")
+        with self._base_hold:
+            target = self._snapshot_target()
+            if target is None:
+                return
+            detector = getattr(self.nearfield, "detector", None)
+            before_graspgenx(detector)
+            runtime = self._ensure_pick("graspgenx")
 
-        def _reacquire():
-            before_reacquire(runtime, detector)
-            nxt = self.nearfield.snapshot(self.target_object)
-            if nxt is not None and getattr(nxt, "valid", False):
-                before_graspgenx(detector)
-            return nxt
+            def _reacquire():
+                before_reacquire(runtime, detector)
+                nxt = self.nearfield.snapshot(self.target_object)
+                if nxt is not None and getattr(nxt, "valid", False):
+                    before_graspgenx(detector)
+                return nxt
 
-        runtime._reacquire_fn = _reacquire
-        result = runtime.run(target)
-        after_successful_pick(runtime, detector)
-        self._print_pick_result(result)
+            runtime._reacquire_fn = _reacquire
+            result = runtime.run(target)
+            after_successful_pick(runtime, detector)
+            self._print_pick_result(result)
 
     def _wrist_pick(self):
         self._set_base(0.0, 0.0)
-        target = self._snapshot_target()
-        if target is None:
-            return
-        detector = getattr(self.nearfield, "detector", None)
-        runtime = self._ensure_pick("wrist")
-        runtime._wrist_detector = detector
-        runtime._teleop = self.arm
+        with self._base_hold:
+            target = self._snapshot_target()
+            if target is None:
+                return
+            detector = getattr(self.nearfield, "detector", None)
+            runtime = self._ensure_pick("wrist")
+            runtime._wrist_detector = detector
+            runtime._teleop = self.arm
 
-        def _reacquire():
-            return self.nearfield.snapshot(self.target_object)
+            def _reacquire():
+                return self.nearfield.snapshot(self.target_object)
 
-        runtime._reacquire_fn = _reacquire
-        result = runtime.run(target)
-        after_successful_pick(runtime, detector)
-        self._print_pick_result(result)
+            runtime._reacquire_fn = _reacquire
+            result = runtime.run(target)
+            after_successful_pick(runtime, detector)
+            self._print_pick_result(result)
 
     def _openvla_pick(self):
         self._set_base(0.0, 0.0)
-        target = self._snapshot_target()
-        if target is None:
-            return
-        detector = getattr(self.nearfield, "detector", None)
-        runtime = self._ensure_pick("openvla_remote")
-        runtime._teleop = self.arm
-        runtime._reacquire_fn = lambda: self.nearfield.snapshot(self.target_object)
-        result = runtime.run(target)
-        after_successful_pick(runtime, detector)
-        self._print_pick_result(result)
+        with self._base_hold:
+            target = self._snapshot_target()
+            if target is None:
+                return
+            detector = getattr(self.nearfield, "detector", None)
+            runtime = self._ensure_pick("openvla_remote")
+            if isinstance(runtime, StagedOpenVLAPickRuntime):
+                safe, why = openvla_target_is_safe(target)
+                if not safe:
+                    print(f"[openvla] target invalid: {why}")
+                    return
+            runtime._teleop = self.arm
+            runtime._reacquire_fn = lambda: self.nearfield.snapshot(self.target_object)
+            runtime._target_observer = runtime._reacquire_fn
+            result = runtime.run(target)
+            after_successful_pick(runtime, detector)
+            self._print_pick_result(result)
 
     def _reset(self):
+        self._base_hold.stop()
         self.client.send_cmd_vel(0.0, 0.0)
         self._base_cmd = (0.0, 0.0)
         self.approach.cancel()
@@ -333,6 +322,7 @@ class PickTestApp:
             except KeyboardInterrupt:
                 print("\n[quit] KeyboardInterrupt")
             finally:
+                self._base_hold.stop()
                 self.client.send_cmd_vel(0.0, 0.0)
                 self.approach.cancel()
 

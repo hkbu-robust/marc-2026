@@ -1,0 +1,342 @@
+"""OpenVLA deterministic handoff and false-positive grasp gate."""
+
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+
+import numpy as np
+
+from manip_dataset.app import CollectorApp
+from manip_dataset.depth_approach import ApproachConfig, DepthApproachController
+from manip_dataset.openvla_pick import (
+    StagedOpenVLAPickRuntime,
+    openvla_ee_is_safe,
+    openvla_stage_goal,
+    openvla_stage_waypoints,
+    openvla_target_is_safe,
+    target_moved_with_gripper,
+)
+from manip_dataset.pick_target import snapshot_pick_target
+from manip_dataset.to_rlds import _pick_image_key
+
+
+def _target(*, z=-0.25, fwd=0.50, lat=0.0, valid=True):
+    return SimpleNamespace(
+        z=z,
+        fwd=fwd,
+        lat=lat,
+        valid=valid,
+        name="tumbler",
+    )
+
+
+class _Client:
+    def __init__(self, holding=True):
+        self.holding = holding
+        self.t = 0.0
+
+    def is_grasping(self):
+        return self.holding
+
+    def sleep(self, dt):
+        self.t += dt
+
+
+class _Arm:
+    def __init__(self):
+        self.cfg = SimpleNamespace(
+            grip_close=0.68,
+            dx=0.02,
+            dy=0.02,
+            dz=0.02,
+            d_yaw=0.05,
+            d_pitch=0.04,
+        )
+        self.staged = []
+        self.lifts = 0
+        self.commands = []
+        self.ready_calls = 0
+        self.camera_warms = []
+
+    def stage_for_openvla(self, target):
+        self.staged.append(target)
+        return True
+
+    def lift_for_grasp_verification(self):
+        self.lifts += 1
+        return True
+
+    def apply_delta(self, **kwargs):
+        self.commands.append(kwargs)
+
+    def go_ready(self, **_kwargs):
+        self.ready_calls += 1
+        return True
+
+    def warm_cameras(self, seconds):
+        self.camera_warms.append(seconds)
+
+
+class OpenVLAStagingTests(unittest.TestCase):
+    def test_picker_and_collector_share_validated_target_snapshot(self):
+        target = _target()
+        target.conf = 0.91
+        nearfield = SimpleNamespace(
+            detector=None,
+            snapshot=lambda name: target if name == "tumbler" else None,
+        )
+        logs = []
+
+        result = snapshot_pick_target(nearfield, "tumbler", log=logs.append)
+
+        self.assertIs(target, result)
+        self.assertTrue(any("localized tumbler" in line for line in logs))
+
+    def test_collector_stages_before_unlocking_manual_demonstration(self):
+        target = _target()
+        target.conf = 0.91
+        arm = _Arm()
+        arm.cfg.openvla_stage_back_m = 0.01
+        arm.cfg.openvla_stage_min_forward_m = 0.16
+        arm.cfg.openvla_stage_up_m = 0.225
+        arm.cfg.primary_camera = "base_left"
+        app = object.__new__(CollectorApp)
+        app.target_object = "tumbler"
+        app.nearfield = SimpleNamespace(
+            detector=None,
+            snapshot=lambda _name: target,
+        )
+        app.arm = arm
+        app.recorder = SimpleNamespace(meta={})
+
+        self.assertTrue(app._stage_manual_handoff())
+
+        self.assertEqual([target], arm.staged)
+        handoff = app.recorder.meta["openvla_handoff"]
+        self.assertEqual("base_left", handoff["primary_camera"])
+        self.assertEqual(0.01, handoff["stage_back_m"])
+        self.assertEqual(0.16, handoff["stage_min_forward_m"])
+        self.assertEqual(0.225, handoff["stage_up_m"])
+
+    def test_collector_retries_failed_handoff_three_times(self):
+        app = object.__new__(CollectorApp)
+        app.arm = _Arm()
+        outcomes = iter((False, False, True))
+        attempts = []
+
+        def stage():
+            attempts.append(True)
+            return next(outcomes)
+
+        app._stage_manual_handoff = stage
+
+        self.assertTrue(app._stage_manual_handoff_with_retries())
+        self.assertEqual(3, len(attempts))
+        self.assertEqual(2, app.arm.ready_calls)
+        self.assertEqual([0.5, 0.5], app.arm.camera_warms)
+
+    def test_collector_uses_near_lock_when_fresh_snapshot_misses(self):
+        for object_name in ("tissue", "sunblock"):
+            with self.subTest(object_name=object_name):
+                target = _target(fwd=0.45, lat=0.01)
+                target.name = object_name
+                target.conf = 0.16
+                arm = _Arm()
+                arm.cfg.openvla_stage_back_m = 0.01
+                arm.cfg.openvla_stage_min_forward_m = 0.16
+                arm.cfg.openvla_stage_up_m = 0.225
+                arm.cfg.primary_camera = "base_left"
+                app = object.__new__(CollectorApp)
+                app.target_object = object_name
+                app.nearfield = SimpleNamespace(
+                    detector=None,
+                    snapshot=lambda _name: None,
+                )
+                app.approach = SimpleNamespace(locked_target=lambda _name: target)
+                app.arm = arm
+                app.recorder = SimpleNamespace(meta={})
+
+                self.assertTrue(app._stage_manual_handoff())
+                self.assertEqual([target], arm.staged)
+
+    def test_near_lock_is_class_keyed_and_coordinate_gated(self):
+        controller = DepthApproachController(_Client(), cfg=ApproachConfig())
+        controller.set_target("sunblock")
+        locked = _target(fwd=0.60, lat=0.01)
+        locked.name = "sunblock"
+        locked.conf = 0.16
+        locked.world_xy = (1.0, 2.0)
+        det = {
+            "bbox": (10.0, 10.0, 20.0, 20.0),
+            "rgb_shape": (480, 640),
+            "name": "sunblock",
+            "conf": 0.16,
+            "n_obj": 1,
+        }
+
+        controller._maybe_lock_near_target(det, locked)
+
+        self.assertIs(locked, controller.locked_target("sunblock"))
+        self.assertIsNone(controller.locked_target("tissue"))
+        near = _target(fwd=0.50, lat=0.01)
+        near.name = "sunblock"
+        near.world_xy = (1.08, 2.0)
+        controller._localize_target = lambda *_args: near
+        self.assertIsNotNone(controller._reuse_near_lock(None, (480, 640)))
+        far = _target(fwd=0.50, lat=0.01)
+        far.name = "sunblock"
+        far.world_xy = (1.40, 2.0)
+        controller._localize_target = lambda *_args: far
+        self.assertIsNone(controller._reuse_near_lock(None, (480, 640)))
+
+    def test_explicit_base_view_never_falls_back_to_gripper(self):
+        class Steps(dict):
+            attrs = {"primary_camera": "base_left"}
+
+        with self.assertRaisesRegex(ValueError, "base_left"):
+            _pick_image_key(Steps(image_gripper_left=object()), "base_left")
+
+    def test_stage_goal_enters_recorded_base_camera_workspace(self):
+        cfg = SimpleNamespace(
+            openvla_stage_back_m=0.01,
+            openvla_stage_min_forward_m=0.16,
+            openvla_stage_up_m=0.225,
+        )
+        goal = openvla_stage_goal(_target(lat=-0.015), cfg)
+        np.testing.assert_allclose(goal, [0.49, -0.015, -0.025], atol=1e-6)
+
+    def test_stage_moves_forward_before_it_descends(self):
+        cfg = SimpleNamespace(
+            openvla_stage_back_m=0.01,
+            openvla_stage_min_forward_m=0.16,
+            openvla_stage_up_m=0.225,
+        )
+        current = np.array([0.329, 0.001, 0.094])
+        waypoints = openvla_stage_waypoints(current, _target(lat=-0.015), cfg)
+        self.assertEqual(["stage-forward", "stage-align", "stage-view"], [x[0] for x in waypoints])
+        forward, align, view = (x[1] for x in waypoints)
+        self.assertGreater(forward[0], current[0])
+        self.assertEqual(current[2], forward[2])
+        self.assertEqual(forward[0], align[0])
+        self.assertEqual(align[0], view[0])
+        self.assertLess(view[2], align[2])
+
+    def test_stage_guarantees_large_forward_clearance_before_descent(self):
+        cfg = SimpleNamespace(
+            openvla_stage_back_m=0.01,
+            openvla_stage_min_forward_m=0.16,
+            openvla_stage_up_m=0.225,
+        )
+        current = np.array([0.329, 0.001, 0.094])
+        waypoints = openvla_stage_waypoints(current, _target(fwd=0.40), cfg)
+
+        forward, align, view = (waypoint for _label, waypoint in waypoints)
+        self.assertAlmostEqual(0.489, forward[0])
+        self.assertAlmostEqual(forward[0], align[0])
+        self.assertAlmostEqual(forward[0], view[0])
+        self.assertEqual(current[2], forward[2])
+        self.assertEqual(current[2], align[2])
+        self.assertLess(view[2], align[2])
+
+    def test_finite_localization_is_not_rejected_by_guessed_target_ranges(self):
+        self.assertTrue(openvla_target_is_safe(_target(fwd=0.325))[0])
+        self.assertTrue(openvla_target_is_safe(_target(fwd=0.684))[0])
+        self.assertTrue(openvla_target_is_safe(_target(z=-0.430))[0])
+        self.assertFalse(openvla_target_is_safe(_target(z=float("nan")))[0])
+
+    def test_only_forward_camera_keepout_gates_policy_motion(self):
+        self.assertFalse(openvla_ee_is_safe([0.31, 0.0, 0.0])[0])
+        self.assertTrue(openvla_ee_is_safe([0.42, 0.0, -0.13])[0])
+        self.assertTrue(openvla_ee_is_safe([0.42, 0.5, -0.43])[0])
+        self.assertTrue(openvla_ee_is_safe([0.70, 0.0, -0.43])[0])
+
+    def test_observed_low_tumbler_height_produces_deterministic_stage(self):
+        cfg = SimpleNamespace(
+            openvla_stage_back_m=0.01,
+            openvla_stage_min_forward_m=0.16,
+            openvla_stage_up_m=0.225,
+        )
+        target = _target(fwd=0.545, lat=-0.022, z=-0.430)
+
+        np.testing.assert_allclose(
+            openvla_stage_goal(target, cfg),
+            [0.535, -0.022, -0.205],
+            atol=1e-6,
+        )
+
+    def test_target_must_rise_with_gripper(self):
+        before = _target()
+        self.assertTrue(target_moved_with_gripper(before, _target(z=-0.18, fwd=0.51)))
+        self.assertFalse(target_moved_with_gripper(before, _target(z=-0.25)))
+        self.assertFalse(target_moved_with_gripper(before, _target(z=-0.18, fwd=0.80)))
+        self.assertFalse(target_moved_with_gripper(before, _target(valid=False)))
+
+    def test_unverified_hold_is_not_grasp_success(self):
+        runtime = StagedOpenVLAPickRuntime(
+            _Client(holding=True),
+            policy="openvla_remote",
+            openvla_policy=SimpleNamespace(),
+            target_observer=lambda: _target(z=-0.25),
+            poll_dt=0.0,
+            grasp_poll=1,
+        )
+        self.assertFalse(runtime.poll_grasping())
+
+    def test_stages_before_policy_and_accepts_visual_lift(self):
+        arm = _Arm()
+        client = _Client(holding=True)
+        policy = SimpleNamespace(
+            stats=object(),
+            act=lambda _obs: np.array([0, 0, 0, 0, 0, 0, 0], dtype=np.float32),
+        )
+        runtime = StagedOpenVLAPickRuntime(
+            client,
+            policy="openvla_remote",
+            openvla_policy=policy,
+            target_observer=lambda: _target(z=-0.18),
+            policy_ticks=1,
+            poll_dt=0.0,
+            grasp_poll=1,
+        )
+        runtime._teleop = arm
+        runtime._snapshot_obs = lambda _target: SimpleNamespace(
+            ee_xyz=np.array([0.42, 0.0, -0.13])
+        )
+        target = _target()
+
+        runtime._grasp(target)
+
+        self.assertEqual([target], arm.staged)
+        self.assertEqual(1, arm.lifts)
+        self.assertTrue(runtime._visual_grasp_verified)
+        self.assertTrue(runtime.poll_grasping())
+
+    def test_false_hold_reopens_and_restages(self):
+        arm = _Arm()
+        client = _Client(holding=True)
+        policy = SimpleNamespace(
+            stats=object(),
+            act=lambda _obs: np.array([0, 0, 0, 0, 0, 0, 0], dtype=np.float32),
+        )
+        ground = _target(z=-0.25)
+        runtime = StagedOpenVLAPickRuntime(
+            client,
+            policy="openvla_remote",
+            openvla_policy=policy,
+            target_observer=lambda: ground,
+            policy_ticks=1,
+        )
+        runtime._teleop = arm
+        runtime._snapshot_obs = lambda _target: SimpleNamespace(
+            ee_xyz=np.array([0.42, 0.0, -0.13])
+        )
+
+        runtime._grasp(ground)
+
+        self.assertEqual(2, len(arm.staged))
+        self.assertFalse(runtime._visual_grasp_verified)
+
+
+if __name__ == "__main__":
+    unittest.main()

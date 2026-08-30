@@ -5,14 +5,17 @@ from __future__ import annotations
 import enum
 import os
 import sys
+import threading
 import time
 
 from arm_pick import load_params
 
 from .arm_control import ArmTeleop, TeleopConfig
+from .base_hold import StationaryBase
 from .client import ManipTrainerClient, report_camera_publishers, wait_for_robot_topics
 from .depth_approach import ApproachConfig, DepthApproachController
 from .keyboard import HELP_TEXT, Keyboard
+from .pick_target import nearfield_for_approach, snapshot_pick_target
 from .recorder import EpisodeRecorder
 from .success import evaluate_success
 
@@ -35,6 +38,8 @@ TARGET_OBJECTS = [
     "sunblock",
     "pencilcase",
 ]
+HANDOFF_ATTEMPTS = 3
+HANDOFF_RETRY_CAMERA_S = 0.5
 
 
 def _env_float(name: str, default: float) -> float:
@@ -58,6 +63,7 @@ class CollectorApp:
         self.phase = Phase.MANUAL_BASE
         self.arm = ArmTeleop(client, TeleopConfig.from_env())
         self.approach = DepthApproachController(client, ApproachConfig.from_env())
+        self.nearfield = nearfield_for_approach(client, self.approach)
         self.recorder = EpisodeRecorder(
             _dataset_root(), team_id, primary_camera=self.arm.cfg.primary_camera
         )
@@ -70,21 +76,24 @@ class CollectorApp:
         self.base_lin_back = _env_float("MARC_BASE_LIN_BACK", self.base_lin)
         self.base_ang = _env_float("MARC_BASE_ANG", 0.25)
         self._base_cmd = (0.0, 0.0)
+        self._base_hold = StationaryBase(client, log=print)
         self._running = True
         self._episode_armed = False  # True after ready; recording starts on first arm action
+        self._keyboard = None
 
     def print_help(self):
         print(HELP_TEXT)
         print(f"[state] phase={self.phase.value}  steps={len(self.recorder.steps)}  target={self.target_object}")
 
-    def begin_episode_cycle(self):
+    def begin_episode_cycle(self, open_grip: bool = False):
         """Ready pose + enter MANUAL_BASE; recording not started until arm teleop."""
+        self._base_hold.stop()
         self.client.send_cmd_vel(0.0, 0.0)
         self._base_cmd = (0.0, 0.0)
         self.approach.cancel()
         print("[episode] moving arm to down-tilt ready pose...")
         self.arm.warm_cameras(1.0)
-        self.arm.go_ready()
+        self.arm.go_ready(open_grip=open_grip)
         if not self.approach.detector_ready():
             print("[yolo] loading detector (once)...")
             if not self.approach.ensure_detector():
@@ -115,7 +124,57 @@ class CollectorApp:
         self._ensure_recording()
         self.recorder.add_step(obs, action)
 
+    def _stage_manual_handoff(self) -> bool:
+        """Enter the exact deterministic pose used before OpenVLA policy control."""
+        target = snapshot_pick_target(self.nearfield, self.target_object)
+        if target is None:
+            target = self.approach.locked_target(self.target_object)
+            if target is None:
+                return False
+            print(
+                f"[handoff] fresh {self.target_object} snapshot missed — "
+                "using maintained lock "
+                f"fwd={target.fwd:.3f} lat={target.lat:.3f} z={target.z:.3f}"
+            )
+        if not self.arm.stage_for_openvla(target):
+            print("[handoff] deterministic OpenVLA stage failed")
+            return False
+        if self.recorder.meta is not None:
+            self.recorder.meta["openvla_handoff"] = {
+                "target_fwd": float(target.fwd),
+                "target_lat": float(target.lat),
+                "target_z": float(target.z),
+                "stage_back_m": float(self.arm.cfg.openvla_stage_back_m),
+                "stage_min_forward_m": float(
+                    self.arm.cfg.openvla_stage_min_forward_m
+                ),
+                "stage_up_m": float(self.arm.cfg.openvla_stage_up_m),
+                "primary_camera": self.arm.cfg.primary_camera,
+            }
+        print(
+            "[handoff] deterministic stage complete; "
+            "manual demonstrator now replaces OpenVLA from the same pose"
+        )
+        return True
+
+    def _stage_manual_handoff_with_retries(self) -> bool:
+        """Try a fresh localization and deterministic handoff up to three times."""
+        for attempt in range(1, HANDOFF_ATTEMPTS + 1):
+            print(f"[handoff] attempt {attempt}/{HANDOFF_ATTEMPTS}")
+            if self._stage_manual_handoff():
+                return True
+            if attempt == HANDOFF_ATTEMPTS:
+                break
+            print(
+                f"[handoff] attempt {attempt} failed — returning to ready "
+                "for a fresh snapshot"
+            )
+            self.arm.go_ready(open_grip=True)
+            self.arm.warm_cameras(HANDOFF_RETRY_CAMERA_S)
+        return False
+
     def _set_base(self, lin: float, ang: float):
+        self._base_hold.stop()
         self._base_cmd = (lin, ang)
         self.client.send_cmd_vel(linear_x=lin, angular_z=ang)
 
@@ -173,11 +232,15 @@ class CollectorApp:
             self.phase = Phase.AUTO_APPROACH
             print("[approach] AUTO_APPROACH crawling (C to cancel)...")
         elif ch == "v":
-            self.arm.set_grip(self.arm.cfg.grip_close)
+            self._set_base(0.0, 0.0)
+            with self._base_hold:
+                self.arm.set_grip(self.arm.cfg.grip_close)
             print(f"[arm] GRIP CLOSE (no record)  grip={self.arm.grip_cmd:.3f}"
                   f"  grasping={self.client.is_grasping()}")
         elif ch == "b":
-            self.arm.set_grip(0.0)
+            self._set_base(0.0, 0.0)
+            with self._base_hold:
+                self.arm.set_grip(0.0)
             print("[arm] GRIP OPEN (no record) — object released")
         elif ch == "E":
             print("[warn] end attempt only valid in ARM_TELEOP after approach")
@@ -237,11 +300,46 @@ class CollectorApp:
         if self.client.is_grasping() is False:
             print("[place] not holding anything — grasp with v first (running anyway)")
         # Scripted place is hard-coded and must not enter the training set — the
-        # dataset is approach + grasp only. Basket occupancy is still checked at E.
-        self.arm.place_in_basket(on_step=None)
+        # dataset is approach + grasp only. A later E uses the basket sensor; an E
+        # during this motion is explicit human approval and cancels the trajectory.
+        end_requested = threading.Event()
+        stop_watcher = threading.Event()
+        watcher = None
+        if self._keyboard is not None:
+            watcher = threading.Thread(
+                target=self._watch_place_keys,
+                args=(stop_watcher, end_requested),
+                name="place-key-watcher",
+                daemon=True,
+            )
+            watcher.start()
+        try:
+            self.arm.place_in_basket(on_step=None, cancel_event=end_requested)
+        finally:
+            stop_watcher.set()
+            if watcher is not None:
+                watcher.join(timeout=0.25)
+
+        if end_requested.is_set():
+            print("[place] scripted placement stopped — keeping episode and resetting")
+            self._end_attempt(manual_accept=True, open_grip_on_reset=True)
+            return
+
         basket = self._wait_basket_occupied()
         print(f"[place] done (not recorded)  basket={basket}"
               f"{'  — press E to keep' if basket is True else '  — drop missed, retry or N'}")
+
+    def _watch_place_keys(self, stop_watcher, end_requested):
+        """Turn E into a placement cancel while the scripted motion blocks run()."""
+        while not stop_watcher.wait(0.02):
+            ch = self._keyboard.poll() if self._keyboard is not None else None
+            if ch == "E":
+                end_requested.set()
+                print("[place] E accepted — stopping placement now")
+                return
+            if ch in ("\x03", "\x04"):
+                self._running = False
+                return
 
     def _wait_basket_occupied(self, timeout_s: float = 2.0):
         """Poll basket occupancy; the sensor lags the physical drop by a few frames."""
@@ -253,6 +351,7 @@ class CollectorApp:
         return occupied
 
     def _abort_episode(self):
+        self._base_hold.stop()
         self.client.send_cmd_vel(0.0, 0.0)
         self.approach.cancel()
         path = None
@@ -269,16 +368,23 @@ class CollectorApp:
         print(f"[episode] DISCARDED (abort){f' -> {path}' if path else ''}")
         self.begin_episode_cycle()
 
-    def _end_attempt(self):
+    def _end_attempt(self, manual_accept: bool = False, open_grip_on_reset: bool = False):
+        self._base_hold.stop()
         self.client.send_cmd_vel(0.0, 0.0)
-        self.arm.refresh_grasp()
-        basket = self._wait_basket_occupied()
-        ok = evaluate_success(
-            saw_grasp_after_close=self.arm.saw_grasp_after_close,
-            basket_occupied=basket,
-        )
-        print(f"[eval] grasp_after_close={self.arm.saw_grasp_after_close}  "
-              f"basket={basket}  keep={ok}  steps={len(self.recorder.steps)}")
+        if manual_accept:
+            basket = self.client.is_basket_occupied()
+            ok = True
+            print(f"[eval] manual E approval during placement  basket={basket}  "
+                  f"keep=True  steps={len(self.recorder.steps)}")
+        else:
+            self.arm.refresh_grasp()
+            basket = self._wait_basket_occupied()
+            ok = evaluate_success(
+                saw_grasp_after_close=self.arm.saw_grasp_after_close,
+                basket_occupied=basket,
+            )
+            print(f"[eval] grasp_after_close={self.arm.saw_grasp_after_close}  "
+                  f"basket={basket}  keep={ok}  steps={len(self.recorder.steps)}")
         try:
             if ok and self.recorder.steps:
                 path = self.recorder.keep()
@@ -290,11 +396,12 @@ class CollectorApp:
             print(f"[record] write failed: {e}")
             self.recorder.steps = []
             self.recorder.recording = False
-        self.begin_episode_cycle()
+        self.begin_episode_cycle(open_grip=open_grip_on_reset)
 
     def run(self):
         self.begin_episode_cycle()
         with Keyboard() as kb:
+            self._keyboard = kb
             try:
                 while self._running:
                     ch = kb.poll()
@@ -303,9 +410,23 @@ class CollectorApp:
 
                     if self.phase == Phase.AUTO_APPROACH:
                         if self.approach.tick():
+                            self._base_hold.start()
                             self.approach.settle()
-                            self.phase = Phase.ARM_TELEOP
-                            print("[state] ARM_TELEOP — nudge arm, v/b grip, E to end")
+                            if self._stage_manual_handoff_with_retries():
+                                self.phase = Phase.ARM_TELEOP
+                                print(
+                                    "[state] ARM_TELEOP — base-hold ACTIVE; "
+                                    "OpenVLA-equivalent handoff pose; nudge arm, "
+                                    "v/b grip, E to end"
+                                )
+                            else:
+                                print(
+                                    "[handoff] all 3 attempts failed — returning arm to ready; "
+                                    "stay in MANUAL_BASE and press A to retry"
+                                )
+                                self.arm.go_ready(open_grip=True)
+                                self._base_hold.stop()
+                                self.phase = Phase.MANUAL_BASE
                         time.sleep(self.approach.cfg.tick_s)
                     elif self.phase == Phase.MANUAL_BASE:
                         # re-publish last base cmd lightly so stop doesn't decay oddly
@@ -315,6 +436,8 @@ class CollectorApp:
             except KeyboardInterrupt:
                 print("\n[quit] KeyboardInterrupt")
             finally:
+                self._keyboard = None
+                self._base_hold.stop()
                 self.client.send_cmd_vel(0.0, 0.0)
                 self.approach.cancel()
 
