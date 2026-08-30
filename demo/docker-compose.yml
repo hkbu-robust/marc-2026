@@ -132,19 +132,12 @@ services:
 
   # Pick-only keyboard tester. V streams camera frames to remote OpenVLA.
   #   bash simulation-platform/marc.sh manip-trainer
-  #   cd demo && docker compose --profile manip-pick up --build agent-manip-pick
+  #   cd demo && docker compose --profile manip-pick up agent-manip-pick
+  # Uses the existing full local image: it already contains GraspGen-X and its
+  # checkpoints. Source files below remain live-mounted for rebuild-free iteration.
   agent-manip-pick:
     profiles: ["manip-pick"]
-    build:
-      context: ..
-      dockerfile: demo/Dockerfile
-      target: manip-probe
-      network: host
-      entitlements:
-        - network.host
-      args:
-        MARC_QWEN_BACKEND: remote
-    image: marc-agent-manip-pick:local
+    image: marc-agent:local
     network_mode: host
     working_dir: /agent/demo
     stdin_open: true

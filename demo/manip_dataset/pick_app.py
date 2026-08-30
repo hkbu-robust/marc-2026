@@ -16,6 +16,7 @@ from marc_agent.pick_runtime import PickRuntime, pick_policy_name
 
 from .base_hold import StationaryBase
 from .depth_approach import ApproachConfig, DepthApproachController
+from .graspgenx_pick import StagedGraspGenXPickRuntime
 from .keyboard import Keyboard
 from .openvla_pick import StagedOpenVLAPickRuntime, openvla_target_is_safe
 from .pick_target import nearfield_for_approach, snapshot_pick_target
@@ -151,6 +152,12 @@ class PickTestApp:
                     policy=policy,
                     target_observer=lambda: self.nearfield.snapshot(self.target_object),
                 )
+            elif policy == "graspgenx":
+                self._pick = StagedGraspGenXPickRuntime(
+                    self.client,
+                    log=print,
+                    policy=policy,
+                )
             else:
                 self._pick = PickRuntime(self.client, log=print, policy=policy)
         return self._pick
@@ -234,6 +241,13 @@ class PickTestApp:
             detector = getattr(self.nearfield, "detector", None)
             before_graspgenx(detector)
             runtime = self._ensure_pick("graspgenx")
+
+            def _observe_after_lift():
+                before_reacquire(runtime, detector)
+                return self.nearfield.snapshot(self.target_object)
+
+            if isinstance(runtime, StagedGraspGenXPickRuntime):
+                runtime._target_observer = _observe_after_lift
 
             def _reacquire():
                 before_reacquire(runtime, detector)

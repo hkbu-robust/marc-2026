@@ -44,10 +44,14 @@ class ManipTrainerClient(MARCClient):
 CAMERA_TOPIC_SUFFIXES = (
     "base_camera/left/image",
     "base_camera/right/image",
+    "base_camera/left/info",
     "base_camera/depth/image",
+    "base_camera/points",
     "gripper_camera/left/image",
     "gripper_camera/right/image",
+    "gripper_camera/left/info",
     "gripper_camera/depth/image",
+    "gripper_camera/points",
 )
 
 

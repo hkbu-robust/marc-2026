@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 import numpy as np
+from nearfield import LocalizedTarget
 
 from manip_dataset.app import CollectorApp
 from manip_dataset.depth_approach import ApproachConfig, DepthApproachController
@@ -35,12 +36,16 @@ class _Client:
     def __init__(self, holding=True):
         self.holding = holding
         self.t = 0.0
+        self.pose = (0.0, 0.0, 0.0)
 
     def is_grasping(self):
         return self.holding
 
     def sleep(self, dt):
         self.t += dt
+
+    def get_world_pose(self):
+        return self.pose
 
 
 class _Arm:
@@ -160,13 +165,20 @@ class OpenVLAStagingTests(unittest.TestCase):
                 self.assertTrue(app._stage_manual_handoff())
                 self.assertEqual([target], arm.staged)
 
-    def test_near_lock_is_class_keyed_and_coordinate_gated(self):
-        controller = DepthApproachController(_Client(), cfg=ApproachConfig())
+    def test_near_lock_is_class_keyed_and_drives_range_from_world_pose(self):
+        client = _Client()
+        controller = DepthApproachController(client, cfg=ApproachConfig())
         controller.set_target("sunblock")
-        locked = _target(fwd=0.60, lat=0.01)
-        locked.name = "sunblock"
-        locked.conf = 0.16
-        locked.world_xy = (1.0, 2.0)
+        locked = LocalizedTarget(
+            fwd=0.60,
+            lat=0.01,
+            z=-0.25,
+            name="sunblock",
+            conf=0.16,
+            world_xy=(0.78, 0.0),
+            valid=True,
+            reason="ok",
+        )
         det = {
             "bbox": (10.0, 10.0, 20.0, 20.0),
             "rgb_shape": (480, 640),
@@ -179,15 +191,22 @@ class OpenVLAStagingTests(unittest.TestCase):
 
         self.assertIs(locked, controller.locked_target("sunblock"))
         self.assertIsNone(controller.locked_target("tissue"))
-        near = _target(fwd=0.50, lat=0.01)
-        near.name = "sunblock"
-        near.world_xy = (1.08, 2.0)
-        controller._localize_target = lambda *_args: near
-        self.assertIsNotNone(controller._reuse_near_lock(None, (480, 640)))
-        far = _target(fwd=0.50, lat=0.01)
-        far.name = "sunblock"
-        far.world_xy = (1.40, 2.0)
-        controller._localize_target = lambda *_args: far
+        client.pose = (0.10, 0.0, 0.0)
+        reused = controller._reuse_near_lock(None, (480, 640))
+        self.assertIsNotNone(reused)
+        projected = controller.locked_target("sunblock")
+        self.assertAlmostEqual(0.50, projected.fwd)
+        self.assertAlmostEqual(0.0, projected.lat)
+        lin, ang = controller._command({
+            "lat_n_obj": 1,
+            "lat_err": reused["error"],
+            "fwd": projected.fwd,
+            "d_obj": None,
+            "is_new": True,
+        })
+        self.assertGreater(lin, 0.0)
+        self.assertEqual(0.0, ang)
+        client.pose = (0.10, 0.40, 0.0)
         self.assertIsNone(controller._reuse_near_lock(None, (480, 640)))
 
     def test_explicit_base_view_never_falls_back_to_gripper(self):

@@ -15,18 +15,31 @@ bash simulation-platform/marc.sh manip-trainer
 
 # terminal 2
 cd demo
-docker compose --profile manip-pick up --build agent-manip-pick
+docker compose --profile manip-pick up agent-manip-pick
 ```
 
 In the trainer GUI, choose the object and **Place near** (or **Place far**, then **A** in the client). Press **G** to snapshot with near-field YOLO and run GraspGen-X pick + overhead basket. Press **H** for a wrist-YOLO pick. Press **V** to stream the base camera to zero-shot OpenVLA at `http://10.0.0.200:8003/v1`; its close action uses the simulator-calibrated `MARC_GRIP_CLOSE=0.68`. **O** cycles the class, **N** recovers to ready (nothing is saved). Press `?` for the key map.
 
 Requires an interactive TTY. `MARC_PICK_POLICY=graspgenx` is pinned on this service.
-The image is `marc-agent-manip-pick:local` and builds with `MARC_QWEN_BACKEND=remote`
-so `--build` does **not** Hub-pull the 17.5 GB Qwen snapshot (pick never loads it).
-It still bakes GraspGen-X + near-field YOLO. Live pick/place Python is bind-mounted
+For fast iteration it reuses the existing `marc-agent:local` image, which already
+contains the local GraspGen-X package, generator/discriminator checkpoints, and
+Robotiq assets under `/agent/models/runtime/graspgenx`; it does not pull anything.
+Live pick/place Python is bind-mounted
 (`marc_agent/`, `manip_dataset/`, `nearfield.py`, `arm_pick.py`, `pnp_params.json`);
-Dockerfile/image changes still need `--build`. If a previous build is stuck on
-`Fetching 16 files` for Qwen, stop it and rebuild.
+normal Python edits therefore need no rebuild.
+
+Run the pick tester without collector/probe containers on the same 8 GB GPU.
+Isaac Sim and GraspGen-X can coexist only after those extra CUDA residents are
+stopped; otherwise sampler loading reports the CUDA OOM instead of silently
+falling back to a bogus IK grasp.
+
+The platform publishes base and gripper stereo RGB, `32FC1` depth, and organized
+`PointCloud2` topics. The quick path reconstructs an arm-frame object cloud from
+the already-aligned base depth crop. **G** now runs this sequence: base YOLO/depth
+snapshot → support-plane-reduced object cloud → deterministic camera-entry stage
+→ GraspMoE pose selection → Robotiq base-to-fingertip transform → short top-down
+pregrasp/contact motion → immediate `0.68` close → lift → base-camera verification.
+Side grasps, far TCPs, missing depth, and unverified `holding=True` all fail closed.
 
 ## Dataset collector
 
@@ -99,10 +112,11 @@ and yaw each scene so boxes are not glued to one patch of the image.
 
    Tissue and sunblock have an additional near-range lock because their detector
    confidence can be intermittent. Once an exact detection of the requested class is
-   centered within 10 cm beyond the approach stop range, missed frames reuse its box only
-   while fresh depth still maps to the same world coordinate within 15 cm. The class-keyed,
-   coordinate-gated lock is also accepted when the fresh handoff snapshot misses, so
-   deterministic camera entry can still run.
+   centered within 10 cm beyond the approach stop range, its world coordinate is locked.
+   On missed frames, live chassis pose projects that fixed coordinate back into arm-frame
+   forward/lateral range, so the robot continues crawling until the normal pick distance
+   instead of trusting stale-box floor/background depth. The class-keyed lock is also
+   accepted when the fresh handoff snapshot misses, so deterministic camera entry can run.
 5. **ARM_TELEOP** — EE nudges + grip; steps are recorded with live images.
    Closing (`v`) **commands `0.68` immediately** and holds that command;
    `gripper/holding` does not stop it early. The chassis is held at its
@@ -327,10 +341,10 @@ trainer-side object pose/mesh export before running GraspGenX training.
 The Dockerfile `COPY`s `demo/` into the image, so an edit is invisible until the
 image is rebuilt — except bind-mounted paths. `agent-manip-probe` mounts
 `manip_dataset/`. `agent-manip-pick` also mounts `marc_agent/`, `nearfield.py`,
-`arm_pick.py`, and `pnp_params.json`. YOLO/torch live in the `manip-probe` image
-target (`marc-agent-manip-probe:local`); adding ultralytics or changing the
-Dockerfile needs `--build`. If the key map printed at startup is missing keys
-you expect, you are running a stale image.
+`arm_pick.py`, and `pnp_params.json`, and reuses the full local `marc-agent:local`
+image so its Python changes are immediate. The collector's YOLO/torch live in the
+`manip-probe` image target (`marc-agent-manip-probe:local`); dependency or
+Dockerfile changes there still need `--build`.
 
 ```bash
 cd demo
