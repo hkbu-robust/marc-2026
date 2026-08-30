@@ -424,6 +424,59 @@ class ArmTeleop:
         )
         return ok
 
+    def move_grasp_pose(self, xyz, yaw: float, label: str = "grasp-pose") -> bool:
+        """Move the finger-pad contact point to ``xyz`` at an absolute tool yaw.
+
+        GraspGen-X poses use +X as the closing axis and +Z as the approach axis.
+        The analytic arm baseline is intentionally restricted to top-down grasps,
+        so only the in-plane closing-axis yaw is applied to the known-safe default
+        wrist orientation.  This avoids composing a new yaw onto an accumulated
+        teleop orientation on every retry.
+        """
+        q0 = read_arm_q(self._client)
+        if q0 is None:
+            self._log(f"[arm] {label}: no joint_states")
+            return False
+        current = self.kin.fk(q0)[:3, 3]
+        base_R = self.kin.fk(arm_kin.DEFAULT_ARM_Q)[:3, :3]
+        base_quat = arm_kin.R_to_quat(base_R)
+        yaw_quat = arm_kin.rotvec_to_quat(
+            np.array([0.0, 0.0, float(yaw)], dtype=np.float64)
+        )
+        target_quat = arm_kin.quat_mul(base_quat, yaw_quat)
+        norm = float(np.linalg.norm(target_quat))
+        if norm <= 1e-9:
+            self._log(f"[arm] {label}: invalid target orientation")
+            return False
+        self.target_pos = current.copy()
+        self.target_quat = target_quat / norm
+        goal = np.asarray(xyz, dtype=np.float64).reshape(3)
+        delta = goal - current
+        self.apply_delta(dx=float(delta[0]), dy=float(delta[1]), dz=float(delta[2]))
+        q1 = read_arm_q(self._client)
+        if q1 is None:
+            self._log(f"[arm] {label}: no final joint_states")
+            return False
+        actual = self.kin.fk(q1)[:3, 3]
+        err = float(np.linalg.norm(actual - goal))
+        self._sync_ee_targets_from_q(q1)
+        # Preserve the requested absolute orientation for the next straight-line
+        # waypoint; _sync_ee_targets_from_q is used only to refresh live position.
+        self.target_quat = target_quat / norm
+        ok = err <= max(0.03, 2.0 * float(self.cfg.settle_tol_m))
+        self._log(
+            "[arm] %s %s goal=(%.3f,%.3f,%.3f) actual=(%.3f,%.3f,%.3f) "
+            "yaw=%.2f err=%.3fm"
+            % (
+                label,
+                "OK" if ok else "FAILED",
+                goal[0], goal[1], goal[2],
+                actual[0], actual[1], actual[2],
+                float(yaw), err,
+            )
+        )
+        return ok
+
     def stage_for_openvla(self, target) -> bool:
         """Move forward clear of the base, then descend into the base-camera view."""
         if not self.set_grip(GRIPPER_OPEN):

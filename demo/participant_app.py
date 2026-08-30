@@ -48,7 +48,7 @@ from marc_agent.perception.stage1_pipeline import (
     log_qwen_startup_status,
     run_stage1_round,
 )
-from marc_agent.pick_runtime import PickRuntime
+from marc_agent.pick_runtime import PickRuntime, pick_policy_name
 from marc_agent.retrieval_state import (
     RetrievalState,
     nearfield_start_reason,
@@ -65,6 +65,8 @@ from nearfield import (
     make_detector,
     peek_yolo_handoff,
 )
+from manip_dataset.base_hold import StationaryBase
+from manip_dataset.graspgenx_pick import StagedGraspGenXPickRuntime
 
 log = logging.getLogger("participant_app")
 
@@ -434,7 +436,21 @@ class DemoParticipant:
                 log.info("[Stage2] localized %s grasp=(%.2f, %.2f, z=%.2f) conf=%.2f",
                          target.name or "?", target.fwd, target.lat, target.z, target.conf)
                 before_graspgenx(detector)
-                pick_rt = PickRuntime(c, log)
+                policy = pick_policy_name()
+                if policy == "graspgenx":
+                    pick_rt = StagedGraspGenXPickRuntime(c, log, policy=policy)
+                else:
+                    pick_rt = PickRuntime(c, log, policy=policy)
+
+                def _observe_after_lift():
+                    before_reacquire(pick_rt, detector)
+                    observer = NearFieldAcquire(
+                        c, detector, dump_dir=dump, people_xy=self._state.people_xy,
+                    )
+                    return observer.snapshot(target.name or self._state.target_type or "")
+
+                if isinstance(pick_rt, StagedGraspGenXPickRuntime):
+                    pick_rt._target_observer = _observe_after_lift
 
                 def _reacquire():
                     before_reacquire(pick_rt, detector)
@@ -450,7 +466,10 @@ class DemoParticipant:
                     return nxt
 
                 pick_rt._reacquire_fn = _reacquire
-                pick = pick_rt.run(target, deadline=deadline, reveal=reveal)
+                # Zero cmd_vel does not stop gravity-driven rolling on slopes. Keep
+                # the chassis anchored for staging, inference, contact, and lift.
+                with StationaryBase(c, log=log.warning):
+                    pick = pick_rt.run(target, deadline=deadline, reveal=reveal)
                 self._state.adopt_pick(pick)
                 picked = pick.ok
                 c.send_cmd_vel(0.0, 0.0)

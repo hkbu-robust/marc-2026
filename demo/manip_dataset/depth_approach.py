@@ -6,7 +6,7 @@ import math
 import os
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import numpy as np
@@ -15,6 +15,7 @@ from .images import depth_in_bbox, image_to_depth, image_to_rgb
 from .yolo_detect import YoloConfig, YoloTracker
 
 from nearfield import (
+    ARM_BASE_FWD,
     base_camera_to_car_transform,
     choose_lock_depth,
     k_from_info,
@@ -76,6 +77,7 @@ TARGET_LOCK_RANGE_PAD_M = 0.10
 TARGET_LOCK_WORLD_RADIUS_M = 0.15
 TARGET_LOCK_LAT_RADIUS_M = 0.10
 TARGET_LOCK_Z_RADIUS_M = 0.12
+TARGET_LOCK_MAX_LAT_M = 0.30
 # Practice sim often closes ~1 cm/s even when cmd_vel is 0.14 m/s. Overrun
 # therefore stops on arm-base fwd, with this rate only sizing the wall-clock cap.
 OVERRUN_SLOW_MPS = 0.008
@@ -340,18 +342,40 @@ class DepthApproachController:
         )
 
     def _reuse_near_lock(self, depth, rgb_shape):
-        """Reuse a box only when fresh depth maps to its class-specific lock."""
+        """Project the locked world coordinate into the robot's current arm frame."""
         if (
             self._target_name not in INTERMITTENT_LOCK_TARGETS
             or self._near_lock_det is None
         ):
             return None
+        locked = self._near_lock_target
+        world_xy = None if locked is None else getattr(locked, "world_xy", None)
+        getter = getattr(self._client, "get_world_pose", None)
+        pose = getter() if callable(getter) else None
+        if world_xy is None or pose is None or len(pose) < 3:
+            return None
+        dx = float(world_xy[0]) - float(pose[0])
+        dy = float(world_xy[1]) - float(pose[1])
+        yaw = float(pose[2])
+        cc, ss = math.cos(yaw), math.sin(yaw)
+        car_fwd = dx * cc + dy * ss
+        car_lat = -dx * ss + dy * cc
+        arm_fwd = car_fwd - ARM_BASE_FWD
+        if arm_fwd <= 0.0 or abs(car_lat) > TARGET_LOCK_MAX_LAT_M:
+            return None
+        projected = replace(
+            locked,
+            fwd=float(arm_fwd),
+            lat=float(car_lat),
+            valid=True,
+            reason="near_target_lock",
+        )
+        self._near_lock_target = projected
         det = dict(self._near_lock_det)
         det["rgb_shape"] = rgb_shape or det.get("rgb_shape")
-        candidate = self._localize_target(det, depth, det.get("rgb_shape"))
-        if not self._matches_near_lock(candidate):
-            return None
-        self._near_lock_target = candidate
+        det["error"] = float(
+            np.clip(-car_lat / max(0.10, car_fwd), -1.0, 1.0)
+        )
         det["status"] = "near_target_lock"
         det["n_obj"] = 1
         det["n_raw"] = 0
@@ -490,9 +514,12 @@ class DepthApproachController:
         fwd = None
         localized = None
         if n_obj > 0 and det is not None:
-            localized = self._localize_target(
-                det, depth, rgb_shape or det.get("rgb_shape")
-            )
+            if det.get("near_lock_reused"):
+                localized = self._near_lock_target
+            else:
+                localized = self._localize_target(
+                    det, depth, rgb_shape or det.get("rgb_shape")
+                )
             fwd = None if localized is None else float(localized.fwd)
             if fwd is not None:
                 self._fwd_cached = float(fwd)
