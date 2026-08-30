@@ -1,4 +1,4 @@
-"""Keyboard pick tester against manip-trainer. G = GraspGen-X, H = wrist-YOLO. No dataset recording."""
+"""Keyboard pick tester against manip-trainer. No dataset recording."""
 
 from __future__ import annotations
 
@@ -48,13 +48,14 @@ MANUAL_BASE:
   A       start auto-approach (Place far)
   G       snapshot + GraspGen-X pick + basket drop
   H       wrist-YOLO pick + basket
+  V       zero-shot OpenVLA pick + basket
 ANY:
   O       cycle target object
   C       cancel auto-approach (-> MANUAL_BASE)
   N       recover / ready pose (nothing is saved)
   ?       help
   Ctrl-C  quit
-Trainer GUI: choose object, Place near (or Place far then A), then G or H.
+Trainer GUI: choose object, Place near (or Place far then A), then G, H, or V.
 ===========================================
 """
 
@@ -67,7 +68,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 class PickTestApp:
-    """Drive (optional), then G (GraspGen-X) or H (wrist-YOLO) pick into the rear basket."""
+    """Drive, then test one pick policy against the rear basket."""
 
     def __init__(
         self,
@@ -197,6 +198,8 @@ class PickTestApp:
             self._graspgenx_pick()
         elif ch == "H":
             self._wrist_pick()
+        elif ch == "V":
+            self._openvla_pick()
 
     def _snapshot_target(self):
         detector = getattr(self.nearfield, "detector", None)
@@ -282,6 +285,19 @@ class PickTestApp:
         after_successful_pick(runtime, detector)
         self._print_pick_result(result)
 
+    def _openvla_pick(self):
+        self._set_base(0.0, 0.0)
+        target = self._snapshot_target()
+        if target is None:
+            return
+        detector = getattr(self.nearfield, "detector", None)
+        runtime = self._ensure_pick("openvla_remote")
+        runtime._teleop = self.arm
+        runtime._reacquire_fn = lambda: self.nearfield.snapshot(self.target_object)
+        result = runtime.run(target)
+        after_successful_pick(runtime, detector)
+        self._print_pick_result(result)
+
     def _reset(self):
         self.client.send_cmd_vel(0.0, 0.0)
         self._base_cmd = (0.0, 0.0)
@@ -310,7 +326,7 @@ class PickTestApp:
                         if self.approach.tick():
                             self.approach.settle()
                             self.phase = Phase.MANUAL_BASE
-                            print("[state] MANUAL_BASE — press G for GraspGen-X, H for wrist-YOLO")
+                            print("[state] MANUAL_BASE — press G, H, or V to pick")
                         time.sleep(self.approach.cfg.tick_s)
                     else:
                         time.sleep(0.05)

@@ -30,6 +30,7 @@ from marc_agent.openvla_actions import (
 from marc_agent.openvla_policy import (
     GeometricGraspStub,
     PolicyObservation,
+    RemoteOpenVLAPolicy,
     load_openvla,
 )
 
@@ -44,6 +45,7 @@ DEFAULT_GRASP_POLL = 8
 DEFAULT_BASKET_POLL = 10
 DEFAULT_POLL_DT = 0.05
 DEFAULT_POLICY_TICKS = 80
+DEFAULT_REMOTE_POLICY_TICKS = 20
 DEFAULT_POLICY = "graspgenx"
 DEFAULT_GRASP_FLOOR_Z = -0.28
 GRASP_FWD_MIN_M = 0.15
@@ -69,7 +71,9 @@ def _env_int(name: str, default: int) -> int:
 
 def pick_policy_name() -> str:
     raw = (os.environ.get("MARC_PICK_POLICY") or DEFAULT_POLICY).strip().lower()
-    if raw in ("graspgenx", "ik", "openvla", "openvla_geom", "wrist"):
+    if raw in (
+        "graspgenx", "ik", "openvla", "openvla_remote", "openvla_geom", "wrist",
+    ):
         return raw
     return DEFAULT_POLICY
 
@@ -127,7 +131,7 @@ class PickRuntime:
         poll_dt: float = DEFAULT_POLL_DT,
         grasp_poll: int = DEFAULT_GRASP_POLL,
         basket_poll: int = DEFAULT_BASKET_POLL,
-        policy_ticks: int = DEFAULT_POLICY_TICKS,
+        policy_ticks: Optional[int] = None,
     ):
         self.client = client
         self._log = log if log is not None else logging.getLogger("participant_app")
@@ -146,7 +150,12 @@ class PickRuntime:
         self.poll_dt = float(poll_dt)
         self.grasp_poll = int(grasp_poll)
         self.basket_poll = int(basket_poll)
-        self.policy_ticks = int(policy_ticks)
+        self.policy_ticks = int(
+            policy_ticks if policy_ticks is not None else (
+                _env_int("MARC_OPENVLA_TICKS", DEFAULT_REMOTE_POLICY_TICKS)
+                if self.policy == "openvla_remote" else DEFAULT_POLICY_TICKS
+            )
+        )
         self._teleop = None
         self._wrist_detector = None
         self._openvla_fallback_logged = False
@@ -314,7 +323,7 @@ class PickRuntime:
         arm = self._teleop_arm()
         # TeleopConfig owns the physical calibration and clamps MARC_GRIP_CLOSE.
         close_cmd = float(arm.cfg.grip_close)
-        for _ in range(self.policy_ticks):
+        for _ in range(max(1, self.policy_ticks)):
             try:
                 if self.client.is_grasping() is True:
                     return
@@ -324,6 +333,13 @@ class PickRuntime:
             action = np.asarray(policy_obj.act(obs), dtype=np.float32).reshape(-1)
             if action.size < ACTION_DIM:
                 action = np.pad(action, (0, ACTION_DIM - int(action.size)))
+            if self.policy == "openvla_remote":
+                limits = np.asarray(
+                    (arm.cfg.dx, arm.cfg.dy, arm.cfg.dz,
+                     arm.cfg.d_yaw, arm.cfg.d_pitch, arm.cfg.d_yaw),
+                    dtype=np.float32,
+                )
+                action[:6] = np.clip(action[:6], -limits, limits)
             dx, dy, dz = float(action[0]), float(action[1]), float(action[2])
             droll, dpitch, dyaw = float(action[3]), float(action[4]), float(action[5])
             # EE delta first with grip unchanged so apply_delta composes the
@@ -435,6 +451,12 @@ class PickRuntime:
             if not self._openvla_fallback_logged:
                 self._emit("[pick] OpenVLA unavailable -- IK fallback")
                 self._openvla_fallback_logged = True
+        elif self.policy == "openvla_remote":
+            if not self._openvla_load_attempted:
+                self._openvla_policy = RemoteOpenVLAPolicy.from_env()
+                self._openvla_load_attempted = True
+            self._geom_or_openvla_grasp(target, self._openvla_policy)
+            return
         self._ik_grasp(target)
 
     def _place(self) -> None:
