@@ -8,10 +8,15 @@ a lazy optional load of a local HF snapshot under ``models/runtime/openvla`` (or
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Mapping, Optional, Protocol
+from urllib.parse import urlparse
+from urllib.request import ProxyHandler, Request, build_opener
 
 import numpy as np
 
@@ -44,6 +49,18 @@ _WEIGHT_FILES = (
     "pytorch_model.bin",
     "model.pt",
     "openvla.pt",
+)
+
+DEFAULT_REMOTE_BASE_URL = "http://10.0.0.200:8003/v1"
+DEFAULT_REMOTE_API_KEY = "marc-openvla-secret"
+DEFAULT_REMOTE_MODEL = "openvla-7b"
+BRIDGE_ORIG_Q01 = (
+    -0.02872725307941437, -0.04170349963009357, -0.026093858778476715,
+    -0.08092105075716972, -0.09288699507713317, -0.20718276381492615, 0.0,
+)
+BRIDGE_ORIG_Q99 = (
+    0.028309678435325586, 0.040855254605412394, 0.040161586627364146,
+    0.08192047759890528, 0.07792850524187081, 0.20382574498653397, 1.0,
 )
 
 
@@ -216,6 +233,101 @@ class HuggingFaceOpenVLAPolicy:
         token_ids = generated[0, -self.stats.dim:].detach().cpu().numpy()
         action = tokens_to_action(token_ids, self.stats, vocab_size=self.vocab_size)
         return np.asarray(action, dtype=np.float32).reshape(-1)
+
+
+class RemoteOpenVLAPolicy:
+    """OpenVLA action-token client for an OpenAI-compatible vLLM server."""
+
+    def __init__(self, base_url: str, api_key: str, model: str, *,
+                 timeout_s: float = 30.0, post=None):
+        parsed = urlparse(str(base_url))
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("MARC_OPENVLA_BASE_URL must be an http(s) URL")
+        if float(timeout_s) <= 0:
+            raise ValueError("MARC_OPENVLA_TIMEOUT_S must be positive")
+        self.base_url = str(base_url).rstrip("/")
+        self.api_key = str(api_key)
+        self.model = str(model)
+        self.timeout_s = float(timeout_s)
+        self._post = post or self._url_post
+        self.stats = ActionStats(
+            q01=BRIDGE_ORIG_Q01,
+            q99=BRIDGE_ORIG_Q99,
+            mask=(True, True, True, True, True, True, False),
+            unnorm_key="bridge_orig",
+        )
+
+    @classmethod
+    def from_env(cls, environ: Optional[Mapping[str, str]] = None, *, post=None):
+        env = os.environ if environ is None else environ
+        try:
+            timeout_s = float(env.get("MARC_OPENVLA_TIMEOUT_S", "30"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("MARC_OPENVLA_TIMEOUT_S must be a number") from exc
+        return cls(
+            env.get("MARC_OPENVLA_BASE_URL", DEFAULT_REMOTE_BASE_URL),
+            env.get("MARC_OPENVLA_API_KEY", DEFAULT_REMOTE_API_KEY),
+            env.get("MARC_OPENVLA_MODEL", DEFAULT_REMOTE_MODEL),
+            timeout_s=timeout_s,
+            post=post,
+        )
+
+    @staticmethod
+    def _url_post(url: str, body: bytes, headers: Mapping[str, str], timeout_s: float):
+        request = Request(url, data=body, headers=dict(headers), method="POST")
+        # The simulator and policy server share a LAN; ambient HTTP proxies must
+        # not intercept private-address image streams.
+        with build_opener(ProxyHandler({})).open(request, timeout=timeout_s) as response:
+            return response.read()
+
+    def act(self, obs: PolicyObservation) -> np.ndarray:
+        if obs is None or obs.rgb is None:
+            return np.zeros(ACTION_DIM, dtype=np.float32)
+        buffer = io.BytesIO()
+        _to_pil(obs.rgb).save(buffer, format="JPEG", quality=85)
+        image_url = "data:image/jpeg;base64," + base64.b64encode(
+            buffer.getvalue()
+        ).decode("ascii")
+        payload = {
+            "model": self.model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": obs.instruction or DEFAULT_INSTRUCTION},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }],
+            "max_tokens": ACTION_DIM,
+            "temperature": 0,
+            "ignore_eos": True,
+            "return_token_ids": True,
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        raw = self._post(
+            self.base_url + "/chat/completions",
+            body,
+            {
+                "Authorization": "Bearer " + self.api_key,
+                "Content-Type": "application/json",
+            },
+            self.timeout_s,
+        )
+        try:
+            response = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+            token_ids = response["choices"][0]["token_ids"][-ACTION_DIM:]
+            if len(token_ids) != ACTION_DIM or any(
+                isinstance(token, bool)
+                or not isinstance(token, int)
+                or not self.stats.vocab_size - self.stats.n_bins <= token < self.stats.vocab_size
+                for token in token_ids
+            ):
+                raise ValueError("invalid action token ids")
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError,
+                UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("OpenVLA response did not contain seven action token ids") from exc
+        return tokens_to_action(
+            token_ids, self.stats, vocab_size=self.stats.vocab_size,
+        ).astype(np.float32)
 
 
 def _to_pil(rgb: np.ndarray):

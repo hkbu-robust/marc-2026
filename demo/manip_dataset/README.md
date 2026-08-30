@@ -4,7 +4,7 @@ Two client profiles talk to the same sim (`bash simulation-platform/marc.sh mani
 
 | Profile | Service | What it is for |
 |---|---|---|
-| **`manip-pick`** | `agent-manip-pick` | Test GraspGen-X (**G**) or wrist-YOLO (**H**) grip + basket drop. No HDF5. |
+| **`manip-pick`** | `agent-manip-pick` | Test GraspGen-X (**G**), wrist-YOLO (**H**), or remote OpenVLA (**V**). No HDF5. |
 | `tools` | `agent-manip-probe` | Record OpenVLA RLDS source + GraspGenX grasp captures. Manual grasp + **P** place. |
 
 ## GraspGen-X pick tester (no dataset)
@@ -18,7 +18,7 @@ cd demo
 docker compose --profile manip-pick up --build agent-manip-pick
 ```
 
-In the trainer GUI, choose the object and **Place near** (or **Place far**, then **A** in the client). Press **G** to snapshot with near-field YOLO and run GraspGen-X pick + overhead basket. Press **H** for a wrist-YOLO pick (Stage 2 YOLO stays loaded; no GraspGen-X). **O** cycles the class, **N** recovers to ready (nothing is saved). Press `?` for the key map.
+In the trainer GUI, choose the object and **Place near** (or **Place far**, then **A** in the client). Press **G** to snapshot with near-field YOLO and run GraspGen-X pick + overhead basket. Press **H** for a wrist-YOLO pick. Press **V** to stream the base camera to zero-shot OpenVLA at `http://10.0.0.200:8003/v1`; its close action uses the simulator-calibrated `MARC_GRIP_CLOSE=0.68`. **O** cycles the class, **N** recovers to ready (nothing is saved). Press `?` for the key map.
 
 Requires an interactive TTY. `MARC_PICK_POLICY=graspgenx` is pinned on this service.
 The image is `marc-agent-manip-pick:local` and builds with `MARC_QWEN_BACKEND=remote`

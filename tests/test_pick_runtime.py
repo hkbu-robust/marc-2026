@@ -171,22 +171,28 @@ class PickRuntimeTests(unittest.TestCase):
         runtime._grasp(SimpleNamespace(fwd=0.4, lat=0.0, z=-0.3))
         self.assertEqual([policy], used)
 
-    def test_openvla_close_uses_teleop_physical_ceiling(self):
+    def test_remote_openvla_clips_motion_and_uses_physical_gripper_ceiling(self):
         client = ScriptClient()
         client.grasping = False
         commands = []
         arm = SimpleNamespace(
-            cfg=SimpleNamespace(grip_close=0.68),
+            cfg=SimpleNamespace(
+                grip_close=0.68, dx=0.02, dy=0.02, dz=0.02,
+                d_yaw=0.05, d_pitch=0.04,
+            ),
             apply_delta=lambda **kwargs: commands.append(kwargs),
         )
         policy = SimpleNamespace(
             stats=object(),
-            act=lambda _obs: np.array([0, 0, 0, 0, 0, 0, 0], dtype=np.float32),
+            act=lambda _obs: np.array([1, -1, 1, -1, 1, -1, 0], dtype=np.float32),
         )
-        runtime = PickRuntime(client, policy="openvla", policy_ticks=1)
+        runtime = PickRuntime(client, policy="openvla_remote", policy_ticks=1)
         runtime._teleop = arm
         runtime._snapshot_obs = lambda _target: None
         runtime._geom_or_openvla_grasp(SimpleNamespace(), policy)
+        self.assertAlmostEqual(0.02, commands[0]["dx"])
+        self.assertAlmostEqual(-0.02, commands[0]["dy"])
+        self.assertAlmostEqual(0.04, commands[0]["dpitch"])
         self.assertEqual(0.68, commands[-1]["grip"])
 
     def test_adopt_pick_on_retrieval_state(self):

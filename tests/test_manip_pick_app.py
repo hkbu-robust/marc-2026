@@ -195,6 +195,32 @@ class ManipPickAppTests(unittest.TestCase):
         self.assertEqual(target, nxt)
         before.assert_not_called()
 
+    def test_v_runs_remote_openvla_without_dataset_or_graspgenx_handoff(self):
+        target = SimpleNamespace(
+            valid=True, fwd=0.16, lat=0.0, z=-0.22, conf=0.8,
+            name="tumbler", reason="ok",
+        )
+        seen = []
+        runtime = SimpleNamespace(
+            policy="openvla_remote",
+            run=lambda value: seen.append(value) or PickResult(
+                ok=False, reason="no_grasp", attempts=1, policy="openvla_remote",
+            ),
+            _reacquire_fn=None,
+        )
+        arm = SimpleNamespace()
+        app = PickTestApp(
+            SimpleNamespace(send_cmd_vel=lambda **_k: None),
+            "u1", arm=arm, approach=_Approach(),
+            nearfield=_Nearfield(target), pick_runtime=runtime,
+        )
+        with patch("manip_dataset.pick_app.before_graspgenx") as before:
+            app.handle_key("V")
+        before.assert_not_called()
+        self.assertEqual([target], seen)
+        self.assertIs(arm, runtime._teleop)
+        self.assertIn("V       zero-shot OpenVLA", HELP_TEXT)
+
 
 if __name__ == "__main__":
     unittest.main()

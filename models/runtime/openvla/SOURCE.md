@@ -38,6 +38,11 @@ is rejected. Merge the LoRA into the base model before drop-in.
 Copy that file next to the weights (or into this directory) so inference
 unnormalizes with the same numbers a later LoRA train would use.
 
+The pick-only app's **V** key is an explicit zero-shot experiment: it streams
+to the remote base checkpoint, decodes `bridge_orig`, and clips each motion to
+the local teleop step limits. It does not claim MARC frame compatibility.
+The included `chat_template.jinja` supplies the prompt format expected by vLLM.
+
 ## Env
 
 | Variable | Meaning |

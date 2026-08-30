@@ -14,6 +14,7 @@ from marc_agent.openvla_policy import (
     GeometricGraspStub,
     HuggingFaceOpenVLAPolicy,
     PolicyObservation,
+    RemoteOpenVLAPolicy,
     load_openvla,
     resolve_weights_path,
 )
@@ -81,6 +82,35 @@ class OpenVLAPolicyTests(unittest.TestCase):
         zeros = policy.act(PolicyObservation(instruction="pick up the mug"))
         self.assertEqual((ACTION_DIM,), zeros.shape)
         np.testing.assert_allclose(zeros, 0.0)
+
+    def test_remote_vllm_decodes_seven_action_tokens(self):
+        seen = {}
+
+        def post(url, body, headers, timeout_s):
+            seen.update(
+                url=url,
+                payload=json.loads(body),
+                authorization=headers["Authorization"],
+                timeout_s=timeout_s,
+            )
+            return json.dumps({
+                "choices": [{
+                    "token_ids": [31877, 31858, 31921, 31883, 31744, 31885, 31872],
+                }],
+            }).encode()
+
+        policy = RemoteOpenVLAPolicy.from_env({}, post=post)
+        action = policy.act(PolicyObservation(
+            rgb=np.zeros((32, 48, 3), dtype=np.uint8),
+            instruction="pick up the tumbler",
+        ))
+        self.assertEqual((ACTION_DIM,), action.shape)
+        self.assertEqual(
+            "http://10.0.0.200:8003/v1/chat/completions", seen["url"],
+        )
+        self.assertEqual(ACTION_DIM, seen["payload"]["max_tokens"])
+        self.assertTrue(seen["payload"]["return_token_ids"])
+        self.assertLess(float(action[6]), 0.5)
 
 
 if __name__ == "__main__":
