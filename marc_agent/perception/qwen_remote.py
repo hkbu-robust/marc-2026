@@ -277,6 +277,7 @@ class RemoteQwenSarVerifier:
         self.last_finish_reason: str | None = None
         self._scene_cache: dict[str, str] = {}
         self._scene_description: str | None = None
+        self.last_prompt: str | None = None
 
     def set_budget_timeout(self, timeout_s: float) -> None:
         self.budget_timeout_s = float(timeout_s)
@@ -345,6 +346,7 @@ class RemoteQwenSarVerifier:
         *,
         max_tokens: int | None = None,
     ) -> str:
+        self.last_prompt = board.prompt
         if len(board.images) > MAX_REMOTE_IMAGES:
             raise QwenRemoteResponseError(
                 f"candidate board has {len(board.images)} images; "

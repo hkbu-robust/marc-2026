@@ -220,6 +220,92 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual(3, len(result.grounding.target_coord))
         self.assertNotEqual([0.0, 0.0, 0.0], result.grounding.target_coord)
 
+    def test_sar_on_bench_uses_camera_ground_plane_without_height_guess(self):
+        person = PersonCandidate(
+            "rig_a:person_bending:0",
+            (315.0, 100.0, 405.0, 390.0),
+            "person_bending",
+            0.9,
+            "rig_a",
+            (640, 480),
+        )
+        bench = ObjectCandidate(
+            "rig_a:bench:0",
+            "bench",
+            (280.0, 180.0, 440.0, 410.0),
+            0.9,
+            "rig_a",
+            (640, 480),
+        )
+
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[bench], people=[person], camera_ids=["rig_a"]
+            )
+
+        projector = _geometry()
+        result = run_stage1_round(
+            object(),
+            "Find the person lying face-down on the bench.",
+            detector=detector,
+            verifier=lambda _board: person.candidate_id,
+            projector=projector,
+        )
+        ground = projector.project_contact(
+            "rig_a", person.bbox_xyxy, pose_class=person.pose_class
+        )
+        raised = projector.project_contact(
+            "rig_a",
+            person.bbox_xyxy,
+            relation=Relation.ON,
+            support_class="bench",
+            pose_class=person.pose_class,
+            support_box=bench.bbox_xyxy,
+        )
+        self.assertEqual(list(ground), result.grounding.target_coord)
+        self.assertNotEqual(list(raised), result.grounding.target_coord)
+
+    def test_sar_sitting_on_vending_keeps_existing_raised_support_geometry(self):
+        person = PersonCandidate(
+            "rig_a:person_sitting:0",
+            (315.0, 100.0, 405.0, 390.0),
+            "person_sitting",
+            0.9,
+            "rig_a",
+            (640, 480),
+        )
+        vending = ObjectCandidate(
+            "rig_a:vending_machine:0",
+            "vending_machine",
+            (280.0, 180.0, 440.0, 410.0),
+            0.9,
+            "rig_a",
+            (640, 480),
+        )
+
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[vending], people=[person], camera_ids=["rig_a"]
+            )
+
+        projector = _geometry()
+        result = run_stage1_round(
+            object(),
+            "Find the person sitting on top of the vending machine.",
+            detector=detector,
+            verifier=lambda _board: person.candidate_id,
+            projector=projector,
+        )
+        expected = projector.project_contact(
+            "rig_a",
+            person.bbox_xyxy,
+            relation=Relation.ON,
+            support_class="vending_machine",
+            pose_class=person.pose_class,
+            support_box=vending.bbox_xyxy,
+        )
+        self.assertEqual(list(expected), result.grounding.target_coord)
+
     def test_object_path_uses_verifier_pair(self):
         def detector(client, *, stub_path=None):
             return _object_round()
@@ -435,6 +521,31 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("tumbler", result.grounding.target_type)
         self.assertEqual("rig_a:tumbler:0", result.target_id)
         self.assertNotEqual(result.grounding.anchor_coord, result.grounding.target_coord)
+
+    def test_scene_inferred_park_anchor_submits_beside(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:sunblock:0", "sunblock", (80, 300, 100, 340),
+                        0.9, "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:picnic_table:0", "picnic_table", (180, 220, 470, 420),
+                        0.9, "rig_a", (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        result = run_stage1_round(
+            object(),
+            "I was resting in the sun at the park and left the sunblock I had been using.",
+            detector=detector,
+            projector=_geometry(),
+        )
+        self.assertEqual("picnic_table", result.grounding.landmark)
+        self.assertEqual("beside", result.grounding.relation)
 
     def test_sar_without_landmark_does_not_project_nearby_object(self):
         def detector(client, *, stub_path=None):

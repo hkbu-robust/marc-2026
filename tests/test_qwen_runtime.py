@@ -53,12 +53,21 @@ class QwenRuntimeTests(unittest.TestCase):
         with self.assertRaises(QwenConfigurationError):
             configured_backend({"MARC_QWEN_BACKEND": "cloud"})
 
-    def test_remote_config_requires_url_and_key(self):
-        with self.assertRaisesRegex(QwenConfigurationError, "BASE_URL"):
-            QwenRemoteConfig.load(environ={})
+    def test_remote_config_defaults_local_streams_remote_and_requires_key(self):
+        common = {"MARC_QWEN_API_KEY": "secret"}
+        self.assertEqual(
+            "http://127.0.0.1:8000/v1",
+            QwenRemoteConfig.load(environ=common).base_url,
+        )
+        self.assertEqual(
+            "http://10.0.0.200:8000/v1",
+            QwenRemoteConfig.load(environ={**common, "STREAM": "true"}).base_url,
+        )
         with self.assertRaisesRegex(QwenConfigurationError, "API_KEY"):
+            QwenRemoteConfig.load(environ={})
+        with self.assertRaisesRegex(QwenConfigurationError, "BASE_URL"):
             QwenRemoteConfig.load(
-                environ={"MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1"}
+                environ={**common, "MARC_QWEN_BASE_URL": "not-a-url"}
             )
 
     def test_remote_config_builds_chat_endpoint(self):

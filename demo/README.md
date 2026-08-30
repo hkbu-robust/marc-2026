@@ -76,6 +76,7 @@ Stage 1 candidate settings:
 | `MARC_QWEN_BACKEND` | `remote` in demo | The demo uses the OpenAI-compatible Qwen vLLM on this host; root submission Compose remains local Qwen |
 | `MARC_QWEN_MODEL_DIR` | `/agent/models/runtime/stage1-sar-qwen/model` | Complete pinned local Transformers snapshot |
 | `MARC_QWEN_BASE_URL` | `http://127.0.0.1:8000/v1` in demo | Remote vLLM URL including `/v1` |
+| `STREAM` | `false` | `true` selects `http://10.0.0.200:8000/v1`; otherwise Qwen uses localhost |
 | `MARC_QWEN_API_KEY` | local vLLM key in demo | Bearer key configured on the vLLM server; never written to metrics |
 | `MARC_QWEN_MODEL` | `qwen3-vl-8b` in demo | Name supplied through vLLM `--served-model-name` |
 | `MARC_QWEN_TIMEOUT_S` | `90` | Remote request budget before deterministic fallback; wall wait is also capped |
@@ -89,6 +90,8 @@ Stage 1 candidate settings:
 The standard `demo/docker-compose.yml` uses the host-network vLLM endpoint at
 `http://127.0.0.1:8000/v1`, serving `qwen3-vl-8b`. Start that service before
 `docker compose up`; the existing remote adapter handles the OpenAI-compatible API.
+Use `STREAM=true docker compose up --build agent` when vLLM is on the machine at
+`10.0.0.200`; the flag overrides `MARC_QWEN_BASE_URL` for that run.
 
 ### Local Qwen override
 
@@ -118,7 +121,7 @@ Start vLLM on the workstation:
 
 ```bash
 conda activate marc
-vllm serve "$HOME/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct" \
+VLLM_BATCH_INVARIANT=1 vllm serve "$HOME/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct" \
   --host 0.0.0.0 --port 8000 \
   --served-model-name qwen3-vl-8b \
   --dtype bfloat16 --gpu-memory-utilization 0.90 \

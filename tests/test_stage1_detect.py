@@ -8,7 +8,10 @@ import types
 import unittest
 from unittest.mock import patch
 
-from marc_agent.perception.cctv_round import fetch_cctv_round
+from marc_agent.perception.cctv_round import (
+    discovery_timeout_from_limit,
+    fetch_cctv_round,
+)
 from marc_agent.perception.stage1_detect import detect_stage1_round
 from marc_agent.perception.stub_detections import default_stub_path, load_stub_detections
 from marc_agent.types import PersonCandidate
@@ -36,6 +39,11 @@ class _FakeClient:
 
 
 class FetchCctvRoundTests(unittest.TestCase):
+    def test_discovery_wait_reserves_selection_time(self):
+        self.assertEqual(15.0, discovery_timeout_from_limit(30.0))
+        self.assertEqual(10.0, discovery_timeout_from_limit(25.0))
+        self.assertEqual(4.0, discovery_timeout_from_limit(10.0))
+
     def test_fetches_each_camera_once(self):
         client = _FakeClient()
         frames, camera_ids = fetch_cctv_round(client)

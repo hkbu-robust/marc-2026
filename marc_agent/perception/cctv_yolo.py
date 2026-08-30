@@ -12,6 +12,7 @@ from typing import Optional
 
 import numpy as np
 
+from marc_agent.command_parser import MISSION_OBJECT_TYPES
 from marc_agent.perception.bundle_paths import (
     STAGE1_CCTV_CONTRACT,
     STAGE1_CCTV_WEIGHTS,
@@ -31,11 +32,10 @@ from marc_agent.types import (
 
 log = logging.getLogger("marc_agent.cctv_yolo")
 
-REFINE_CONF = 0.12
+REFINE_CONF = 0.05
 CROP_PAD_FRAC = 0.15
 REFINE_DEDUP_IOU = 0.45
-REFINE_IMGSZ = 640
-REFINE_IMGSZ_STRIDE = 32
+REFINE_IMGSZ = 320
 REFINE_CROP_CAP = 8
 POST_SELECT_IOU = 0.25
 
@@ -54,18 +54,6 @@ def _pad_box(
         min(width, float(x2) + pad),
         min(height, float(y2) + pad),
     )
-
-
-def _letterbox_imgsz(
-    width: int,
-    height: int,
-    *,
-    cap: int,
-    stride: int = REFINE_IMGSZ_STRIDE,
-) -> int:
-    side = max(int(width), int(height), stride)
-    side = min(side, int(cap))
-    return max(stride, ((side + stride - 1) // stride) * stride)
 
 
 def _is_cuda_oom(exc: BaseException) -> bool:
@@ -380,7 +368,10 @@ class CctvYoloDetector:
                 frames, objects, landmark_classes, landmarks=missing
             )
         ):
-            if class_name != target_type:
+            # Crop inference is deliberately proposal-oriented: tiny mission items
+            # are often classified as a visually similar mission class. Qwen sees
+            # the crop and resolves the final identity.
+            if class_name not in MISSION_OBJECT_TYPES:
                 continue
             if any(
                 _box_iou(mapped, existing) >= REFINE_DEDUP_IOU
@@ -480,13 +471,10 @@ class CctvYoloDetector:
                 continue
             image_size = (int(frame.width), int(frame.height))
             try:
-                crop_imgsz = _letterbox_imgsz(
-                    crop.shape[1],
-                    crop.shape[0],
-                    cap=min(REFINE_IMGSZ, self.contract.imgsz),
-                )
                 detections = self._predict_frame(
-                    crop, confidence=REFINE_CONF, imgsz=crop_imgsz
+                    crop,
+                    confidence=REFINE_CONF,
+                    imgsz=min(REFINE_IMGSZ, self.contract.imgsz),
                 )
             except Exception as exc:
                 if not _is_cuda_oom(exc):

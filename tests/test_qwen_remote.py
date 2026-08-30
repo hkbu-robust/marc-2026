@@ -85,6 +85,7 @@ class QwenRemoteTests(unittest.TestCase):
         self.assertIn("Mission: Find the collapsed person", prompts[0])
         self.assertIn("Cached all-camera scene reference", prompts[1])
         self.assertIn("rig_b: an empty road", prompts[1])
+        self.assertEqual(prompts[-1], verifier.last_prompt)
         self.assertEqual(192, max_tokens[0])
 
     def test_verifier_rejects_unbatched_multimodal_requests(self):

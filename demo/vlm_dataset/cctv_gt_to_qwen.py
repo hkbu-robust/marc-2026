@@ -2,11 +2,11 @@
 """Convert CCTV dataset-gen GT (PNG + JSON) into Qwen3-VL instruction rows.
 
 Does not run Isaac. Reads trainer_output/<scenario>/scene_XXXXX/{camera}.png|.json
-and writes LLaMA-Factory JSONL (``train_sar.jsonl`` / ``val_sar.jsonl`` and
-``train_obj.jsonl`` / ``val_obj.jsonl`` — two grammars, two files).
+and writes LLaMA-Factory JSONL (combined ``train.jsonl`` / ``val.jsonl`` plus
+separate SAR and object files for inspection).
 
 SAR rows use the R03 pose×support matrix (marc_agent.perception.situation_rules)
-and the runtime grammar ``{camera_id}:{pose_class}:{n}|{situation}`` with no coordinates.
+and the runtime board-answer grammar ``Pxx`` with no coordinates or prose.
 The SAR user turn matches ``format_sar_verifier_prompt`` in
 ``marc_agent.perception.sar_selection``. Object rows keep eight-relation
 referring expressions without grounding xyz.
@@ -21,6 +21,7 @@ Usage (from repo root or demo/):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -35,16 +36,35 @@ _ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from marc_agent.command_parser import (  # noqa: E402
+    LANDMARK_TYPES,
+    MISSION_OBJECT_TYPES,
+    parse_command,
+)
+from marc_agent.perception.object_selection import (  # noqa: E402
+    build_object_board,
+    rank_object_candidates,
+)
 from marc_agent.perception.candidate_ids import person_candidate_id  # noqa: E402
 from marc_agent.perception.pose_to_situation import situation_for_pose  # noqa: E402
-from marc_agent.perception.sar_selection import format_sar_verifier_prompt  # noqa: E402
+from marc_agent.perception.sar_selection import (  # noqa: E402
+    build_candidate_board,
+    format_sar_verifier_prompt,
+)
 from marc_agent.perception.situation_rules import (  # noqa: E402
     RULES_VERSION,
     support_class as r03_support_class,
 )
+from marc_agent.types import (  # noqa: E402
+    CctvDetectionRound,
+    CctvFrame,
+    ObjectCandidate,
+    PersonCandidate,
+)
 
 _RECIPES_PATH = os.path.join(_ROOT, "simulation-platform", "patches", "sar_recipes.yaml")
 _RECIPE_BY_ID: Dict[str, dict] = {}
+_SKIPPED_OBJECTS = frozenset({"long_umbrella", "master_chef_can", "wood_block"})
 
 
 def _load_recipes() -> Dict[str, dict]:
@@ -399,6 +419,15 @@ def person_candidate_id_list(people: List[dict], camera_id: str) -> Tuple[str, .
     ordered = sorted(people, key=_det_sort_key)
     id_map = person_candidate_ids(people, camera_id)
     return tuple(id_map[id(person)] for person in ordered)
+
+
+def _numbered_candidate(candidate_id: str, candidate_ids: Iterable[str]) -> str:
+    """Runtime boards ask Qwen to answer with the stable Pxx row alias."""
+    ids = tuple(candidate_ids)
+    try:
+        return f"P{ids.index(candidate_id) + 1:02d}"
+    except ValueError as exc:
+        raise ValueError(f"candidate is not listed: {candidate_id}") from exc
 
 
 def _speak_landmark(cls: str, rng: random.Random, drink: bool = False) -> str:
@@ -1038,7 +1067,7 @@ def _sample(png_path: str, payload: dict, camera_id: str, instruction: str,
             instruction, ids, camera_id=camera_id, requested=req,
             landmark=lm_name or rec.get("support_landmark"),
             scene_hint=hint, people=people, payload=payload)
-        text = f"{candidate_id}|{situation}"
+        text = _numbered_candidate(str(candidate_id), ids)
     else:
         interp = {
             "target_type": target_type or obj["class"],
@@ -1069,8 +1098,142 @@ def _sample(png_path: str, payload: dict, camera_id: str, instruction: str,
     }
 
 
+def _runtime_round(png_path: str, payload: dict, camera_id: str):
+    """Turn GT into the same finite candidates and pixels used by runtime boards."""
+    import numpy as np
+    from PIL import Image
+
+    rgb = np.asarray(Image.open(png_path).convert("RGB"))
+    height, width = rgb.shape[:2]
+    objects: List[ObjectCandidate] = []
+    people: List[PersonCandidate] = []
+    object_by_det: Dict[int, ObjectCandidate] = {}
+    person_by_det: Dict[int, PersonCandidate] = {}
+    class_counts: Counter = Counter()
+    people_gt = [
+        det for det in payload.get("detections") or []
+        if _is_person(str(det.get("class") or "")) and _bbox4(det)
+    ]
+    person_ids = person_candidate_ids(people_gt, camera_id)
+    for det in sorted(payload.get("detections") or [], key=_det_sort_key):
+        box = _bbox4(det)
+        class_name = str(det.get("class") or "")
+        if not box or not class_name or _is_long_umbrella(class_name):
+            continue
+        if _is_person(class_name):
+            candidate = PersonCandidate(
+                person_ids[id(det)], box, class_name, 1.0,
+                camera_id, (width, height),
+            )
+            people.append(candidate)
+            person_by_det[id(det)] = candidate
+            continue
+        index = class_counts[class_name]
+        class_counts[class_name] += 1
+        candidate = ObjectCandidate(
+            f"{camera_id}:{class_name}:{index}", class_name, box, 1.0,
+            camera_id, (width, height),
+        )
+        objects.append(candidate)
+        object_by_det[id(det)] = candidate
+    round_ = CctvDetectionRound(
+        objects=objects,
+        people=people,
+        frames={camera_id: CctvFrame(camera_id, width, height, rgb)},
+        camera_ids=[camera_id],
+    )
+    return round_, object_by_det, person_by_det
+
+
+def _runtime_sample(
+        png_path: str, payload: dict, camera_id: str, instruction: str,
+        target: dict, fmt: str, out_dir: str, asset_key: str,
+        *, situation: Optional[str] = None) -> Optional[dict]:
+    """Build and persist the production Qwen board, prompt, and finite answer."""
+    round_, objects, people = _runtime_round(png_path, payload, camera_id)
+    command = parse_command(instruction)
+    if situation is not None:
+        chosen = people.get(id(target))
+        board = build_candidate_board(
+            instruction, command, round_, max_crops=len(round_.people),
+            pack_cameras=True,
+        )
+        ids = board.candidate_ids
+        if chosen is None or chosen.candidate_id not in ids:
+            return None
+        answer = f"P{ids.index(chosen.candidate_id) + 1:02d}"
+    else:
+        chosen = objects.get(id(target))
+        ranked = rank_object_candidates(
+            command, round_, command_text=instruction,
+            visual_proposals=True,
+        )
+        if chosen is None or chosen.candidate_id not in {
+                item.target.candidate_id for item in ranked}:
+            return None
+        board = build_object_board(
+            instruction, command, round_, ranked,
+            max_crops=len(ranked), pack_cameras=True,
+        )
+        answer = chosen.candidate_id
+
+    digest = hashlib.sha1(instruction.encode("utf-8")).hexdigest()[:10]
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", asset_key)
+    image_dir = os.path.join(out_dir, "images")
+    os.makedirs(image_dir, exist_ok=True)
+    image_paths = []
+    for index, image in enumerate(board.images, start=1):
+        name = f"{stem}_{digest}_{index}.png"
+        image.save(os.path.join(image_dir, name))
+        image_paths.append(f"images/{name}")
+    prompt = "\n".join("<image>" for _ in image_paths) + "\n" + board.prompt
+    if fmt == "sharegpt":
+        return {
+            "images": image_paths,
+            "conversations": [
+                {"from": "human", "value": prompt},
+                {"from": "gpt", "value": answer},
+            ],
+        }
+    return {
+        "images": image_paths,
+        "messages": [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": answer},
+        ],
+    }
+
+
+def _coverage_missing(
+        object_counts: Counter, landmark_counts: Counter,
+        relation_counts: Counter, situation_counts: Counter,
+        recipe_counts: Counter, camera_counts: Counter,
+        min_cameras: int) -> List[str]:
+    recipes = _load_recipes()
+    required_situations = {
+        str(recipe.get("situation")) for recipe in recipes.values()
+        if recipe.get("situation")
+    }
+    checks = (
+        ("object", set(MISSION_OBJECT_TYPES) - set(_SKIPPED_OBJECTS), object_counts),
+        ("landmark", set(LANDMARK_TYPES), landmark_counts),
+        ("relation", set(TEMPLATES), relation_counts),
+        ("situation", required_situations, situation_counts),
+        ("recipe", set(recipes), recipe_counts),
+    )
+    missing = [
+        f"{label}:{name}"
+        for label, required, observed in checks
+        for name in sorted(required - set(observed))
+    ]
+    if len(camera_counts) < min_cameras:
+        missing.append(f"cameras:{len(camera_counts)}/{min_cameras}")
+    return missing
+
+
 def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
-            seed: int, fmt: str, max_sar_per_image: int = 2) -> None:
+            seed: int, fmt: str, max_sar_per_image: int = 2,
+            require_complete: bool = False, min_cameras: int = 6) -> None:
     rng = random.Random(seed)
     os.makedirs(out_dir, exist_ok=True)
     scenes = list(_iter_scenes(in_dir))
@@ -1099,6 +1262,9 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
     sit_counts: Counter = Counter()
     lm_counts: Counter = Counter()
     obj_counts: Counter = Counter()
+    rel_counts: Counter = Counter()
+    recipe_counts: Counter = Counter()
+    camera_counts: Counter = Counter()
 
     for idx, (scene_id, scene_dir) in enumerate(scenes):
         stems = [
@@ -1124,14 +1290,7 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 continue
             png_path, payload = pair
             camera_id = str(payload.get("frame_id") or stem)
-            people = [
-                d for d in (payload.get("detections") or [])
-                if _is_person(str(d.get("class") or ""))
-                and d.get("class")
-                and _bbox_center(d.get("bbox"))
-            ]
-            id_map = person_candidate_ids(people, camera_id)
-            id_list = person_candidate_id_list(people, camera_id)
+            camera_counts[camera_id] += 1
             obj_rows = _pairs_for_payload(payload, rng, max_per_image)
             sar_rows = _sar_pairs_for_payload(
                 payload, rng, max_sar_per_image,
@@ -1140,23 +1299,36 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 n_skip += 1
                 continue
             for instruction, obj, lm, rel, hard in obj_rows:
-                obj_bucket.append(_sample(
-                    png_path, payload, camera_id, instruction, obj, lm, fmt, rel=rel))
+                box_key = "_".join(str(round(value)) for value in obj["bbox"])
+                row = _runtime_sample(
+                    png_path, payload, camera_id, instruction, obj, fmt,
+                    out_dir, f"s{scene_id}_{camera_id}_obj_{box_key}",
+                )
+                if row is None:
+                    n_skip += 1
+                    continue
+                obj_bucket.append(row)
                 lm_counts[str(lm.get("class") or "?")] += 1
                 obj_counts[str(obj.get("class") or "?")] += 1
+                rel_counts[str(rel)] += 1
                 if hard:
                     n_hard += 1
             for instruction, person, lm, sit, hard, rel in sar_rows:
-                cid = id_map.get(id(person), person_candidate_id(camera_id, str(person.get("class") or "person"), 0))
-                rec = _load_recipes().get(str(person.get("recipe_id") or ""), {})
-                sar_bucket.append(_sample(
-                    png_path, payload, camera_id, instruction, person, lm, fmt,
-                    rel=rel, situation=sit, target_type="person",
-                    candidate_id=cid, candidate_ids=id_list, people=people,
-                    requested=person.get("situation") or rec.get("situation"),
-                    scene_hint=person.get("scene_hint") or rec.get("scene_hint")))
+                box_key = "_".join(str(round(value)) for value in person["bbox"])
+                row = _runtime_sample(
+                    png_path, payload, camera_id, instruction, person, fmt,
+                    out_dir, f"s{scene_id}_{camera_id}_sar_{box_key}",
+                    situation=sit,
+                )
+                if row is None:
+                    n_skip += 1
+                    continue
+                sar_bucket.append(row)
                 lm_counts[str(lm.get("class") or "none") if lm else "none"] += 1
                 sit_counts[sit] += 1
+                recipe_id = str(person.get("recipe_id") or "")
+                if recipe_id:
+                    recipe_counts[recipe_id] += 1
                 n_sar += 1
                 if hard:
                     n_hard += 1
@@ -1172,7 +1344,17 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
     val_sar_path = _write("val_sar.jsonl", val_sar)
     train_obj_path = _write("train_obj.jsonl", train_obj)
     val_obj_path = _write("val_obj.jsonl", val_obj)
+    train_all = train_sar + train_obj
+    val_all = val_sar + val_obj
+    random.Random(seed).shuffle(train_all)
+    random.Random(seed).shuffle(val_all)
+    train_path = _write("train.jsonl", train_all)
+    val_path = _write("val.jsonl", val_all)
     n_total = (len(train_sar) + len(val_sar) + len(train_obj) + len(val_obj))
+    missing = _coverage_missing(
+        obj_counts, lm_counts, rel_counts, sit_counts, recipe_counts,
+        camera_counts, min_cameras,
+    )
     info = {
         "format": fmt,
         "source": os.path.abspath(in_dir),
@@ -1188,18 +1370,54 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
         "max_sar_per_image": max_sar_per_image,
         "landmark_class_counts": dict(lm_counts.most_common()),
         "object_class_counts": dict(obj_counts.most_common()),
+        "object_relation_counts": dict(rel_counts.most_common()),
         "sar_situation_counts": dict(sit_counts.most_common()),
-        "assistant": "SAR: {camera_id}:{pose_class}:{n}|{situation}; objects: interpretation JSON without coords",
+        "sar_recipe_counts": dict(recipe_counts.most_common()),
+        "camera_counts": dict(camera_counts.most_common()),
+        "coverage_complete": not missing,
+        "coverage_missing": missing,
+        "assistant": "SAR: Pxx; objects: TARGET_ID (production finite-board grammars)",
         "situation_rules": RULES_VERSION,
         "notes": (
-            "Fine-tune the SAR LoRA on train_sar.jsonl / val_sar.jsonl only. "
-            "Object rows are a separate grammar (train_obj.jsonl). "
-            "SAR user text matches marc_agent.perception.sar_selection."
+            "Train on both train_sar.jsonl and train_obj.jsonl. Validation files "
+            "remain scene-disjoint. Prompts, packed annotated images, detector "
+            "metadata, and finite answers match the production Qwen boards."
         ),
     }
-    info_path = os.path.join(out_dir, "dataset_info.json")
+    info_path = os.path.join(out_dir, "coverage.json")
     with open(info_path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)
+    if fmt == "sharegpt":
+        columns = {"messages": "conversations", "images": "images"}
+        tags = {
+            "role_tag": "from",
+            "content_tag": "value",
+            "user_tag": "human",
+            "assistant_tag": "gpt",
+        }
+    else:
+        columns = {"messages": "messages", "images": "images"}
+        tags = {
+            "role_tag": "role",
+            "content_tag": "content",
+            "user_tag": "user",
+            "assistant_tag": "assistant",
+        }
+    dataset_info = {
+        name: {
+            "file_name": filename,
+            "formatting": "sharegpt",
+            "columns": columns,
+            "tags": tags,
+        }
+        for name, filename in (
+            ("marc_qwen_train", "train.jsonl"),
+            ("marc_qwen_val", "val.jsonl"),
+        )
+    }
+    registry_path = os.path.join(out_dir, "dataset_info.json")
+    with open(registry_path, "w", encoding="utf-8") as f:
+        json.dump(dataset_info, f, indent=2)
     print(f"[qwen] sar_train={len(train_sar)} sar_val={len(val_sar)} "
           f"obj_train={len(train_obj)} obj_val={len(val_obj)} "
           f"hard={n_hard} hard_frac={info['hard_frac']} skipped_cam={n_skip}")
@@ -1212,11 +1430,22 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
     if sit_counts:
         sit_txt = ", ".join(f"{k}={v}" for k, v in sit_counts.most_common())
         print(f"[qwen] sar situations: {sit_txt}")
+    print(
+        "[qwen] coverage: "
+        + ("complete" if not missing else "missing " + ", ".join(missing))
+    )
     print(f"[qwen] {train_sar_path}")
     print(f"[qwen] {val_sar_path}")
     print(f"[qwen] {train_obj_path}")
     print(f"[qwen] {val_obj_path}")
+    print(f"[qwen] {train_path}")
+    print(f"[qwen] {val_path}")
     print(f"[qwen] {info_path}")
+    print(f"[qwen] {registry_path}")
+    if require_complete and missing:
+        raise SystemExit(
+            "dataset coverage incomplete; generate more scenes and rerun export"
+        )
 
 
 def main():
@@ -1233,11 +1462,17 @@ def main():
     ap.add_argument("--format", choices=("llama-factory", "sharegpt"),
                     default="llama-factory",
                     help="llama-factory = messages[]; sharegpt = conversations[]")
+    ap.add_argument("--require-complete", action="store_true",
+                    help="fail after export if a task category has no examples")
+    ap.add_argument("--min-cameras", type=int, default=6,
+                    help="minimum distinct viewpoints required by --require-complete")
     args = ap.parse_args()
     if not os.path.isdir(args.in_dir):
         raise SystemExit(f"input dir not found: {args.in_dir}")
     convert(args.in_dir, args.out_dir, args.val_frac, args.max_per_image,
-            args.seed, args.format, max_sar_per_image=args.max_sar_per_image)
+            args.seed, args.format, max_sar_per_image=args.max_sar_per_image,
+            require_complete=args.require_complete,
+            min_cameras=max(1, args.min_cameras))
 
 
 if __name__ == "__main__":

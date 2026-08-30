@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Convert successful marc_pnp HDF5 episodes to an OpenVLA-oriented export.
+"""Convert successful marc_pnp HDF5 episodes to an OpenVLA RLDS source.
 
 Writes:
   <out>/episodes/episode_XXXX.npz   — arrays per episode
   <out>/dataset_statistics.json     — nested marc_pnp q01/q99/mask
   <out>/manifest.json               — episode index + language
+  <out>/marc_pnp_dataset_builder.py — materializes the source as TFDS/RLDS
 
-Does not require tensorflow_datasets at convert time (NumPy export). Point an
-OXE/RLDS builder at these files, or load npz directly in a custom OpenVLA
-dataset transform. LoRA fine-tuning should use unnorm_key=marc_pnp.
+Conversion does not require tensorflow_datasets. Run the emitted builder from
+an OpenVLA environment to materialize TFDS/RLDS. LoRA fine-tuning should use
+unnorm_key=marc_pnp.
 
 Usage:
   python3 -m manip_dataset.to_rlds \\
@@ -22,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from typing import List, Tuple
 
@@ -171,6 +173,10 @@ def convert(in_dir: str, out_dir: str, image_size: int = IMAGE_SIZE, camera: str
         json.dump(stats, f, indent=2)
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump({"episodes": episodes}, f, indent=2)
+    shutil.copyfile(
+        os.path.join(os.path.dirname(__file__), "marc_pnp_dataset_builder.py"),
+        os.path.join(out_dir, "marc_pnp_dataset_builder.py"),
+    )
     action_block = stats[DEFAULT_UNNORM_KEY]["action"]
     print(f"[done] {len(episodes)} episodes -> {out_dir}")
     print(f"[stats] action_q01={action_block['q01']}")

@@ -92,6 +92,7 @@ class SarSelectionResult:
     raw_output: Optional[str] = None
     verifier_metrics: Optional[VerifierMetrics] = None
     prompt: Optional[str] = None
+    evidence_images: tuple[object, ...] = ()
 
 
 Verifier = Callable[[CandidateBoard], str]
@@ -217,9 +218,13 @@ _ON_SUPPORT_CUE = re.compile(
 
 
 def projection_relation(
-    command: ParsedCommand, command_text: str = ""
+    command: ParsedCommand,
+    command_text: str = "",
+    pose_class: Optional[str] = None,
 ) -> Optional[Relation]:
-    """Internal ON for projecting a person onto a support. Not submitted."""
+    """Use raised support geometry only for poses modeled above the ground."""
+    if pose_class == "person_bending":
+        return None
     if command.relation is not None:
         return command.relation
     if command.target_type != "person":
@@ -561,8 +566,10 @@ def format_sar_verifier_prompt(
     return (
         "Select the single numbered person candidate that best matches the request. "
         "Compare these listed people against the original request. Candidates are ordered "
-        "by weak detector and scene evidence, but you must verify them visually. Pose and landmark proximity named "
-        "in the request beat list order. world_dist_m is metres on the ground to the "
+        "by weak detector and scene evidence, but you must verify them visually. First "
+        "match the requested place and every visible landmark modifier (for example, a "
+        "toppled bicycle is not an upright bicycle). Then match pose and landmark proximity; "
+        "these constraints beat list order. world_dist_m is metres on the ground to the "
         "parsed landmark when known; it is geometry, not the answer by itself. The "
         "request is language to satisfy, not visual ground truth. Use the images and "
         "detector metadata together. The middle token of each CANDIDATE_ID is the detector "
@@ -575,8 +582,9 @@ def format_sar_verifier_prompt(
         f"Parsed requested situation: {req}\n"
         f"Parsed requested landmark: {landmark or 'none'}\n"
         f"Parsed scene hint: {scene_hint or 'none'}\n"
-        "Prefer candidates whose camera contains the parsed landmark and any "
-        "place cues named in the request.\n"
+        "Prefer candidates whose camera visibly satisfies the parsed landmark, its "
+        "modifiers, and any place cues named in the request. A metadata anchor alone "
+        "does not prove that the requested landmark state is visible.\n"
         "Candidates:\n" + "\n".join(rows)
     )
 
@@ -616,11 +624,15 @@ def build_candidate_board(
     *,
     max_crops: Optional[int] = None,
     projector=None,
+    pack_cameras: bool = False,
 ) -> CandidateBoard:
     """Build bounded images for the command-conditioned shortlist."""
     ranked = candidate_evidence(command, round_, command_text)
     evidence = shortlist_for_verifier(ranked, command, command_text, projector)
-    return _assemble_board(command_text, command, round_, evidence, max_crops)
+    return _assemble_board(
+        command_text, command, round_, evidence, max_crops,
+        pack_cameras=pack_cameras,
+    )
 
 
 def _assemble_board(
@@ -973,7 +985,8 @@ def select_sar_candidate(
                 "valid_model_output",
                 raw_output,
                 metrics,
-                board.prompt,
+                getattr(verifier, "last_prompt", board.prompt),
+                tuple(board.images),
             )
         except Exception as exc:
             metrics = _verifier_metrics(verifier, board)

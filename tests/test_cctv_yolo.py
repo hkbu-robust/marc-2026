@@ -17,7 +17,6 @@ from marc_agent.perception.bundle_paths import STAGE1_CCTV_CONTRACT, STAGE1_CCTV
 from marc_agent.perception.cctv_yolo import (
     CctvYoloDetector,
     RuntimeContract,
-    _letterbox_imgsz,
     _pad_box,
     _resolve_device,
     detections_to_candidates,
@@ -202,8 +201,9 @@ class CctvYoloTests(unittest.TestCase):
         detector.model = object()
         detector.names = {8: "pencilcase"}
 
-        def fake_predict(rgb, *, confidence=None, **_kwargs):
+        def fake_predict(rgb, *, confidence=None, imgsz=None, **_kwargs):
             self.assertLess(confidence, detector.contract.confidence)
+            self.assertEqual(320, imgsz)
             return [("pencilcase", 0.4, (5.0, 6.0, 15.0, 18.0))]
 
         detector._predict_frame = fake_predict
@@ -228,6 +228,32 @@ class CctvYoloTests(unittest.TestCase):
         self.assertEqual("pencilcase", extra[0].class_name)
         self.assertEqual("rig_3_b", extra[0].camera_id)
         self.assertGreaterEqual(extra[0].bbox_xyxy[0], 5.0)
+
+    def test_landmark_crop_keeps_similar_mission_class_as_visual_proposal(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.model = object()
+        detector.names = {}
+        detector._predict_frame = Mock(
+            return_value=[("disposable_cup", 0.06, (5.0, 6.0, 15.0, 18.0))]
+        )
+        frame = CctvFrame(
+            "cam", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)
+        )
+        bench = ObjectCandidate(
+            "cam:bench:0",
+            "bench",
+            (100.0, 200.0, 400.0, 400.0),
+            0.9,
+            "cam",
+            (640, 480),
+        )
+
+        extra = detector.refine_around_landmarks(
+            {"cam": frame}, [bench], "tumbler", frozenset({"bench"})
+        )
+
+        self.assertEqual(["disposable_cup"], [item.class_name for item in extra])
 
     def test_object_refine_crops_every_bench_on_cameras_missing_target(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
@@ -493,11 +519,6 @@ class CctvYoloTests(unittest.TestCase):
     def test_pad_box_uses_box_size_not_frame_size(self):
         padded = _pad_box((100.0, 200.0, 200.0, 300.0), (1920.0, 1080.0))
         self.assertEqual((85.0, 185.0, 215.0, 315.0), padded)
-
-    def test_letterbox_imgsz_caps_refine_crops(self):
-        self.assertEqual(224, _letterbox_imgsz(200, 180, cap=640))
-        self.assertEqual(640, _letterbox_imgsz(800, 800, cap=640))
-        self.assertEqual(1920, _letterbox_imgsz(1920, 1080, cap=1920))
 
     def test_small_crop_predict_uses_capped_imgsz(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)

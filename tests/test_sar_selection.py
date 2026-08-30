@@ -1153,6 +1153,7 @@ class SarSelectionTests(unittest.TestCase):
             camera_ids=["rig_a"],
         )
         board = build_candidate_board(text, command, round_)
+        self.assertIn("toppled bicycle is not an upright bicycle", board.prompt)
         self.assertLess(
             board.candidate_ids.index("rig_a:person_lying_down:0"),
             board.candidate_ids.index("rig_a:person_walking:0"),

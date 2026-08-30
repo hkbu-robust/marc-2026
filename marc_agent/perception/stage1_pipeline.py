@@ -610,7 +610,9 @@ def _grounding_payload(
     )
     submitted_relation = relation if relation is not None else parsed.relation
     if submitted_relation is None and implied_anchor:
-        submitted_relation = Relation.NEAR
+        submitted_relation = (
+            Relation.BESIDE if parsed.scene_hint == "park" else Relation.NEAR
+        )
     return _grounding_result_cls()(
         camera_id=camera_id,
         target_type=parsed.target_type,
@@ -651,7 +653,9 @@ def _compose_person(
         person.camera_id,
         person.bbox_xyxy,
         anchor.bbox_xyxy if anchor is not None else None,
-        relation=projection_relation(parsed, candidates.command_text),
+        relation=projection_relation(
+            parsed, candidates.command_text, person.pose_class
+        ),
         support_class=anchor.class_name if anchor is not None else None,
         pose_class=person.pose_class,
     )

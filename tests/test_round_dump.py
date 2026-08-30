@@ -6,13 +6,16 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+from PIL import Image
 
 from marc_agent.command_parser import Intent, ParsedCommand, Relation
+from marc_agent.perception.object_selection import ObjectSelection
 from marc_agent.perception.round_dump import dump_stage_round
 from marc_agent.perception.stage1_pipeline import Stage1CandidateResult, Stage1RoundResult
 from marc_agent.types import CctvDetectionRound, CctvFrame, ObjectCandidate
@@ -100,6 +103,33 @@ class RoundDumpTests(unittest.TestCase):
             with patch.dict(os.environ, {"MARC_ROUND_DUMP": "1"}, clear=False):
                 dump_stage_round(out, round_result)
             self.assertFalse(leftover.exists())
+
+    def test_writes_actual_qwen_prompt_reply_and_evidence_board(self):
+        result = _round_result()
+        target = result.candidates.detections.objects[0]
+        image = Image.fromarray(result.candidates.detections.frames["cam1"].rgb)
+        selection = ObjectSelection(
+            target,
+            None,
+            1.0,
+            method="qwen_remote",
+            raw_output=target.candidate_id,
+            prompt="Cached all-camera scene reference:\ncam1: red mug",
+            evidence_images=(image,),
+        )
+        result = replace(
+            result,
+            candidates=replace(result.candidates, object_selection=selection),
+            method="qwen_remote",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "stage1_001"
+            with patch.dict(os.environ, {"MARC_ROUND_DUMP": "1"}, clear=False):
+                dump_stage_round(out, result)
+            transcript = (out / "qwen.txt").read_text(encoding="utf-8")
+            self.assertIn("Cached all-camera scene reference", transcript)
+            self.assertIn(target.candidate_id, transcript)
+            self.assertTrue((out / "qwen_object_01.png").is_file())
 
 
 if __name__ == "__main__":

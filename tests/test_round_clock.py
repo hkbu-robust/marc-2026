@@ -223,7 +223,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
 
             def __call__(self, _board):
                 calls.append("selection")
-                return "rig_a:mug:1|rig_a:picnic_table:1"
+                return "rig_a:mug:1"
 
         result = run_stage1_candidate_pipeline(
             _Now(1.0),

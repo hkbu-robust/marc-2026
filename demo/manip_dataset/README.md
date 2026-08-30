@@ -5,7 +5,7 @@ Two client profiles talk to the same sim (`bash simulation-platform/marc.sh mani
 | Profile | Service | What it is for |
 |---|---|---|
 | **`manip-pick`** | `agent-manip-pick` | Test GraspGen-X (**G**) or wrist-YOLO (**H**) grip + basket drop. No HDF5. |
-| `tools` | `agent-manip-probe` | Record OpenVLA demos (HDF5). Manual grasp + **P** place. |
+| `tools` | `agent-manip-probe` | Record OpenVLA RLDS source + GraspGenX grasp captures. Manual grasp + **P** place. |
 
 ## GraspGen-X pick tester (no dataset)
 
@@ -31,7 +31,8 @@ Dockerfile/image changes still need `--build`. If a previous build is stuck on
 ## Dataset collector
 
 Keyboard-driven demonstration collector against the MARC **manip-trainer** profile.
-Produces raw HDF5 episodes for later OpenVLA LoRA fine-tuning.
+Produces raw HDF5 episodes for OpenVLA and records the successful/failed EE grasp
+pose needed to label later GraspGenX data.
 
 ## Run (dataset collector)
 
@@ -211,7 +212,33 @@ python3 -m manip_dataset.to_rlds \
 `--camera auto` exports each episode's recorded `primary_camera`; pass `base` or `gripper`
 to force a view (it falls back to the other one if the requested view is absent).
 
-Produces `episodes/episode_XXXX.npz`, `manifest.json`, and `dataset_statistics.json` nested under `marc_pnp` with OpenVLA `action.{q01,q99,min,max,mean,std,mask}` (gripper `mask=false`). Point LoRA fine-tuning at `unnorm_key=marc_pnp` so decode uses the same bounds as inference. This repo does not run training.
+Produces `episodes/episode_XXXX.npz`, `manifest.json`,
+`dataset_statistics.json`, and a self-contained `marc_pnp_dataset_builder.py`.
+Materialize the actual TFDS/RLDS dataset from an OpenVLA environment:
+
+```bash
+python datasets/marc_pnp_rlds/marc_pnp_dataset_builder.py \
+  --manual-dir datasets/marc_pnp_rlds \
+  --data-dir datasets/tfds
+```
+
+Register `marc_pnp:1.0.0` with OpenVLA using image key `image`, state key
+`state`, language key `language_instruction`, and `unnorm_key=marc_pnp` so
+decode uses the same action bounds.
+
+## GraspGenX capture boundary
+
+Each success and failure now stores `grasp_capture` in `meta.json`: the first
+latched-grasp (or final attempted) EE pose in `arm_base`, outcome, and gripper.
+This preserves the demonstrated grasp without deriving yaw from depth.
+
+It is intentionally **not** labeled as a train-ready GraspGenX dataset yet.
+The upstream GraspGenX loader additionally requires the exact object mesh and
+an object-relative 4x4 grasp transform. The manipulation API exposes neither
+the spawned object's mesh path nor its exact pose, so manufacturing that
+transform from YOLO/depth would train on the same unreliable estimate this
+dataset is meant to replace. Join the recorded arm-base grasp pose to an exact
+trainer-side object pose/mesh export before running GraspGenX training.
 
 `language_instruction` is pick-only (`"pick up the tumbler"`). Place (`P`) is still used as a keep-filter but is not in the action labels, so the text does not mention the basket.
 

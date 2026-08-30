@@ -1,8 +1,23 @@
-# CCTV → Qwen2-VL instruction set
+# CCTV → Qwen3-VL instruction set
 
 Host-side converter. **Does not** start Isaac. `dataset-gen` writes detector GT
 (`scene_XXXXX/{camera}.png` + `.json`); this turns that into chat turns for
-Qwen2-VL-Instruct / LLaMA-Factory.
+Qwen3-VL-8B-Instruct / LLaMA-Factory.
+
+Recommended one-shot profile (420 isolated scenes by default, 30 balanced
+cycles of every SAR recipe, then strict export):
+
+```bash
+bash simulation-platform/marc.sh qwen-dataset-gen
+```
+
+Ready JSONL and its coverage report are written to
+`trainer_output/qwen3vl_lora/`; raw GT stays separately in
+`trainer_output/qwen3vl_gt/`. Override the size with
+`QWEN_DATASET_SCENES=840`. The export exits nonzero and lists missing object,
+landmark, relation, SAR-recipe, situation, or camera coverage instead of
+silently producing an incomplete fine-tuning set. Re-run the same command to
+append fresh scenes until the report is complete.
 
 Generate with recipe-driven SAR scenes plus object copies (4–6,
 `long_umbrella` / `master_chef_can` / `wood_block` skipped, ~35% of
@@ -40,14 +55,29 @@ python3 demo/vlm_dataset/cctv_gt_to_qwen.py \
   --out trainer_output/qwen2vl_cctv
 ```
 
-The converter writes **separate** JSONL files so a Qwen LoRA is not trained on
-two grammars:
+The converter writes separate JSONL files so SAR and object validation remain
+inspectable, but both use the production finite-board format and belong in the
+same Qwen LoRA run:
 
+- `train.jsonl` / `val.jsonl` — shuffled combined corpus (use these for LoRA)
 - `train_sar.jsonl` / `val_sar.jsonl` — SAR verifier prompt (same string as
-  runtime `format_sar_verifier_prompt`) and `{id}|{situation}`
-- `train_obj.jsonl` / `val_obj.jsonl` — unique-relation object JSON without xyz
+  runtime `format_sar_verifier_prompt`) and the runtime `Pxx` answer token
+- `train_obj.jsonl` / `val_obj.jsonl` — packed annotated object board and exact
+  `TARGET_ID`
+- `dataset_info.json` — LLaMA-Factory registrations for `marc_qwen_train` and
+  `marc_qwen_val`; `coverage.json` retains the generator coverage report
 
-Fine-tune the SAR LoRA on the SAR files only. A camera with a recipe scene but
+Start LoRA training from the repo root (the optional argument is the dataset folder):
+
+```bash
+training/train_qwen_lora.sh trainer_output/qwen3vl_lora
+```
+
+The script defaults to the local model used by `useful-commands/vllm launch`.
+Override it with `MARC_QWEN_MODEL_DIR` and the output with
+`QWEN_LORA_OUTPUT_DIR`.
+
+Fine-tune on both training files. A camera with a recipe scene but
 no recipe target in frame emits **no** SAR row (walkers-only frames are not
 trained as “find the climber”). If GT `support_class` names a landmark that is
 not within 2.5 m XY, those GT fields are ignored and geometry is used.
@@ -56,8 +86,8 @@ The converter prints `hard=` / `hard_frac=` (same-class object clones that
 still uniquely identify), SAR situation counts, and per-class histograms.
 
 SAR rows use the R03 pose×support matrix (`marc_agent.perception.situation_rules`,
-version 2026.1). Assistant text is **only** `{camera_id}:{pose_class}:{n}|{situation}`
-(no coordinates). Picnic-table lying/prone is `abnormal`; crouch is `abnormal`
+version 2026.1). Assistant text is **only** the numbered runtime board alias
+`Pxx` (no coordinates or explanation). Picnic-table lying/prone is `abnormal`; crouch is `abnormal`
 everywhere; unlabeled ground `person_lying_down` (no `surface_class`) is
 dropped; `person_prone` is always `accident`. Parking-proxy frames
 (`sar06` / `sar07` / `sarH6`) still emit a SAR row when the target is in view.

@@ -94,6 +94,9 @@ class ToRldsStatsTests(unittest.TestCase):
             self.assertEqual((4, 7), npz["action"].shape)
             self.assertEqual((4, 7), npz["state"].shape)
             self.assertEqual((4, 4), npz["ee_quat"].shape)
+            self.assertTrue(os.path.isfile(
+                os.path.join(out, "marc_pnp_dataset_builder.py")
+            ))
 
 
 if __name__ == "__main__":
