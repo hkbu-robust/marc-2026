@@ -1515,7 +1515,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("cam:tumbler:1", selected.target.candidate_id)
         self.assertEqual(1, len(calls))
 
-    def test_remote_weak_parking_choice_is_not_overridden_by_geometry(self):
+    def test_remote_weak_parking_override_keeps_strong_geometry(self):
         text = "I dropped my tumbler as I got out of my car in the parking lot."
         parsed = parse_command(text, expected_intent=Intent.FIND)
         round_ = CctvDetectionRound(
@@ -1540,8 +1540,8 @@ class ObjectSelectionTests(unittest.TestCase):
             parsed, round_, command_text=text, verifier=Verifier()
         )
 
-        self.assertEqual("cam:tumbler:1", selected.target.candidate_id)
-        self.assertEqual("cam:sports_car:0", selected.anchor.candidate_id)
+        self.assertEqual("cam:tumbler:0", selected.target.candidate_id)
+        self.assertEqual("cam:police_car:0", selected.anchor.candidate_id)
 
     def test_remote_on_request_keeps_strict_support_over_copresence(self):
         text = "Find the tumbler on the bench."
