@@ -16,7 +16,11 @@ from PIL import Image
 
 from marc_agent.command_parser import Intent, ParsedCommand, Relation
 from marc_agent.perception.object_selection import ObjectSelection
-from marc_agent.perception.round_dump import dump_stage_artifacts, dump_stage_round
+from marc_agent.perception.round_dump import (
+    dump_nearfield_frame,
+    dump_stage_artifacts,
+    dump_stage_round,
+)
 from marc_agent.perception.stage1_pipeline import Stage1CandidateResult, Stage1RoundResult
 from marc_agent.types import CctvDetectionRound, CctvFrame, ObjectCandidate
 
@@ -94,6 +98,12 @@ class RoundDumpTests(unittest.TestCase):
             with patch("PIL.Image.Image.save", side_effect=OSError("disk full")):
                 path = dump_stage_artifacts(Path(tmp) / "round-001", _round_result())
             self.assertIsNone(path)
+
+    def test_nearfield_frame_write_failure_is_fail_open(self):
+        rgb = np.zeros((4, 4, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("PIL.Image.Image.save", side_effect=OSError("disk full")):
+                dump_nearfield_frame(Path(tmp), "scan.png", rgb)
 
     def test_writes_command_overlay_and_detections(self):
         round_result = _round_result()

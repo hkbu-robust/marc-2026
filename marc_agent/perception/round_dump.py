@@ -276,8 +276,11 @@ def _qwen_transcript(object_sel, sar) -> str:
 def dump_json(out_dir: Path, name: str, payload) -> None:
     if not dump_enabled() or out_dir is None:
         return
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(out_dir / name, payload)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(out_dir / name, payload)
+    except OSError as exc:
+        log.warning("[round-dump] could not write %s: %s", out_dir / name, exc)
 
 
 def dump_nearfield_frame(
@@ -294,14 +297,16 @@ def dump_nearfield_frame(
         from PIL import Image
     except ImportError:
         return
-    dest = out_dir / "nearfield"
-    dest.mkdir(parents=True, exist_ok=True)
-    if bbox is not None:
-        h, w = rgb.shape[:2]
-        image = _draw_boxes(rgb, w, h, [(tuple(bbox), "red", label or "yolo")])
-    else:
-        image = Image.fromarray(rgb, mode="RGB")
-    image.save(dest / name)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if bbox is not None:
+            h, w = rgb.shape[:2]
+            image = _draw_boxes(rgb, w, h, [(tuple(bbox), "red", label or "yolo")])
+        else:
+            image = Image.fromarray(rgb, mode="RGB")
+        image.save(out_dir / name)
+    except OSError as exc:
+        log.warning("[round-dump] could not write %s: %s", out_dir / name, exc)
 
 
 def maybe_dump_cctv_round(round_: CctvDetectionRound, *, round_num: int) -> Path | None:

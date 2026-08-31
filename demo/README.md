@@ -83,7 +83,6 @@ Stage 1 candidate settings:
 | `MARC_QWEN_WALL_TIMEOUT_S` | `12` | Per-attempt HTTP wait cap; retries once when remaining budget covers two attempts |
 | `MARC_QWEN_MAX_NEW_TOKENS` | `48` | Local and remote generation budget; 8 tokens truncates `TARGET_ID\|ANCHOR_ID` |
 | `MARC_QWEN_MAX_CROPS` | `12` | Per-person crops; annotated camera views still cover every candidate |
-| `MARC_STAGE1_METRICS_PATH` | `artifacts/stage1_rounds.jsonl` | Per-round candidate counts, latency, selection method, and failures |
 
 ### Qwen on the demo host
 

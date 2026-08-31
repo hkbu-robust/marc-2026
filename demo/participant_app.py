@@ -846,6 +846,7 @@ def main():
         log_qwen_startup_status()
         DemoParticipant().run()
     except BaseException as exc:
+        log.exception("Participant terminated")
         experiment.finish("failed", error_type=type(exc).__name__)
         raise
     else:
