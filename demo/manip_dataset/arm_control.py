@@ -682,6 +682,7 @@ class ArmTeleop:
         joint_step_rad: Optional[float] = None,
         control_rate_hz: Optional[float] = None,
         preserve_current_orientation: bool = False,
+        max_xy_error_m: Optional[float] = None,
     ) -> bool:
         """Continuously track one Cartesian line without stop/start corrections."""
         q0 = read_arm_q(self._client)
@@ -737,7 +738,9 @@ class ArmTeleop:
             _env_float(
                 "MARC_GRASP_LINE_MAX_XY_ERROR_M",
                 DEFAULT_GRASP_LINE_MAX_XY_ERROR_M,
-            ),
+            )
+            if max_xy_error_m is None
+            else float(max_xy_error_m),
         )
         rate_hz = float(self.cfg.rate_hz)
         if control_rate_hz is not None:
@@ -1165,6 +1168,13 @@ class ArmTeleop:
                 cart_step_m=staging_cart_step,
                 joint_step_rad=staging_joint_step,
                 control_rate_hz=transit_rate_hz,
+                # The descent is still a full standoff behind the object. The
+                # copied experimental side profiles may bow slightly more than
+                # the validated tumbler trajectory at full extension, but must
+                # settle before the guarded wrist fold and final insertion.
+                max_xy_error_m=(
+                    None if grasp_profile.physically_validated else 0.025
+                ),
             ):
                 return False
             self._log(
