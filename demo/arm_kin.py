@@ -140,6 +140,14 @@ class PlacoArmKinematics:
         self._set_q(q_rad)
         return self._robot.get_T_world_frame(self._target)
 
+    def frame_positions(self, q_rad: np.ndarray, frame_names) -> np.ndarray:
+        """XYZ origins of named frames, used for conservative swept-envelope checks."""
+        self._set_q(q_rad)
+        return np.asarray(
+            [self._robot.get_T_world_frame(name)[:3, 3] for name in frame_names],
+            dtype=np.float64,
+        )
+
     def jacobian(self, q_rad: np.ndarray) -> np.ndarray:
         """6x6 Jacobian for the 6 arm joints, in local_world_aligned frame.
 

@@ -108,22 +108,17 @@ class ArmPickGripTests(unittest.TestCase):
         self.assertFalse(descend_should_stop("grasp", "move", lambda: True))
         self.assertFalse(descend_should_stop("descend", "move", None))
 
-    def test_place_in_basket_is_scoop_not_tuck(self):
+    def test_place_in_basket_tucks_before_rotating(self):
         path = os.path.join(_ROOT, "demo", "manip_dataset", "arm_control.py")
         with open(path, encoding="utf-8") as stream:
             src = stream.read()
-        self.assertIn('n += self._joint_move("rotate over basket", q_over, on_step, speed)', src)
-        self.assertIn("q_over[0] +=", src)
-        self.assertNotIn("tuck over shoulder", src)
-        self.assertNotIn("PLACE_TUCK_Q", src)
-        self.assertNotIn(
-            'n += self._joint_move("fold to ready", q_home, on_step, speed, wrap=True)',
-            src,
-        )
+        self.assertIn('("tuck inside chassis", q_tuck, False)', src)
+        self.assertIn('("rotate tucked over basket", q_over, False)', src)
+        self.assertIn("_place_sweep_radius", src)
         hold = src.split("def place_in_basket", 1)[1]
         self.assertLess(
             hold.find('_grip_segment("hold"'),
-            hold.find('n += self._joint_move("raise to carry height"'),
+            hold.find('("raise to carry height", q_lift, False)'),
         )
 
     def test_seed_closed_grip_keeps_live_squeeze(self):
@@ -168,7 +163,7 @@ class ArmPickGripTests(unittest.TestCase):
         self.assertIsNone(z)
         self.assertTrue(any("wrist z skipped" in line for line in logs))
 
-    def test_scoop_place_stays_in_joint_limits(self):
+    def test_tucked_place_stays_in_joint_limits_and_chassis_envelope(self):
         try:
             import placo  # noqa: F401
             from arm_pick import load_params
@@ -181,15 +176,23 @@ class ArmPickGripTests(unittest.TestCase):
         arm._place_params = load_params()
         poses = arm._place_poses()
         if poses is None:
-            self.fail("scoop basket IK rejected; live place would keep holding")
-        q_lift, q_over, q_drop = poses
+            self.fail("tucked basket IK rejected; live place would keep holding")
+        q_lift, q_tuck, q_over, q_drop = poses
         import numpy as np
         for q in poses:
             q = np.asarray(q, dtype=float)
             self.assertTrue(np.all(q >= ARM_JOINT_LOWER - 1e-6), q)
             self.assertTrue(np.all(q <= ARM_JOINT_UPPER + 1e-6), q)
-        self.assertAlmostEqual(float(q_over[0] - q_lift[0]), 3.1416, places=3)
-        self.assertAlmostEqual(float(q_over[4]), float(q_lift[4]), places=5)
+        self.assertAlmostEqual(float(q_over[0] - q_tuck[0]), 3.1416, places=3)
+        self.assertAlmostEqual(float(q_over[4]), float(q_tuck[4]), places=5)
+        self.assertLessEqual(
+            arm._place_sweep_radius(q_tuck), arm.cfg.place_sweep_radius_m
+        )
+        for fraction in np.linspace(0.0, 1.0, 37):
+            q_sweep = q_tuck + fraction * (q_over - q_tuck)
+            self.assertLessEqual(
+                arm._place_sweep_radius(q_sweep), arm.cfg.place_sweep_radius_m
+            )
         ee_drop = arm.kin.fk(q_drop)[:3, 3]
         self.assertAlmostEqual(
             float(arm._place_params["place_fwd"]), float(ee_drop[0]), places=2
