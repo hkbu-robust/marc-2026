@@ -55,8 +55,9 @@ pad-midpoint bias and accept stable centres through 0.68 m; lying profiles retai
 the 0.58 m envelope.
 
 Class routing is centralized in `grasp_profiles.py`. Mug, cola can, juice,
-disposable cup, umbrella, and sunblock each have copied `lying_<class>` and
-`upright_<class>` profiles. Tissue and pencilcase always use their lying profile.
+disposable cup, and umbrella each have copied `lying_<class>` and
+`upright_<class>` profiles. Sunblock always uses `upright_sunblock`, regardless
+of observed posture. Tissue and pencilcase always use their lying profile.
 An upright cracker box uses `upright_cracker_box`, copied from the lying-tumbler
 motion. A flat cracker box resolves to `lying_cracker_box` with `flip_required`
 and fails before arm movement until a physical flip-and-reacquire trajectory is

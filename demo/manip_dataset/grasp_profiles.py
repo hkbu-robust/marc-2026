@@ -218,6 +218,12 @@ _ALWAYS_LYING_PROFILES = {
     "tissue": LYING_TISSUE,
 }
 
+_ALWAYS_UPRIGHT_PROFILES = {
+    # Sunblock is narrow enough in either resting posture for the side-style
+    # handoff; avoid the copied overhead descent entirely.
+    "sunblock": UPRIGHT_SUNBLOCK,
+}
+
 
 def _canonical_name(name) -> str:
     normalized = (
@@ -254,6 +260,8 @@ def is_upright_tumbler(name, bbox, min_aspect: float = 1.20) -> bool:
 def uses_upright_side_profile(name, bbox, min_aspect: float = 1.20) -> bool:
     """Whether this class and observed posture use the farther side workspace."""
     canonical = _canonical_name(name)
+    if canonical in _ALWAYS_UPRIGHT_PROFILES:
+        return True
     return (
         canonical in _POSTURE_PROFILES
         and bbox_xyxy_is_upright(bbox, min_aspect=min_aspect)
@@ -269,6 +277,10 @@ def resolve_grasp_profile(target) -> Optional[GraspProfile]:
     always_lying = _ALWAYS_LYING_PROFILES.get(name)
     if always_lying is not None:
         return always_lying
+
+    always_upright = _ALWAYS_UPRIGHT_PROFILES.get(name)
+    if always_upright is not None:
+        return always_upright
 
     if name == "cracker_box":
         if posture == "lying":
