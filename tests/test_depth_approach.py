@@ -83,6 +83,15 @@ class DepthApproachOverrunTests(unittest.TestCase):
         self.assertFalse(ctrl.active)
         self.assertFalse(ctrl._overrun)
 
+    def test_pick_boundary_does_not_require_pixel_perfect_center(self):
+        m = dict(lat_n_obj=1, fwd=0.15, d_obj=0.33, lat_err=0.09, is_new=True)
+        ctrl = self._ctrl(measure=m)
+
+        self.assertFalse(ctrl.tick())
+        self.assertFalse(ctrl.tick())
+        self.assertTrue(ctrl.tick())
+        self.assertFalse(ctrl.active)
+
     def test_command_stops_before_object_reaches_bottom_of_frame(self):
         ctrl = self._ctrl(frame_bottom_margin=0.10)
         ctrl._phase = "drive"

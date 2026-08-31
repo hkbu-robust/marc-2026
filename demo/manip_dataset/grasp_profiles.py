@@ -177,7 +177,12 @@ def _copied_profile(
 # marking all copies validated when only the tumbler has completed placement.
 LYING_COLA_CAN = _copied_profile(LYING_TUMBLER, "lying_cola_can")
 UPRIGHT_COLA_CAN = _copied_profile(TUMBLER_UPRIGHT, "upright_cola_can")
-LYING_JUICE = _copied_profile(LYING_TUMBLER, "lying_juice")
+LYING_JUICE = replace(
+    _copied_profile(LYING_TUMBLER, "lying_juice"),
+    physically_validated=True,
+    floor_clearance_m=0.015,
+    contact_depth_fraction=0.50,
+)
 UPRIGHT_JUICE = _copied_profile(TUMBLER_UPRIGHT, "upright_juice")
 LYING_UMBRELLA = _copied_profile(LYING_TUMBLER, "lying_umbrella")
 UPRIGHT_UMBRELLA = _copied_profile(TUMBLER_UPRIGHT, "upright_umbrella")
@@ -242,22 +247,18 @@ UPRIGHT_PENCILCASE = replace(
     pad_lateral_bias_m=0.0,
     side_final_insertion_m=0.10,
 )
-# Cracker-box posture is intentionally inverted: standing boxes use the
-# lying-tumbler overhead motion; flat boxes use the sunblock floor-load motion.
-UPRIGHT_CRACKER_BOX = _copied_profile(
-    LYING_TUMBLER, "upright_cracker_box"
-)
+# Both cracker-box postures use the narrow-axis overhead motion. A flat box can
+# present a 146 mm side width, beyond the 140 mm gripper aperture, so the
+# sunblock's fixed-axis floor load cannot be robust across yaw.
 UPRIGHT_CRACKER_BOX = replace(
-    UPRIGHT_CRACKER_BOX, physically_validated=True
+    _copied_profile(LYING_TUMBLER, "upright_cracker_box"),
+    physically_validated=True,
 )
 LYING_CRACKER_BOX = replace(
-    UPRIGHT_SUNBLOCK,
-    name="lying_cracker_box",
-    physically_validated=False,
-    side_final_insertion_m=0.04,
-    side_standoff_m=0.03,
-    pad_lateral_bias_m=0.0,
-    max_cloud_center_shift_m=0.015,
+    _copied_profile(LYING_TUMBLER, "lying_cracker_box"),
+    stage_clearance_m=0.30,
+    floor_clearance_m=0.015,
+    contact_depth_fraction=0.50,
 )
 
 

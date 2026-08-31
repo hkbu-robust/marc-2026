@@ -144,7 +144,7 @@ class GraspGenXStagingTests(unittest.TestCase):
         self.assertEqual(0.0, profile.max_cloud_center_shift_m)
         self.assertEqual(0.03, profile.wrist_max_correction_m)
 
-    def test_upright_tumbler_selects_experimental_side_profile(self):
+    def test_upright_tumbler_selects_validated_side_profile(self):
         upright = SimpleNamespace(
             name="tumbler", bbox_xyxy=(10.0, 20.0, 60.0, 120.0)
         )
@@ -156,7 +156,7 @@ class GraspGenXStagingTests(unittest.TestCase):
         profile = resolve_grasp_profile(upright)
         self.assertIs(profile, TUMBLER_UPRIGHT)
         self.assertEqual("tumbler_upright", profile.name)
-        self.assertFalse(profile.physically_validated)
+        self.assertTrue(profile.physically_validated)
         self.assertEqual("front_side", profile.approach_style)
         self.assertEqual(0.10, profile.stage_back_m)
         self.assertEqual((0.32, 0.68), (profile.min_fwd_m, profile.max_fwd_m))
@@ -363,7 +363,7 @@ class GraspGenXStagingTests(unittest.TestCase):
         self.assertEqual(20.0, contact[3]["control_rate_hz"])
         self.assertTrue(
             any(
-                "grasp profile=tumbler_upright status=experimental" in msg
+                "grasp profile=tumbler_upright status=validated" in msg
                 for msg in messages
             )
         )
@@ -394,7 +394,7 @@ class GraspGenXStagingTests(unittest.TestCase):
         cloud = _cloud()
         cloud[:, 0] += 0.06
         target = SimpleNamespace(
-            fwd=0.40,
+            fwd=0.50,
             lat=0.0,
             z=-0.40,
             valid=True,
@@ -410,7 +410,7 @@ class GraspGenXStagingTests(unittest.TestCase):
                 np.array([0.9]),
             ),
             target_observer=lambda: SimpleNamespace(
-                fwd=0.40, lat=0.0, z=-0.40, valid=True
+                fwd=0.50, lat=0.0, z=-0.40, valid=True
             ),
             points_fn=lambda _target, client=None: cloud,
             grasp_poll=1,

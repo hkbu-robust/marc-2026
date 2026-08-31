@@ -566,23 +566,24 @@ class DemoParticipant:
                     approach_controller.last_failure,
                 )
             target = approach_target or nearfield.acquire(reveal, deadline())
-            for _ in range(5):
-                c.send_cmd_vel(0.0, 0.0)
-                c.sleep(0.1)
-            if target.valid:
-                stable = stable_pick_target(
-                    nearfield,
-                    target.name or self._state.target_type or "",
-                    log=log.info,
-                    posture_hint=approach_target,
-                )
-                if stable is None:
-                    stable_consensus = False
-                    target.valid = False
-                    target.reason = "unstable_localization"
-                else:
-                    stable_consensus = True
-                    target = stable
+            with StationaryBase(c, log=log.warning, yaw_kp=0.0):
+                for _ in range(5):
+                    c.send_cmd_vel(0.0, 0.0)
+                    c.sleep(0.1)
+                if target.valid:
+                    stable = stable_pick_target(
+                        nearfield,
+                        target.name or self._state.target_type or "",
+                        log=log.info,
+                        posture_hint=approach_target,
+                    )
+                    if stable is None:
+                        stable_consensus = False
+                        target.valid = False
+                        target.reason = "unstable_localization"
+                    else:
+                        stable_consensus = True
+                        target = stable
             self._experiment.event(
                 "stage2.nearfield.completed",
                 stage="stage2",
@@ -624,6 +625,7 @@ class DemoParticipant:
                         nearfield,
                         target.name or self._state.target_type or "",
                         log=log.info,
+                        require_reach=False,
                     )
 
                 if isinstance(pick_rt, StagedGraspGenXPickRuntime):
@@ -659,7 +661,9 @@ class DemoParticipant:
                 # Zero cmd_vel does not stop gravity-driven rolling on slopes. Keep
                 # the chassis anchored for staging, inference, contact, and lift.
                 manipulation_started = time.perf_counter()
-                with StationaryBase(c, log=log.warning):
+                # Match the profile-pick flow: resist rolling without disturbing
+                # the camera-composed yaw during arm motion.
+                with StationaryBase(c, log=log.warning, yaw_kp=0.0):
                     pick = pick_rt.run(
                         target,
                         deadline=deadline,
@@ -710,7 +714,7 @@ class DemoParticipant:
             )
             if dropped_target is None:
                 return False
-            with StationaryBase(c, log=log.warning):
+            with StationaryBase(c, log=log.warning, yaw_kp=0.0):
                 recovered = pick_rt.run(
                     dropped_target,
                     deadline=deadline,
