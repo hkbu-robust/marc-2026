@@ -67,8 +67,10 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       YOLO_OFFLINE: "1"
+      MARC_EXPERIMENTS_DIR: "/agent/experiments"
+      MARC_RUN_MODE: "practice"
     volumes:
-      - "${MARC_ARTIFACTS_DIR:-../artifacts}:/agent/demo/artifacts"
+      - "${MARC_EXPERIMENTS_HOST_DIR:-../experiments}:/agent/experiments"
       - "${MARC_OPENVLA_MODEL_DIR:-../models/runtime/openvla}:/agent/models/runtime/openvla:ro"
     # (Optional) To use a scenario file for obstacle injection, mount it and set MARC_SCENARIO_FILE:
     #   add  MARC_SCENARIO_FILE: "/agent/my_scenario.yaml"  to environment

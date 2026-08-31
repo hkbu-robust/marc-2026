@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -652,11 +653,17 @@ def unload_detector() -> None:
 
 def detect_frames_with_yolo(
     frames: dict[str, CctvFrame],
-) -> tuple[list[ObjectCandidate], list[PersonCandidate]]:
+) -> tuple[list[ObjectCandidate], list[PersonCandidate], float, float]:
     global _detector
     if _detector is None:
         _detector = CctvYoloDetector()
-    return _detector.detect(frames)
+    load_started = time.perf_counter()
+    _detector.load()
+    load_ms = (time.perf_counter() - load_started) * 1000.0
+    inference_started = time.perf_counter()
+    objects, people = _detector.detect(frames)
+    inference_ms = (time.perf_counter() - inference_started) * 1000.0
+    return objects, people, load_ms, inference_ms
 
 
 def detector_can_emit(class_name: str) -> bool:

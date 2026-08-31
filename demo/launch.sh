@@ -40,6 +40,8 @@ if [ -z "${MARC_TOKEN:-}" ]; then
 fi
 export MARC_TEAM_ID="${USER_ID}"
 export MARC_TOKEN
+export MARC_EXPERIMENTS_DIR="${MARC_EXPERIMENTS_DIR:-${SDK_ROOT}/experiments}"
+export MARC_RUN_MODE="${MARC_RUN_MODE:-practice}"
 
 # -- ROS2 environment: humble (system) or IsaacSim's built-in humble bridge --
 RUN_PY="python3"

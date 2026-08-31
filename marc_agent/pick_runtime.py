@@ -15,6 +15,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from marc_agent.experiment_log import current_experiment
+
 from marc_agent.graspgenx_policy import (
     MIN_CLOUD_POINTS,
     best_grasp,
@@ -550,6 +552,13 @@ class PickRuntime:
                     policy=policy,
                 )
             attempts = attempt
+            self._current_attempt = attempt
+            experiment = current_experiment()
+            if experiment is not None:
+                experiment.event(
+                    "stage2.manipulation.attempt.started", stage="stage2",
+                    status="started", attempt=attempt, policy=policy,
+                )
             if self._past_deadline(deadline):
                 return PickResult(
                     ok=False, reason=REASON_TIMEOUT, attempts=attempts,
@@ -568,6 +577,12 @@ class PickRuntime:
                 except Exception as exc:
                     self._emit("[pick] grasp raised: %s" % exc)
                 held = self.poll_grasping()
+                if experiment is not None:
+                    experiment.event(
+                        "stage2.manipulation.grasp_feedback", stage="stage2",
+                        status="ok" if held is True else "failed",
+                        attempt=attempt, is_grasping=held,
+                    )
                 if held is not True:
                     last_reason = REASON_NO_GRASP
                     self._emit("[pick] no positive is_grasping (got %s)" % held)
@@ -588,6 +603,12 @@ class PickRuntime:
             except Exception as exc:
                 self._emit("[pick] place raised: %s" % exc)
             basket = self.poll_basket()
+            if experiment is not None:
+                experiment.event(
+                    "stage2.manipulation.basket_feedback", stage="stage2",
+                    status="ok" if basket is True else "failed",
+                    attempt=attempt, basket_occupied=basket,
+                )
             if basket is True:
                 self._emit("[pick] basket occupied after attempt %d" % attempt)
                 return PickResult(

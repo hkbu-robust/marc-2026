@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import logging
 import os
+import time
 from types import SimpleNamespace
 from typing import Callable, Optional
 
@@ -26,6 +27,7 @@ from marc_agent.graspgenx_policy import (
     points_from_target,
 )
 from marc_agent.pick_runtime import PickRuntime
+from marc_agent.experiment_log import current_experiment
 
 from .grasp_profiles import bbox_is_upright, resolve_grasp_profile
 from .openvla_pick import target_moved_with_gripper
@@ -622,14 +624,39 @@ def load_local_graspgenx(path: Optional[str] = None):
 
     def generate(points: np.ndarray):
         planner = (os.environ.get("MARC_GRASPGENX_PLANNER") or "graspmoe").strip()
-        grasps, conf, _tags, _obb = run_planner_on_object(
-            np.asarray(points, dtype=np.float32),
-            sampler,
-            planner=planner,
-            grasp_threshold=_env_float("MARC_GRASPGENX_THRESHOLD", -1.0),
-            num_grasps=max(16, int(_env_float("MARC_GRASPGENX_NUM_GRASPS", 64))),
-            topk_num_grasps=-1,
-        )
+        started = time.perf_counter()
+        try:
+            grasps, conf, _tags, _obb = run_planner_on_object(
+                np.asarray(points, dtype=np.float32),
+                sampler,
+                planner=planner,
+                grasp_threshold=_env_float("MARC_GRASPGENX_THRESHOLD", -1.0),
+                num_grasps=max(16, int(_env_float("MARC_GRASPGENX_NUM_GRASPS", 64))),
+                topk_num_grasps=-1,
+            )
+        except Exception as exc:
+            experiment = current_experiment()
+            if experiment is not None:
+                experiment.event(
+                    "stage2.graspgenx.generation.completed",
+                    stage="stage2",
+                    status="error",
+                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    planner=planner,
+                    point_count=len(points),
+                    error_type=type(exc).__name__,
+                )
+            raise
+        experiment = current_experiment()
+        if experiment is not None:
+            experiment.event(
+                "stage2.graspgenx.generation.completed",
+                stage="stage2",
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                planner=planner,
+                point_count=len(points),
+                grasp_count=len(grasps),
+            )
         return grasps, conf
 
     _generator = generate
@@ -664,6 +691,31 @@ class StagedGraspGenXPickRuntime(PickRuntime):
         self._visual_target_observer = visual_target_observer or target_observer
         self._points_fn = points_fn or segmented_object_points
         self._visual_grasp_verified = False
+
+    def _timed_phase(self, phase: str, operation) -> bool:
+        started = time.perf_counter()
+        try:
+            ok = bool(operation())
+        except Exception as exc:
+            experiment = current_experiment()
+            if experiment is not None:
+                experiment.event(
+                    "stage2.graspgenx.motion_phase.completed", stage="stage2",
+                    status="error", phase=phase,
+                    attempt=getattr(self, "_current_attempt", None),
+                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    error_type=type(exc).__name__,
+                )
+            raise
+        experiment = current_experiment()
+        if experiment is not None:
+            experiment.event(
+                "stage2.graspgenx.motion_phase.completed", stage="stage2",
+                status="ok" if ok else "failed", phase=phase,
+                attempt=getattr(self, "_current_attempt", None),
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+            )
+        return ok
 
     def _observe_target(self, observer=None):
         observer = observer or self._target_observer
@@ -944,9 +996,13 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             )
         stage_graspgenx = getattr(arm, "stage_for_graspgenx", None)
         if stage_graspgenx is None:
-            staged = arm.stage_for_openvla(stage_target)
+            staged = self._timed_phase(
+                "staging", lambda: arm.stage_for_openvla(stage_target)
+            )
         else:
-            staged = stage_graspgenx(stage_target, profile=profile)
+            staged = self._timed_phase(
+                "staging", lambda: stage_graspgenx(stage_target, profile=profile)
+            )
         if not staged:
             self._emit("[pick] GraspGen-X deterministic staging failed")
             return
@@ -962,7 +1018,20 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                 % (support_z, top_z, top_z + stage_clearance, stage_clearance)
             )
 
+        load_started = time.perf_counter()
         generator = self._grasp_generator or load_local_graspgenx()
+        experiment = current_experiment()
+        if experiment is not None:
+            experiment.event(
+                "stage2.graspgenx.load.completed", stage="stage2",
+                status="ok" if generator is not None else "unavailable",
+                attempt=getattr(self, "_current_attempt", None),
+                duration_ms=(time.perf_counter() - load_started) * 1000.0,
+                checkpoint_dir=(
+                    os.environ.get("MARC_GRASPGENX_WEIGHTS")
+                    or os.environ.get("GRASPGENX_CHECKPOINT_DIR")
+                ),
+            )
         if generator is None:
             self._emit("[pick] GraspGen-X unavailable in local image -- fail closed")
             return
@@ -973,6 +1042,7 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             self._emit("[pick] GraspGen-X inference failed (%s) -- fail closed" % exc)
             return
         selection_diagnostics = {}
+        selection_started = time.perf_counter()
         selected = select_topdown_contact_pose(
             raw,
             points,
@@ -999,6 +1069,24 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             force_neutral_yaw=side_profile,
             diagnostics=selection_diagnostics,
         )
+        experiment = current_experiment()
+        if experiment is not None:
+            experiment.event(
+                "stage2.graspgenx.selection.completed", stage="stage2",
+                status="ok" if selected is not None else "failed",
+                attempt=getattr(self, "_current_attempt", None),
+                duration_ms=(time.perf_counter() - selection_started) * 1000.0,
+                diagnostics=selection_diagnostics,
+                selected=(
+                    None if selected is None else {
+                        key: selected.get(key)
+                        for key in (
+                            "yaw", "width", "length", "aspect", "center_offset",
+                            "score", "n_keep", "dyolo", "directional",
+                        )
+                    }
+                ),
+            )
         if selected is None:
             self._emit(
                 "[pick] GraspGen-X produced no safe top-down contact n_pts=%d "
@@ -1227,15 +1315,13 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                 "skipping occluded camera refinement"
             )
         else:
-            if not arm.move_grasp_pose(
-                (fwd, lat, center_z),
-                yaw,
-                "ggx-center",
+            if not self._timed_phase("center", lambda: arm.move_grasp_pose(
+                (fwd, lat, center_z), yaw, "ggx-center",
                 approach_tilt_rad=approach_tilt,
                 pad_center_offset_m=pad_center_offset,
                 position_tolerance_m=center_pos_tolerance,
                 rotation_tolerance_rad=center_rot_tolerance,
-            ):
+            )):
                 return
             wrist = self._wrist_depth_refinement(
                 arm,
@@ -1309,34 +1395,30 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                 "[pick] upright deterministic handoff complete; "
                 "GraspGen-X owns final forward insertion only"
             )
-        elif not arm.move_grasp_line(
-            pregrasp,
-            yaw,
-            "ggx-pregrasp",
+        elif not self._timed_phase("pregrasp", lambda: arm.move_grasp_line(
+            pregrasp, yaw, "ggx-pregrasp",
             approach_tilt_rad=approach_tilt,
             pad_center_offset_m=pad_center_offset,
             joint_step_rad=line_joint_step,
-        ):
+        )):
             return
-        if not arm.move_grasp_line(
-            (fwd, lat, z),
-            yaw,
-            "ggx-contact",
+        if not self._timed_phase("contact", lambda: arm.move_grasp_line(
+            (fwd, lat, z), yaw, "ggx-contact",
             approach_tilt_rad=approach_tilt,
             pad_center_offset_m=pad_center_offset,
             cart_step_m=(0.002 if side_profile else None),
             joint_step_rad=line_joint_step,
             control_rate_hz=(20.0 if side_profile else None),
             preserve_current_orientation=side_profile,
-        ):
+        )):
             return
-        if not arm.stabilize_grasp_pose(
+        if not self._timed_phase("contact_settle", lambda: arm.stabilize_grasp_pose(
             "ggx-contact-settle",
             dwell_s=(profile.contact_settle_s if profile is not None else None),
             max_drift_m=(
                 profile.contact_max_drift_m if profile is not None else None
             ),
-        ):
+        )):
             return
         # GraspGen-X uses one immediate full close: no ramp and no sensor-based
         # early stop. Hold feedback is consulted only after the lift.
@@ -1348,9 +1430,13 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             ),
         )
         self._emit("[pick] GraspGen-X immediate grip close=%.3f" % close_cmd)
-        if not arm.set_grip_immediate(close_cmd):
+        if not self._timed_phase(
+            "grip_close", lambda: arm.set_grip_immediate(close_cmd)
+        ):
             return
-        if not arm.lift_for_grasp_verification():
+        if not self._timed_phase(
+            "verification_lift", arm.lift_for_grasp_verification
+        ):
             self._emit("[pick] GraspGen-X verification lift failed")
             return
 

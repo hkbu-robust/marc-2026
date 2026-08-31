@@ -30,11 +30,12 @@ def round_dir(name: str) -> Path:
 
 
 def stage1_dir(round_num: int) -> Path:
-    return round_dir(f"stage1_{int(round_num):03d}")
+    return round_dir("stage1") / f"round-{int(round_num):03d}"
 
 
-def stage2_dir() -> Path:
-    return round_dir("stage2")
+def stage2_dir(concern: Optional[str] = None) -> Path:
+    root = round_dir("stage2")
+    return root / concern if concern else root
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -145,6 +146,50 @@ def _grounding_payload(grounding) -> Optional[dict]:
     }
 
 
+def _save_qwen_artifacts(out_dir: Path, object_sel, sar) -> None:
+    qwen_bits = _qwen_transcript(object_sel, sar)
+    qwen_path = out_dir / "qwen.txt"
+    if qwen_bits:
+        _write_text(qwen_path, qwen_bits)
+    elif qwen_path.exists():
+        qwen_path.unlink()
+    for pattern in ("qwen_object_*.png", "qwen_sar_*.png"):
+        for stale in out_dir.glob(pattern):
+            stale.unlink()
+    for label, result in (("object", object_sel), ("sar", sar)):
+        for index, image in enumerate(
+            getattr(result, "evidence_images", ()) if result is not None else (),
+            start=1,
+        ):
+            image.save(out_dir / f"qwen_{label}_{index:02d}.png")
+
+
+def dump_stage_artifacts(out_dir: Path, round_result) -> Optional[Path]:
+    """Save only image/text evidence; structured facts belong in events.jsonl."""
+    if not dump_enabled():
+        return None
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        candidates = getattr(round_result, "candidates", None)
+        detections = getattr(candidates, "detections", CctvDetectionRound())
+        _save_qwen_artifacts(
+            out_dir,
+            getattr(candidates, "object_selection", None),
+            getattr(candidates, "sar_selection", None),
+        )
+        saved = save_camera_frames(
+            out_dir,
+            detections,
+            target_id=getattr(round_result, "target_id", None),
+            anchor_id=getattr(round_result, "anchor_id", None),
+        )
+    except OSError as exc:
+        log.warning("[round-dump] disabled for %s: %s", out_dir, exc)
+        return None
+    log.info("[round-dump] %s cameras=%d -> %s", out_dir.name, saved, out_dir.resolve())
+    return out_dir
+
+
 def dump_stage_round(
     out_dir: Path,
     round_result,
@@ -154,7 +199,7 @@ def dump_stage_round(
     """Write one Stage 1/2 pipeline result into ``out_dir``."""
     if not dump_enabled():
         return None
-    out_dir.mkdir(parents=True, exist_ok=True)
+    dump_stage_artifacts(out_dir, round_result)
     candidates = getattr(round_result, "candidates", None)
     command = getattr(candidates, "command_text", "") if candidates is not None else ""
     parsed = getattr(candidates, "parsed", None) if candidates is not None else None
@@ -203,32 +248,9 @@ def dump_stage_round(
             "requested_situation": sar.requested_situation,
             "selected_id": sar.selected.candidate_id if sar.selected else None,
         }
-    qwen_bits = _qwen_transcript(object_sel, sar)
-    qwen_path = out_dir / "qwen.txt"
-    if qwen_bits:
-        _write_text(qwen_path, qwen_bits)
-    elif qwen_path.exists():
-        qwen_path.unlink()
-    for stale in out_dir.glob("qwen_object_*.png"):
-        stale.unlink()
-    for stale in out_dir.glob("qwen_sar_*.png"):
-        stale.unlink()
-    for label, result in (("object", object_sel), ("sar", sar)):
-        for index, image in enumerate(
-            getattr(result, "evidence_images", ()) if result is not None else (),
-            start=1,
-        ):
-            image.save(out_dir / f"qwen_{label}_{index:02d}.png")
     if extra:
         selection["extra"] = extra
     _write_json(out_dir / "summary.json", selection)
-    saved = save_camera_frames(
-        out_dir,
-        detections,
-        target_id=getattr(round_result, "target_id", None),
-        anchor_id=getattr(round_result, "anchor_id", None),
-    )
-    log.info("[round-dump] %s cameras=%d -> %s", out_dir.name, saved, out_dir.resolve())
     return out_dir
 
 
@@ -254,8 +276,11 @@ def _qwen_transcript(object_sel, sar) -> str:
 def dump_json(out_dir: Path, name: str, payload) -> None:
     if not dump_enabled() or out_dir is None:
         return
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(out_dir / name, payload)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(out_dir / name, payload)
+    except OSError as exc:
+        log.warning("[round-dump] could not write %s: %s", out_dir / name, exc)
 
 
 def dump_nearfield_frame(
@@ -272,14 +297,16 @@ def dump_nearfield_frame(
         from PIL import Image
     except ImportError:
         return
-    dest = out_dir / "nearfield"
-    dest.mkdir(parents=True, exist_ok=True)
-    if bbox is not None:
-        h, w = rgb.shape[:2]
-        image = _draw_boxes(rgb, w, h, [(tuple(bbox), "red", label or "yolo")])
-    else:
-        image = Image.fromarray(rgb, mode="RGB")
-    image.save(dest / name)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if bbox is not None:
+            h, w = rgb.shape[:2]
+            image = _draw_boxes(rgb, w, h, [(tuple(bbox), "red", label or "yolo")])
+        else:
+            image = Image.fromarray(rgb, mode="RGB")
+        image.save(out_dir / name)
+    except OSError as exc:
+        log.warning("[round-dump] could not write %s: %s", out_dir / name, exc)
 
 
 def maybe_dump_cctv_round(round_: CctvDetectionRound, *, round_num: int) -> Path | None:

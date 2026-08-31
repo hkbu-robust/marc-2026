@@ -240,6 +240,9 @@ class NavigationResult:
     leg: str = ""
     path: Optional[tuple] = None
     last_method: Optional[str] = None
+    stall_count: int = 0
+    lidar_interventions: int = 0
+    recovery_count: int = 0
 
     @property
     def reached(self) -> bool:
@@ -287,6 +290,9 @@ class Stage2Navigator:
         self._path_inflation = float(inflation_m)
         self.last_path = None
         self.last_method = None
+        self.stall_count = 0
+        self.lidar_interventions = 0
+        self.recovery_count = 0
 
     def _warm_lidar(self, deadline_s, ticks: int = 8):
         """Wait briefly so the first tick can see a cloud if one is already publishing."""
@@ -528,6 +534,8 @@ class Stage2Navigator:
             if bumper_hot:
                 last_reason = ReplanReason.FRONTAL
                 if not prev_frontal:
+                    self.lidar_interventions += 1
+                    self.recovery_count += 1
                     log.info("[Stage2] %s FRONTAL lidar stop -> reverse, stamp, replan", leg)
                     need_replan = True
                     replan_reason = ReplanReason.FRONTAL
@@ -562,6 +570,7 @@ class Stage2Navigator:
                     and client.now_s() - last_progress_t >= RAM_STUCK_S
                 ):
                     log.info("[Stage2] %s ram unstick -> stamp overlay, reverse, replan", leg)
+                    self.recovery_count += 1
                     last_reason = ReplanReason.RAM
                     ram_hot = True
                     need_replan = True
@@ -574,6 +583,8 @@ class Stage2Navigator:
                         planner.clear_start_hole((x, y), exclude_m=0.20)
                 elif client.now_s() - last_progress_t > self.stuck_time_s:
                     log.info("[Stage2] %s stall -> replan", leg)
+                    self.stall_count += 1
+                    self.recovery_count += 1
                     need_replan = True
                     replan_reason = ReplanReason.STALL
                     last_reason = ReplanReason.STALL

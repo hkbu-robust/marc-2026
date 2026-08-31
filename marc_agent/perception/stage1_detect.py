@@ -88,9 +88,8 @@ def detect_stage1_round(
         return round_
 
     if mode in _YOLO_MODES:
-        t1 = time.perf_counter()
         sar_mode = _sar_detector_mode()
-        objects, people = detect_frames_with_yolo(frames)
+        objects, people, load_ms, infer_ms = detect_frames_with_yolo(frames)
         if sar_mode == "stub":
             sar = load_stub_sar(stub_path, camera_ids=camera_ids)
         elif sar_mode in _SAR_YOLO:
@@ -99,11 +98,12 @@ def detect_stage1_round(
             # Raw people are always retained. Query-conditioned interpretation happens
             # after command parsing in stage1_pipeline.
             sar = []
-        infer_ms = (time.perf_counter() - t1) * 1000.0
         log.info(
-            "[stage1-detect] yolo fetch=%.0fms infer=%.0fms objects=%d people=%d sar=%d "
+            "[stage1-detect] yolo fetch=%.0fms load=%.0fms infer=%.0fms "
+            "objects=%d people=%d sar=%d "
             "cameras=%d sar_mode=%s",
             fetch_ms,
+            load_ms,
             infer_ms,
             len(objects),
             len(people),
@@ -119,6 +119,7 @@ def detect_stage1_round(
             camera_ids=camera_ids,
             metrics=CctvRoundMetrics(
                 fetch_ms=fetch_ms,
+                load_ms=load_ms,
                 inference_ms=infer_ms,
                 cameras_discovered=len(camera_ids),
                 frames_loaded=len(frames),

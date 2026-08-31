@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -454,18 +455,63 @@ class YoloDetector:
 
     def __init__(self, tracker):
         self._yolo = tracker
+        self._inference_calls = 0
+        self._inference_ms = 0.0
+        self._load_ms = 0.0
+        self._status_counts = {}
+        self._candidates_seen = 0
+        self._last_candidates = []
 
     def load(self) -> bool:
-        return bool(self._yolo.load())
+        started = time.perf_counter()
+        try:
+            return bool(self._yolo.load())
+        finally:
+            self._load_ms += (time.perf_counter() - started) * 1000.0
 
     def set_target(self, name: Optional[str]) -> None:
         self._yolo.set_target(name)
 
     def detect_candidates(self, rgb: np.ndarray, target_type: str) -> dict:
-        return self._yolo.detect_candidates(rgb, target_type)
+        started = time.perf_counter()
+        try:
+            result = self._yolo.detect_candidates(rgb, target_type)
+            status = str(result.get("status") or "unknown")
+            self._status_counts[status] = self._status_counts.get(status, 0) + 1
+            candidates = result.get("candidates") or ()
+            self._candidates_seen += len(candidates)
+            self._last_candidates = [
+                {
+                    "class_name": item.get("class_name"),
+                    "confidence": item.get("confidence"),
+                    "bbox_xyxy": item.get("xyxy"),
+                    "rank": item.get("rank"),
+                }
+                for item in candidates[:20]
+            ]
+            return result
+        finally:
+            self._inference_calls += 1
+            self._inference_ms += (time.perf_counter() - started) * 1000.0
 
     def detect(self, rgb: np.ndarray) -> Optional[dict]:
-        return self._yolo.detect(rgb)
+        started = time.perf_counter()
+        try:
+            return self._yolo.detect(rgb)
+        finally:
+            self._inference_calls += 1
+            self._inference_ms += (time.perf_counter() - started) * 1000.0
+
+    @property
+    def metrics(self) -> dict:
+        return {
+            "load_ms": self._load_ms,
+            "inference_calls": self._inference_calls,
+            "inference_ms": self._inference_ms,
+            "status_counts": self._status_counts,
+            "candidates_seen": self._candidates_seen,
+            "last_candidates": self._last_candidates,
+        }
 
     def unload(self) -> None:
         unload = getattr(self._yolo, "unload", None)
@@ -583,10 +629,14 @@ def pick_nearfield_candidate(eligible, people_xy=(), hint_xy=None):
 
 def _candidate_detection(
     result, depth, k, pose, hint_xy, radius, R=None, t=None, people_xy=(),
+    rejections=None,
 ):
     """Choose the unattended, closer in-radius target; unique boxes skip person priors."""
     shape = result.get("rgb_shape")
     if shape is None or depth is None or pose is None:
+        reason = "no_depth" if depth is None else ("no_pose" if pose is None else "no_shape")
+        if rejections is not None:
+            rejections[reason] = rejections.get(reason, 0) + 1
         return None
     h, w = int(shape[0]), int(shape[1])
     eligible = []
@@ -596,6 +646,8 @@ def _candidate_detection(
             bbox, depth, shape, k, pose, hint_xy, radius,
             conf=candidate["confidence"], name=candidate["class_name"], R=R, t=t,
         )
+        if localized.reason != "ok" and rejections is not None:
+            rejections[localized.reason] = rejections.get(localized.reason, 0) + 1
         if localized.reason in {"no_depth", "outside_radius"}:
             continue
         depth_m = depth_in_bbox(depth, bbox, shape)
@@ -633,6 +685,8 @@ class NearFieldAcquire:
         self._lock_depth = None
         self._lock_frame = None
         self._phase = "scan"
+        self._phase_history = ["scan"]
+        self._rejection_counts = {}
         self._phase_t0 = 0.0
         self._align_ok = 0
         self._scan_sign = 1.0
@@ -675,7 +729,7 @@ class NearFieldAcquire:
         R, tvec = self._cam_to_car(rgb_msg)
         det = _candidate_detection(
             result, depth, k, pose, None, 0.0, R=R, t=tvec,
-            people_xy=self._people_xy,
+            people_xy=self._people_xy, rejections=self._rejection_counts,
         )
         if det is None or det.get("bbox") is None:
             return LocalizedTarget(valid=False, reason="not_detected")
@@ -691,6 +745,7 @@ class NearFieldAcquire:
         c = self.client
         if not self.detector.load():
             reason = getattr(self.detector, "reason", "no_detector")
+            self._rejection_counts[str(reason)] = 1
             log.warning("[nearfield] detector unavailable (%s) -- fail closed", reason)
             return LocalizedTarget(valid=False, reason=str(reason))
 
@@ -698,6 +753,7 @@ class NearFieldAcquire:
         self.detector.set_target(ttype or None)
         self._ensure_tf()
         if not self._lock_streams():
+            self._rejection_counts["no_camera"] = 1
             log.warning("[nearfield] no chassis RGB/depth -- fail closed")
             return LocalizedTarget(valid=False, reason="no_camera")
 
@@ -719,6 +775,9 @@ class NearFieldAcquire:
                 result = self.detector.detect_candidates(rgb, ttype)
                 status = result.get("status")
                 if status == "unsupported_target":
+                    self._rejection_counts["unsupported_target"] = (
+                        self._rejection_counts.get("unsupported_target", 0) + 1
+                    )
                     # A reveal/grounding result may legitimately name a class
                     # newer than this bundled detector. Keep the exact detector
                     # contract, but allow the motion-only grounding scan below.
@@ -737,13 +796,15 @@ class NearFieldAcquire:
                     }
                     status = "not_detected"
                 if status not in {"ok", "not_detected"}:
+                    reason = str(status or "detector_error")
+                    self._rejection_counts[reason] = self._rejection_counts.get(reason, 0) + 1
                     self._stop()
-                    return LocalizedTarget(valid=False, reason=str(status or "detector_error"))
+                    return LocalizedTarget(valid=False, reason=reason)
                 k = k_from_info(info, rgb.shape[:2])
                 R, tvec = self._cam_to_car(rgb_msg)
                 det = _candidate_detection(
                     result, depth, k, pose, hint_xy, radius, R=R, t=tvec,
-                    people_xy=self._people_xy,
+                    people_xy=self._people_xy, rejections=self._rejection_counts,
                 )
                 last_good_t = now
 
@@ -853,9 +914,18 @@ class NearFieldAcquire:
         )
 
     def _enter(self, phase: str, now: float):
+        if not self._phase_history or self._phase_history[-1] != phase:
+            self._phase_history.append(phase)
         self._phase = phase
         self._phase_t0 = now
         self._align_ok = 0
+
+    @property
+    def diagnostics(self) -> dict:
+        return {
+            "phase_history": self._phase_history,
+            "rejection_counts": self._rejection_counts,
+        }
 
     def _command(self, now: float, n_obj: int, err, fwd_obj,
                  *, may_center: bool = True) -> tuple:
