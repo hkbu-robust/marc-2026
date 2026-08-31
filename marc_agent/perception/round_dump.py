@@ -168,20 +168,24 @@ def dump_stage_artifacts(out_dir: Path, round_result) -> Optional[Path]:
     """Save only image/text evidence; structured facts belong in events.jsonl."""
     if not dump_enabled():
         return None
-    out_dir.mkdir(parents=True, exist_ok=True)
-    candidates = getattr(round_result, "candidates", None)
-    detections = getattr(candidates, "detections", CctvDetectionRound())
-    _save_qwen_artifacts(
-        out_dir,
-        getattr(candidates, "object_selection", None),
-        getattr(candidates, "sar_selection", None),
-    )
-    saved = save_camera_frames(
-        out_dir,
-        detections,
-        target_id=getattr(round_result, "target_id", None),
-        anchor_id=getattr(round_result, "anchor_id", None),
-    )
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        candidates = getattr(round_result, "candidates", None)
+        detections = getattr(candidates, "detections", CctvDetectionRound())
+        _save_qwen_artifacts(
+            out_dir,
+            getattr(candidates, "object_selection", None),
+            getattr(candidates, "sar_selection", None),
+        )
+        saved = save_camera_frames(
+            out_dir,
+            detections,
+            target_id=getattr(round_result, "target_id", None),
+            anchor_id=getattr(round_result, "anchor_id", None),
+        )
+    except OSError as exc:
+        log.warning("[round-dump] disabled for %s: %s", out_dir, exc)
+        return None
     log.info("[round-dump] %s cameras=%d -> %s", out_dir.name, saved, out_dir.resolve())
     return out_dir
 

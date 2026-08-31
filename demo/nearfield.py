@@ -629,10 +629,14 @@ def pick_nearfield_candidate(eligible, people_xy=(), hint_xy=None):
 
 def _candidate_detection(
     result, depth, k, pose, hint_xy, radius, R=None, t=None, people_xy=(),
+    rejections=None,
 ):
     """Choose the unattended, closer in-radius target; unique boxes skip person priors."""
     shape = result.get("rgb_shape")
     if shape is None or depth is None or pose is None:
+        reason = "no_depth" if depth is None else ("no_pose" if pose is None else "no_shape")
+        if rejections is not None:
+            rejections[reason] = rejections.get(reason, 0) + 1
         return None
     h, w = int(shape[0]), int(shape[1])
     eligible = []
@@ -642,6 +646,8 @@ def _candidate_detection(
             bbox, depth, shape, k, pose, hint_xy, radius,
             conf=candidate["confidence"], name=candidate["class_name"], R=R, t=t,
         )
+        if localized.reason != "ok" and rejections is not None:
+            rejections[localized.reason] = rejections.get(localized.reason, 0) + 1
         if localized.reason in {"no_depth", "outside_radius"}:
             continue
         depth_m = depth_in_bbox(depth, bbox, shape)
@@ -723,7 +729,7 @@ class NearFieldAcquire:
         R, tvec = self._cam_to_car(rgb_msg)
         det = _candidate_detection(
             result, depth, k, pose, None, 0.0, R=R, t=tvec,
-            people_xy=self._people_xy,
+            people_xy=self._people_xy, rejections=self._rejection_counts,
         )
         if det is None or det.get("bbox") is None:
             return LocalizedTarget(valid=False, reason="not_detected")
@@ -739,6 +745,7 @@ class NearFieldAcquire:
         c = self.client
         if not self.detector.load():
             reason = getattr(self.detector, "reason", "no_detector")
+            self._rejection_counts[str(reason)] = 1
             log.warning("[nearfield] detector unavailable (%s) -- fail closed", reason)
             return LocalizedTarget(valid=False, reason=str(reason))
 
@@ -746,6 +753,7 @@ class NearFieldAcquire:
         self.detector.set_target(ttype or None)
         self._ensure_tf()
         if not self._lock_streams():
+            self._rejection_counts["no_camera"] = 1
             log.warning("[nearfield] no chassis RGB/depth -- fail closed")
             return LocalizedTarget(valid=False, reason="no_camera")
 
@@ -767,6 +775,9 @@ class NearFieldAcquire:
                 result = self.detector.detect_candidates(rgb, ttype)
                 status = result.get("status")
                 if status == "unsupported_target":
+                    self._rejection_counts["unsupported_target"] = (
+                        self._rejection_counts.get("unsupported_target", 0) + 1
+                    )
                     # A reveal/grounding result may legitimately name a class
                     # newer than this bundled detector. Keep the exact detector
                     # contract, but allow the motion-only grounding scan below.
@@ -785,13 +796,15 @@ class NearFieldAcquire:
                     }
                     status = "not_detected"
                 if status not in {"ok", "not_detected"}:
+                    reason = str(status or "detector_error")
+                    self._rejection_counts[reason] = self._rejection_counts.get(reason, 0) + 1
                     self._stop()
-                    return LocalizedTarget(valid=False, reason=str(status or "detector_error"))
+                    return LocalizedTarget(valid=False, reason=reason)
                 k = k_from_info(info, rgb.shape[:2])
                 R, tvec = self._cam_to_car(rgb_msg)
                 det = _candidate_detection(
                     result, depth, k, pose, hint_xy, radius, R=R, t=tvec,
-                    people_xy=self._people_xy,
+                    people_xy=self._people_xy, rejections=self._rejection_counts,
                 )
                 last_good_t = now
 
@@ -812,9 +825,6 @@ class NearFieldAcquire:
                     R=R, t=tvec,
                 )
                 if cand.reason == "outside_radius":
-                    self._rejection_counts[cand.reason] = (
-                        self._rejection_counts.get(cand.reason, 0) + 1
-                    )
                     n_obj = 0
                     err = None
                     d_obj = None

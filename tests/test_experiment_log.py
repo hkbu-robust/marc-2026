@@ -23,6 +23,14 @@ class ExperimentLogTests(unittest.TestCase):
             "round_result",
             {node.id for node in ast.walk(callback) if isinstance(node, ast.Name)},
         )
+        score_callback = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_on_score"
+        )
+        self.assertFalse(any(
+            isinstance(node, ast.Attribute) and node.attr == "finish"
+            for node in ast.walk(score_callback)
+        ))
 
     def test_run_files_summary_artifacts_and_safe_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,6 +74,10 @@ class ExperimentLogTests(unittest.TestCase):
             self.assertEqual(
                 str(run.run_dir / "artifacts"), env["MARC_ROUND_DUMP_DIR"]
             )
+            self.assertEqual(
+                "artifacts/stage2/navigation",
+                run.artifact_ref(run.run_dir / "artifacts/stage2/navigation"),
+            )
             self.assertIn("visible diagnostic", run.log_path.read_text(encoding="utf-8"))
             self.assertNotIn("must-not-be-recorded", run.events_path.read_text(encoding="utf-8"))
             summary = json.loads(run.summary_path.read_text(encoding="utf-8"))
@@ -106,9 +118,7 @@ class ExperimentLogTests(unittest.TestCase):
             root_file.write_text("occupied", encoding="utf-8")
             run = ExperimentLog(root_file, environ={})
             run.event("still.safe")
-            pipeline_action_completed = True
             run.finish()
-            self.assertTrue(pipeline_action_completed)
             self.assertFalse(run.events_path.exists())
 
 

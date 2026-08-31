@@ -89,6 +89,12 @@ class RoundDumpTests(unittest.TestCase):
             self.assertTrue((out / "cameras" / "cam1_boxes.png").is_file())
             self.assertEqual([], list(out.rglob("*.json")))
 
+    def test_artifact_write_failure_is_fail_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("PIL.Image.Image.save", side_effect=OSError("disk full")):
+                path = dump_stage_artifacts(Path(tmp) / "round-001", _round_result())
+            self.assertIsNone(path)
+
     def test_writes_command_overlay_and_detections(self):
         round_result = _round_result()
         with tempfile.TemporaryDirectory() as tmp:

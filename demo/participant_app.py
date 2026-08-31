@@ -117,6 +117,7 @@ class DemoParticipant:
         self._round_clock = RoundClock()
         self._qwen_verifier = get_default_verifier()
         self._approach_snap = None
+        self._final_score_payload = None
         self._register_handlers()
 
     # -- handler registration --
@@ -197,7 +198,7 @@ class DemoParticipant:
             status="failed" if round_result.grounding is None else "ok",
             terminal=round_result.grounding is None,
             round=mission.round,
-            artifact_dir=str(dump_path) if dump_path else None,
+            artifact_dir=self._experiment.artifact_ref(dump_path),
             **round_result.record(),
         )
         log.info(
@@ -303,7 +304,7 @@ class DemoParticipant:
             stage="stage2",
             status="failed" if round_result.grounding is None else "ok",
             terminal=round_result.grounding is None,
-            artifact_dir=str(dump_path) if dump_path else None,
+            artifact_dir=self._experiment.artifact_ref(dump_path),
             **round_result.record(),
         )
         grounding = round_result.grounding
@@ -488,7 +489,7 @@ class DemoParticipant:
             ),
             leg="pickup",
             handoff=handoff,
-            artifact_dir=str(navigation_dump),
+            artifact_dir=self._experiment.artifact_ref(navigation_dump),
         )
         if not c.is_running:
             return
@@ -497,11 +498,13 @@ class DemoParticipant:
             log.warning("[Stage2] skip pick -- near-field not started (%s)", handoff)
             self._experiment.event(
                 "stage2.nearfield.completed", stage="stage2", status="skipped",
-                reason=handoff, artifact_dir=str(nearfield_dump),
+                reason=handoff,
+                artifact_dir=self._experiment.artifact_ref(nearfield_dump),
             )
             self._experiment.event(
                 "stage2.manipulation.completed", stage="stage2", status="skipped",
-                reason=handoff, artifact_dir=str(manipulation_dump),
+                reason=handoff,
+                artifact_dir=self._experiment.artifact_ref(manipulation_dump),
             )
         else:
             log.info("[Stage2] starting near-field YOLO (%s)", handoff)
@@ -543,14 +546,15 @@ class DemoParticipant:
                 detector=getattr(detector, "metrics", None),
                 localization=getattr(nearfield, "diagnostics", None),
                 stable_consensus=stable_consensus,
-                artifact_dir=str(nearfield_dump),
+                artifact_dir=self._experiment.artifact_ref(nearfield_dump),
             )
             if not target.valid:
                 log.warning("[Stage2] near-field acquire failed (%s) -- skip pick (fail closed)",
                             target.reason)
                 self._experiment.event(
                     "stage2.manipulation.completed", stage="stage2", status="skipped",
-                    reason=target.reason, artifact_dir=str(manipulation_dump),
+                    reason=target.reason,
+                    artifact_dir=self._experiment.artifact_ref(manipulation_dump),
                 )
             else:
                 log.info("[Stage2] localized %s grasp=(%.2f, %.2f, z=%.2f) conf=%.2f",
@@ -613,7 +617,7 @@ class DemoParticipant:
                     grasped=pick.grasped,
                     basket_occupied=pick.basket_occupied,
                     policy=pick.policy,
-                    artifact_dir=str(manipulation_dump),
+                    artifact_dir=self._experiment.artifact_ref(manipulation_dump),
                 )
                 self._state.adopt_pick(pick)
                 picked = pick.ok
@@ -636,8 +640,8 @@ class DemoParticipant:
         )
         self._experiment.event(
             "stage2.mission.completed", stage="stage2",
-            status="ok" if picked else "failed", picked=picked,
-            reached_search=reached_search, handoff=handoff,
+            status="failed", terminal=True, failure_reason="delivery_not_implemented",
+            picked=picked, reached_search=reached_search, handoff=handoff,
         )
         log.info("[Stage2] search-area nav finished (reached=%s yolo=%s) -> task_complete",
                  reached_search, handoff)
@@ -799,7 +803,7 @@ class DemoParticipant:
         self._experiment.event("score.received", **payload)
         if score.is_final:
             log.info("[FINAL] %s", score.scores)
-            self._experiment.finish("completed", final_score=score.scores, total=score.total)
+            self._final_score_payload = payload
         else:
             log.info("[Score] round %s: total=%s", score.round, score.total)
 
@@ -822,6 +826,12 @@ class DemoParticipant:
         if not self.client.connect():
             raise SystemExit("Registration failed -- check the runtime and the token.")
         self.client.run()
+        if self._final_score_payload is not None:
+            self._experiment.finish(
+                "completed",
+                final_score=self._final_score_payload["scores"],
+                total=self._final_score_payload["total"],
+            )
 
 
 def main():

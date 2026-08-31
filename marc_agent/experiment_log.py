@@ -140,6 +140,14 @@ class ExperimentLog:
     def set_simulation_clock(self, clock) -> None:
         self._simulation_clock = clock
 
+    def artifact_ref(self, path) -> str | None:
+        if path is None:
+            return None
+        try:
+            return str(Path(path).relative_to(self.run_dir))
+        except ValueError:
+            return str(path)
+
     @contextmanager
     def span(self, name: str, *, stage: str | None = None, **fields):
         started = time.perf_counter()
