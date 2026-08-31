@@ -175,18 +175,10 @@ def _copied_profile(
 # These classes inherit both demonstrated tumbler motions. Their separate
 # identities keep physical validation local to each class instead of falsely
 # marking all copies validated when only the tumbler has completed placement.
-LYING_MUG = _copied_profile(LYING_TUMBLER, "lying_mug")
-UPRIGHT_MUG = _copied_profile(TUMBLER_UPRIGHT, "upright_mug")
 LYING_COLA_CAN = _copied_profile(LYING_TUMBLER, "lying_cola_can")
 UPRIGHT_COLA_CAN = _copied_profile(TUMBLER_UPRIGHT, "upright_cola_can")
 LYING_JUICE = _copied_profile(LYING_TUMBLER, "lying_juice")
 UPRIGHT_JUICE = _copied_profile(TUMBLER_UPRIGHT, "upright_juice")
-LYING_DISPOSABLE_CUP = _copied_profile(
-    LYING_TUMBLER, "lying_disposable_cup"
-)
-UPRIGHT_DISPOSABLE_CUP = _copied_profile(
-    TUMBLER_UPRIGHT, "upright_disposable_cup"
-)
 LYING_UMBRELLA = _copied_profile(LYING_TUMBLER, "lying_umbrella")
 UPRIGHT_UMBRELLA = _copied_profile(TUMBLER_UPRIGHT, "upright_umbrella")
 LYING_SUNBLOCK = _copied_profile(LYING_TUMBLER, "lying_sunblock")
@@ -197,31 +189,75 @@ LYING_SUNBLOCK = _copied_profile(LYING_TUMBLER, "lying_sunblock")
 UPRIGHT_SUNBLOCK = replace(
     _copied_profile(TUMBLER_UPRIGHT, "upright_sunblock"),
     approach_already_near_m=0.65,
+    # The 8 cm insertion keeps a 0.72 m visible center at a 0.70 m contact.
+    max_fwd_m=0.72,
+    side_transit_rate_hz=10.0,
     side_floor_load=True,
-    side_pre_descent_joint5_rad=0.95,
+    side_pre_descent_joint5_rad=-1.10,
     side_contact_fold_clearance_m=0.0,
-    side_final_insertion_m=0.10,
-    floor_clearance_m=0.035,
+    side_final_insertion_m=0.08,
+    floor_clearance_m=0.015,
     contact_settle_s=0.75,
 )
 
-# Pencil cases and tissues always use the top-down/lying motion, even when a
-# tall or folded detection box looks upright.
-LYING_PENCILCASE = _copied_profile(LYING_TUMBLER, "lying_pencilcase")
-LYING_TISSUE = _copied_profile(LYING_TUMBLER, "lying_tissue")
+# Mug follows the demonstrated tumbler motion for each observed posture.
+LYING_MUG = replace(
+    _copied_profile(LYING_TUMBLER, "lying_mug"), physically_validated=True
+)
+UPRIGHT_MUG = _copied_profile(TUMBLER_UPRIGHT, "upright_mug")
 
-# Cracker-box posture is intentionally inverted: standing boxes expose a
-# narrow top footprint suitable for the lying-tumbler motion. A flat box has no
-# safe copied grasp because its width exceeds the gripper; fail closed until a
-# physical flip-and-reacquire sequence is calibrated.
+# These classes use the basket-proven sunblock floor-load motion in either
+# observed posture.
+UPRIGHT_DISPOSABLE_CUP = replace(
+    UPRIGHT_SUNBLOCK,
+    name="upright_disposable_cup",
+    physically_validated=False,
+    max_cloud_center_shift_m=0.015,
+)
+LYING_DISPOSABLE_CUP = replace(
+    UPRIGHT_DISPOSABLE_CUP,
+    name="lying_disposable_cup",
+    physically_validated=True,
+)
+LYING_TISSUE = replace(
+    UPRIGHT_SUNBLOCK, name="lying_tissue", physically_validated=True
+)
+UPRIGHT_TISSUE = replace(
+    UPRIGHT_SUNBLOCK, name="upright_tissue", physically_validated=False
+)
+
+# Broadside pencil cases retain the PCA-aligned overhead pinch. Narrow/forward
+# views use the basket-proven sunblock floor-load motion with a centered grip.
+LYING_PENCILCASE = replace(
+    _copied_profile(LYING_TUMBLER, "lying_pencilcase"),
+    stage_clearance_m=0.30,
+    floor_clearance_m=0.015,
+    contact_depth_fraction=0.50,
+)
+UPRIGHT_PENCILCASE = replace(
+    UPRIGHT_SUNBLOCK,
+    name="upright_pencilcase",
+    physically_validated=True,
+    approach_already_near_m=0.70,
+    pad_lateral_bias_m=0.0,
+    side_final_insertion_m=0.10,
+)
+# Cracker-box posture is intentionally inverted: standing boxes use the
+# lying-tumbler overhead motion; flat boxes use the sunblock floor-load motion.
 UPRIGHT_CRACKER_BOX = _copied_profile(
     LYING_TUMBLER, "upright_cracker_box"
 )
+UPRIGHT_CRACKER_BOX = replace(
+    UPRIGHT_CRACKER_BOX, physically_validated=True
+)
 LYING_CRACKER_BOX = replace(
-    LYING_TUMBLER,
+    UPRIGHT_SUNBLOCK,
     name="lying_cracker_box",
     physically_validated=False,
-    approach_style="flip_required",
+    side_final_insertion_m=0.04,
+    side_standoff_m=0.03,
+    pad_lateral_bias_m=0.0,
+    max_cloud_center_shift_m=0.015,
 )
 
 
@@ -233,11 +269,9 @@ _POSTURE_PROFILES = {
     "disposable_cup": (LYING_DISPOSABLE_CUP, UPRIGHT_DISPOSABLE_CUP),
     "umbrella": (LYING_UMBRELLA, UPRIGHT_UMBRELLA),
     "sunblock": (LYING_SUNBLOCK, UPRIGHT_SUNBLOCK),
-}
-
-_ALWAYS_LYING_PROFILES = {
-    "pencilcase": LYING_PENCILCASE,
-    "tissue": LYING_TISSUE,
+    "pencilcase": (LYING_PENCILCASE, UPRIGHT_PENCILCASE),
+    "tissue": (LYING_TISSUE, UPRIGHT_TISSUE),
+    "cracker_box": (LYING_CRACKER_BOX, UPRIGHT_CRACKER_BOX),
 }
 
 _ALWAYS_UPRIGHT_PROFILES = {
@@ -284,10 +318,13 @@ def uses_upright_side_profile(name, bbox, min_aspect: float = 1.20) -> bool:
     canonical = _canonical_name(name)
     if canonical in _ALWAYS_UPRIGHT_PROFILES:
         return True
-    return (
-        canonical in _POSTURE_PROFILES
-        and bbox_xyxy_is_upright(bbox, min_aspect=min_aspect)
-    )
+    profiles = _POSTURE_PROFILES.get(canonical)
+    if profiles is None or bbox is None or len(bbox) < 4:
+        return False
+    profile = profiles[
+        1 if bbox_xyxy_is_upright(bbox, min_aspect=min_aspect) else 0
+    ]
+    return profile.approach_style == "front_side"
 
 
 def upright_side_approach_near_override(
@@ -298,11 +335,13 @@ def upright_side_approach_near_override(
     profile = _ALWAYS_UPRIGHT_PROFILES.get(canonical)
     if profile is None:
         profiles = _POSTURE_PROFILES.get(canonical)
-        if profiles is None or not bbox_xyxy_is_upright(
-            bbox, min_aspect=min_aspect
-        ):
+        if profiles is None or bbox is None or len(bbox) < 4:
             return None
-        profile = profiles[1]
+        profile = profiles[
+            1 if bbox_xyxy_is_upright(bbox, min_aspect=min_aspect) else 0
+        ]
+        if profile.approach_style != "front_side":
+            return None
     return profile.approach_already_near_m
 
 
@@ -312,26 +351,9 @@ def resolve_grasp_profile(target) -> Optional[GraspProfile]:
     posture = str(getattr(target, "grasp_posture", "") or "").strip().lower()
     bbox = getattr(target, "bbox_xyxy", None)
 
-    always_lying = _ALWAYS_LYING_PROFILES.get(name)
-    if always_lying is not None:
-        return always_lying
-
     always_upright = _ALWAYS_UPRIGHT_PROFILES.get(name)
     if always_upright is not None:
         return always_upright
-
-    if name == "cracker_box":
-        if posture == "lying":
-            return LYING_CRACKER_BOX
-        if posture == "upright":
-            return UPRIGHT_CRACKER_BOX
-        if bbox is not None and len(bbox) >= 4:
-            return (
-                UPRIGHT_CRACKER_BOX
-                if bbox_xyxy_is_upright(bbox)
-                else LYING_CRACKER_BOX
-            )
-        return None
 
     profiles = _POSTURE_PROFILES.get(name)
     if profiles is None:

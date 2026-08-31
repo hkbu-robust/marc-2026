@@ -25,6 +25,8 @@ fetch_all = _FETCH_MOD.fetch_all
 fetch_graspgenx = _FETCH_MOD.fetch_graspgenx
 fetch_grippers = _FETCH_MOD.fetch_grippers
 fetch_qwen = _FETCH_MOD.fetch_qwen
+fetch_stage1 = _FETCH_MOD.fetch_stage1
+fetch_stage2 = _FETCH_MOD.fetch_stage2
 fetch_yolo11x = _FETCH_MOD.fetch_yolo11x
 
 
@@ -134,6 +136,28 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
             (root / "dis").mkdir()
             self.assertFalse(has_checkpoint(str(root)))
 
+    def test_detector_downloads_are_revision_and_checksum_pinned(self):
+        calls = []
+
+        def fake_hub(*, repo_id, filename, revision, local_dir):
+            calls.append((repo_id, filename, revision))
+            path = Path(local_dir) / filename
+            path.write_bytes(b"checkpoint")
+            return str(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(_FETCH_MOD, "_sha256") as digest:
+                digest.side_effect = [_FETCH_MOD.STAGE1_SHA256, _FETCH_MOD.STAGE2_SHA256]
+                fetch_stage1(Path(tmp) / "stage1" / "model.pt", hub_download=fake_hub)
+                fetch_stage2(Path(tmp) / "stage2" / "model.pt", hub_download=fake_hub)
+        self.assertEqual(
+            [
+                (_FETCH_MOD.STAGE1_REPO, "model.pt", _FETCH_MOD.STAGE1_REVISION),
+                (_FETCH_MOD.STAGE2_REPO, "model.pt", _FETCH_MOD.STAGE2_REVISION),
+            ],
+            calls,
+        )
+
     def test_fetch_all_skips_every_complete_artifact(self):
         downloader = Mock(side_effect=AssertionError("must not download"))
         hub = Mock(side_effect=AssertionError("must not download"))
@@ -212,7 +236,7 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
         downloader.assert_not_called()
         hub.assert_not_called()
 
-    def test_fast_build_does_not_fetch_optional_runtime_weights(self):
+    def test_development_build_does_not_fetch_runtime_weights(self):
         downloader = Mock(side_effect=AssertionError("must not download GraspGenX"))
         hub = Mock(side_effect=AssertionError("must not download YOLO"))
         with tempfile.TemporaryDirectory() as tmp:
@@ -228,8 +252,9 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
                     snapshot_download=downloader,
                     hub_download=hub,
                     bake_qwen=False,
+                    bake=False,
                 )
-        self.assertEqual(["skip qwen (MARC_QWEN_BACKEND is not local)"], lines)
+        self.assertEqual(["skip runtime artifacts (development build)"], lines)
         downloader.assert_not_called()
         hub.assert_not_called()
 
@@ -238,10 +263,12 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
         self.assertIn("MARC_QWEN_BACKEND: remote", text)
         self.assertIn("args:", text)
 
-    def test_root_compose_pins_local_qwen(self):
+    def test_root_compose_starts_local_vllm(self):
         text = Path("docker-compose.yml").read_text(encoding="utf-8")
-        self.assertIn('MARC_SAR_DETECTOR: "qwen"', text)
-        self.assertIn('MARC_QWEN_BACKEND: "local"', text)
+        self.assertIn('MARC_SAR_DETECTOR: "qwen-remote"', text)
+        self.assertIn('MARC_QWEN_BACKEND: "remote"', text)
+        self.assertIn("dockerfile: demo/Dockerfile.vllm", text)
+        self.assertIn("condition: service_healthy", text)
 
     def test_demo_compose_uses_host_qwen(self):
         text = Path("demo/docker-compose.yml").read_text(encoding="utf-8")
@@ -359,7 +386,7 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
 
 
 class AgentDockerfileTests(unittest.TestCase):
-    def test_fast_build_does_not_install_graspgenx(self):
+    def test_baked_build_installs_graspgenx_and_fetches_models(self):
         text = Path("demo/Dockerfile").read_text(encoding="utf-8")
         active = "\n".join(
             line for line in text.splitlines() if not line.lstrip().startswith("#")
@@ -368,14 +395,10 @@ class AgentDockerfileTests(unittest.TestCase):
             'pip3 install --upgrade "packaging>=26.2" "setuptools>=64,<78"',
             active,
         )
-        self.assertNotIn("/tmp/GraspGenX", active)
-        self.assertNotIn("from graspgenx", active)
-        self.assertNotIn(
-            "pip3 install --no-deps --no-build-isolation \\\n"
-            "        git+https://github.com/NVlabs/GraspGenX.git",
-            text,
-        )
-        self.assertIn("ARG MARC_QWEN_BACKEND=local", text)
+        self.assertIn("/tmp/GraspGenX", active)
+        self.assertIn("from graspgenx", active)
+        self.assertIn("ARG MARC_BUILD_MODE=baked", text)
+        self.assertIn("ARG MARC_QWEN_BACKEND=remote", text)
         self.assertIn("MARC_QWEN_BACKEND=\"$MARC_QWEN_BACKEND\"", text)
         self.assertIn("fetch_runtime_weights.py", text)
 

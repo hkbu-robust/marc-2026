@@ -24,7 +24,7 @@ from marc_agent.lidar_safety import (
     overlay_discs,
     pointcloud2_xyz,
 )
-from marc_agent.retrieval_state import DEFAULT_GOAL_TOLERANCE, close_enough_to_search
+from marc_agent.retrieval_state import DEFAULT_GOAL_TOLERANCE
 
 _DEMO = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo")
 if _DEMO not in sys.path:
@@ -48,6 +48,8 @@ RESUME_M = 1.20
 BACKUP_LOOK_M = (0.5, 1.0, 1.5)
 RAM_STUCK_S = 2.0
 RAM_LINEAR_MIN = 0.05
+RAM_REPLAN_OFFSET_M = 0.45
+WIDE_PATH_EXTRA_M = 0.20
 
 
 class NavStatus(str, Enum):
@@ -70,11 +72,20 @@ class ReplanReason:
     FIRST_PLAN = "first_plan"
 
 
-def _ram_bumper_disc(pose):
+def _ram_bumper_disc(pose, forward_offset_m=0.0):
     """World disc at the bumper so overlay survives the 0.20 m start hole."""
     x, y, yaw = float(pose[0]), float(pose[1]), float(pose[2])
     cc, ss = math.cos(yaw), math.sin(yaw)
-    return (x + STOP_X_MAX * cc, y + STOP_X_MAX * ss, DISC_R)
+    dist = STOP_X_MAX + float(forward_offset_m)
+    return (x + dist * cc, y + dist * ss, DISC_R)
+
+
+def _ram_replan_discs(pose):
+    """Extend the collision overlay along the attempted heading for the next plan."""
+    return [
+        _ram_bumper_disc(pose),
+        _ram_bumper_disc(pose, RAM_REPLAN_OFFSET_M),
+    ]
 
 
 def _occupancy_cell_free(planner, x, y) -> bool:
@@ -147,16 +158,15 @@ def _poly_after_start_hole(origin, waypoints, hole_m=0.20):
 def _remaining_blocked(planner, pose_xy, remain, inflation_m) -> bool:
     """True when the followed path hugs occupancy or cuts a lidar disc.
 
-    Occupancy inflation uses ``[pose] + remain`` so a PathFollower chord along
-    the curb is rejected. Overlay uses the followed waypoints (or the chord
-    after the 0.20 m start hole) so the chassis hole next to a car disc does
-    not replan-loop.
+    The pose-to-path join checks raw occupancy because a valid spawn can begin
+    inside the curb inflation margin. Remaining waypoints retain full chassis
+    inflation and lidar overlay checks.
     """
     if not remain:
         return False
     poly = [pose_xy] + list(remain)
     if path_is_blocked(
-        planner, poly, inflation_m=inflation_m, ignore_overlay=True,
+        planner, poly, inflation_m=0.0, ignore_overlay=True,
     ):
         return True
     if len(remain) >= 2:
@@ -182,12 +192,15 @@ def _should_backup(planner, pose, advice) -> bool:
 
 
 def _plan_attempts(inflation_m: float, allow_thin: bool = True):
-    """Configured inflation first, then a wider crop. Never thin the chassis radius."""
+    """Prefer extra clearance, then fall back to the configured chassis radius."""
     del allow_thin
-    attempts = [(float(inflation_m), 12.0)]
-    for margin in (40.0, 80.0):
-        attempts.append((float(inflation_m), margin))
-    return attempts
+    base = float(inflation_m)
+    inflations = (base + WIDE_PATH_EXTRA_M, base) if base > 0.0 else (base,)
+    return [
+        (inflation, margin)
+        for inflation in inflations
+        for margin in (12.0, 40.0, 80.0)
+    ]
 
 
 def _world_discs_to_base(discs, pose):
@@ -326,9 +339,9 @@ class Stage2Navigator:
         """Follow occupancy D* Lite until inside ``tol`` of ``goal_xy``.
 
         ``goal_xy`` and ``tol`` may be callables so a late Stage 2 reveal can retarget.
-        Abort early when the chassis is inside the reveal disc or ``handoff_fn``
-        sees the tumbler, so near-field YOLO can start without driving to the
-        approach edge. Live lidar stamps overlay discs so D* detours unmarked
+        Abort early only when ``handoff_fn`` sees the target. Reaching an arbitrary
+        point in the reveal disc is not sufficient because an obstacle can block
+        the near-field camera there. Live lidar stamps overlay discs so D* detours unmarked
         cars, and still scales or reverses in the chassis corridor. Off-road /
         unknown start stays fail-closed (zero, no_path). ``extra_obstacles`` is
         a test hook of world discs.
@@ -367,16 +380,6 @@ class Stage2Navigator:
             cur_goal = resolve_xy(goal_xy)
             cur_tol = resolve_tol(tol, default=DEFAULT_GOAL_TOLERANCE)
             last_goal_xy = cur_goal
-            disc_xy = resolve_xy(search_xy) if search_xy is not None else None
-            disc_r = float(search_radius or 0.0)
-            if close_enough_to_search((x, y), disc_xy, disc_r, cur_tol):
-                client.send_cmd_vel(0.0, 0.0)
-                log.info("[STAGE2] %s inside_disc at (%.2f, %.2f)", leg, x, y)
-                return NavigationResult(
-                    NavStatus.REACHED, reason="inside_disc", replan_count=n_replan,
-                    goal_xy=cur_goal, pose_xy=(x, y), leg=leg,
-                    path=self.last_path, last_method=self.last_method,
-                )
             if cur_goal is None:
                 client.send_cmd_vel(0.0, 0.0)
                 last_cmd_linear = 0.0
@@ -472,7 +475,7 @@ class Stage2Navigator:
                     last_progress_t = client.now_s()
                     if planner.ready:
                         planner.stamp_overlay(
-                            [_ram_bumper_disc((x, y, yaw))], now_s=now_s,
+                            _ram_replan_discs((x, y, yaw)), now_s=now_s,
                         )
                         planner.clear_start_hole((x, y), exclude_m=0.20)
                 elif client.now_s() - last_progress_t > self.stuck_time_s:
@@ -486,7 +489,7 @@ class Stage2Navigator:
             if follower is not None and not need_replan and not bumper_hot:
                 remain = list(follower.path[follower.idx:])
                 if remain and _occupancy_cell_free(planner, x, y):
-                    if _remaining_blocked(planner, (x, y), remain, self.inflation_m):
+                    if _remaining_blocked(planner, (x, y), remain, self._path_inflation):
                         log.info("[Stage2] %s path blocked -> replan", leg)
                         last_reason = ReplanReason.PATH_BLOCKED
                         need_replan = True

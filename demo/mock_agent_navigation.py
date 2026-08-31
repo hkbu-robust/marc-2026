@@ -73,7 +73,7 @@ class GoalSeekController:
 
     # Speed / turn caps. Large turns are handled in place (see HEADING_TOLERANCE), so forward
     # motion rarely needs a hard swerve; the Ackermann w-limit below guarantees a tight arc.
-    MAX_LINEAR = 1.0           # m/s; SpeedGovernor cuts this on corners / tilt
+    MAX_LINEAR = float(os.environ.get("MARC_NAV_MAX_LINEAR", "1.0"))
     MAX_ANGULAR = 1.2          # rad/s
     K_LINEAR = 0.5
     K_ANGULAR = 0.8

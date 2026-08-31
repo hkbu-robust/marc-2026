@@ -13,6 +13,7 @@ from marc_agent.perception.cctv_project import (
 from marc_agent.perception.stage1_pipeline import (
     IGNORED_CLASS_DUMMY_XYZ,
     _project_selection,
+    has_complete_camera_coverage,
     run_stage1_round,
     static_scene_key,
 )
@@ -39,6 +40,19 @@ def test_paraphrased_static_scene_requests_share_a_key():
         expected_intent=Intent.FIND,
     )
     assert static_scene_key(first) == static_scene_key(second)
+
+
+def test_static_scene_cache_requires_every_discovered_camera_frame():
+    incomplete = CctvDetectionRound(
+        frames={"rig_a": object()}, camera_ids=["rig_a", "rig_b"]
+    )
+    complete = CctvDetectionRound(
+        frames={"rig_a": object(), "rig_b": object()},
+        camera_ids=["rig_a", "rig_b"],
+    )
+
+    assert not has_complete_camera_coverage(incomplete)
+    assert has_complete_camera_coverage(complete)
 
 
 def test_low_confidence_umbrella_at_trash_uses_occluder_geometry():

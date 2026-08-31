@@ -73,47 +73,41 @@ Stage 1 candidate settings:
 |---|---|---|
 | `MARC_STAGE1_DETECTOR` | bundled YOLO when present | `yolo` for live candidates; `stub` is test-only |
 | `MARC_SAR_DETECTOR` | `qwen` | Base and submission Compose pin Qwen verification on |
-| `MARC_QWEN_BACKEND` | `remote` in demo | The demo uses the OpenAI-compatible Qwen vLLM on this host; root submission Compose remains local Qwen |
+| `MARC_QWEN_BACKEND` | `remote` | Root Compose starts the OpenAI-compatible Qwen vLLM on this host |
 | `MARC_QWEN_MODEL_DIR` | `/agent/models/runtime/stage1-sar-qwen/model` | Complete pinned local Transformers snapshot |
 | `MARC_QWEN_BASE_URL` | `http://127.0.0.1:8004/v1` in demo | Remote vLLM URL including `/v1` |
 | `STREAM` | `false` | `true` selects `http://10.0.0.200:8004/v1`; otherwise Qwen uses localhost |
 | `MARC_QWEN_API_KEY` | local vLLM key in demo | Bearer key configured on the vLLM server; never written to metrics |
 | `MARC_QWEN_MODEL` | `qwen3-vl-8b` in demo | Name supplied through vLLM `--served-model-name` |
 | `MARC_QWEN_TIMEOUT_S` | `90` | Remote request budget before deterministic fallback; wall wait is also capped |
-| `MARC_QWEN_WALL_TIMEOUT_S` | `12` | Per-attempt HTTP wait cap; retries once when remaining budget covers two attempts |
+| `MARC_QWEN_WALL_TIMEOUT_S` | `90` | Per-attempt HTTP ceiling; the round-aware budget normally stops at the 2-second submit reserve |
 | `MARC_QWEN_MAX_NEW_TOKENS` | `48` | Local and remote generation budget; 8 tokens truncates `TARGET_ID\|ANCHOR_ID` |
 | `MARC_QWEN_MAX_CROPS` | `12` | Per-person crops; annotated camera views still cover every candidate |
 | `MARC_STAGE1_METRICS_PATH` | `artifacts/stage1_rounds.jsonl` | Per-round candidate counts, latency, selection method, and failures |
 
 ### Qwen on the demo host
 
-The standard `demo/docker-compose.yml` uses the host-network vLLM endpoint at
+The legacy `demo/docker-compose.yml` uses the host-network vLLM endpoint at
 `http://127.0.0.1:8004/v1`, serving `qwen3-vl-8b`. Start that service before
 `docker compose up`; the existing remote adapter handles the OpenAI-compatible API.
 Use `STREAM=true docker compose up --build agent` when vLLM is on the machine at
 `10.0.0.200`; the flag overrides `MARC_QWEN_BASE_URL` for that run.
 
-### Local Qwen override
+### Baked submission and local development
 
-The root submission Compose file still forces local Qwen.
-The root submission build bakes the pinned model into the image and needs no Qwen
-environment variables at runtime.
+The root submission Compose starts a dedicated vLLM image with the pinned fine-tuned
+Qwen snapshot baked in. The agent calls it over participant-host loopback; neither
+container downloads anything at runtime.
 
 For practice, mount the downloaded snapshot instead of copying 17.5 GB into every image:
 
 ```bash
-export MARC_QWEN_HOST_MODEL_DIR="$HOME/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct"
-docker compose -f demo/docker-compose.yml \
-  -f demo/docker-compose.qwen-local.yml up --build agent
+export MARC_QWEN_HOST_MODEL_DIR=/path/to/qwen3-vl-8b-stage1-finetuned
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
-The root submission image downloads this pinned snapshot during `docker compose`
-build. Judging runtime is offline and does not apply a host bind-mount.
-
-For a faster local rebuild while iterating, you can still mount a host snapshot
-with `demo/docker-compose.qwen-local.yml` as above.
-That override skips the image copy because the read-only host mount supplies the
-same complete local snapshot; inference still runs inside the participant container.
+The development override skips model downloads and live-mounts the source tree. The
+default root build uses no model or code bind mounts.
 
 ### Qwen on a separate workstation
 

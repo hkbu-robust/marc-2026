@@ -150,3 +150,38 @@ class DepthApproachOverrunTests(unittest.TestCase):
         self.assertEqual(0.0, ang)
         self.assertEqual("drive", ctrl._phase)
         self.assertAlmostEqual(0.10, BURST_SKIP_PAD_M, places=6)
+
+    def test_alignment_yaws_only_for_a_fresh_camera_frame(self):
+        ctrl = self._ctrl(align_settle_s=0.0)
+        measurement = dict(lat_err=0.4, lat_n_obj=1, fwd=1.0)
+
+        self.assertNotEqual((0.0, 0.0), ctrl._command({**measurement, "is_new": True}))
+        self.assertEqual((0.0, 0.0), ctrl._command({**measurement, "is_new": False}))
+
+    def test_aligned_far_target_drives_without_near_lock(self):
+        ctrl = self._ctrl(center_tol=0.03, target_lock_drive_tol=0.10)
+
+        lin, ang = ctrl._command(
+            dict(lat_err=0.08, lat_n_obj=1, fwd=2.0, is_new=True)
+        )
+
+        self.assertGreater(lin, 0.0)
+        self.assertEqual(0.0, ang)
+        self.assertEqual("drive", ctrl._phase)
+
+    def test_alignment_reverses_last_turn_to_reacquire_lost_target(self):
+        ctrl = self._ctrl(align_settle_s=0.0)
+        _lin, tracked_yaw = ctrl._command(
+            dict(lat_err=0.4, lat_n_obj=1, fwd=2.0, is_new=True)
+        )
+
+        lin, recovery_yaw = ctrl._command(
+            dict(lat_err=None, lat_n_obj=0, fwd=None, is_new=True)
+        )
+
+        self.assertEqual(0.0, lin)
+        self.assertEqual(-tracked_yaw, recovery_yaw)
+        self.assertEqual(
+            (lin, recovery_yaw),
+            ctrl._command(dict(lat_err=None, lat_n_obj=0, fwd=None, is_new=False)),
+        )

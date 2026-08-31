@@ -68,7 +68,7 @@ class QwenRemoteConfig:
     model_name: str
     timeout_s: float
     max_new_tokens: int
-    wall_timeout_s: float = 12.0
+    wall_timeout_s: float = 90.0
 
     @property
     def chat_completions_url(self) -> str:
@@ -107,7 +107,7 @@ class QwenRemoteConfig:
             raise QwenConfigurationError("MARC_QWEN_MODEL must not be empty")
         try:
             timeout_s = float(env.get("MARC_QWEN_TIMEOUT_S") or 90.0)
-            wall_timeout_s = float(env.get("MARC_QWEN_WALL_TIMEOUT_S") or 12.0)
+            wall_timeout_s = float(env.get("MARC_QWEN_WALL_TIMEOUT_S") or 90.0)
             max_new_tokens = int(env.get("MARC_QWEN_MAX_NEW_TOKENS") or 48)
         except (TypeError, ValueError) as exc:
             raise QwenConfigurationError(
@@ -181,11 +181,7 @@ class QwenBundleStatus:
         return not self.missing
 
 
-_REQUIRED_SNAPSHOT_FILES = (
-    "config.json",
-    "preprocessor_config.json",
-    "tokenizer_config.json",
-)
+_REQUIRED_SNAPSHOT_FILES = ("config.json", "tokenizer_config.json")
 
 
 def _is_lfs_pointer(path: Path) -> bool:
@@ -209,6 +205,11 @@ def bundle_status(config: Optional[QwenRuntimeConfig] = None) -> QwenBundleStatu
         path = cfg.model_dir / name
         if not path.is_file():
             missing.append(name)
+    if not any(
+        (cfg.model_dir / name).is_file()
+        for name in ("processor_config.json", "preprocessor_config.json")
+    ):
+        missing.append("processor_config.json or preprocessor_config.json")
 
     index_path = cfg.model_dir / "model.safetensors.index.json"
     if index_path.is_file():

@@ -42,10 +42,14 @@ from marc_agent.perception.round_dump import (
 )
 from marc_agent.perception.cctv_project import CctvProjector
 from marc_agent.perception.lost_item_priors import people_world_xy
-from marc_agent.perception.cctv_round import discovery_timeout_from_limit
+from marc_agent.perception.cctv_round import (
+    discovery_timeout_from_limit,
+    fetch_cctv_round,
+)
 from marc_agent.perception.stage1_pipeline import (
     append_stage1_record,
     get_default_verifier,
+    has_complete_camera_coverage,
     log_qwen_startup_status,
     run_stage1_round,
     static_scene_key,
@@ -64,10 +68,11 @@ from nearfield import (
     NearFieldAcquire,
     PEEK_PERIOD_S,
     PEEK_RANGE_PAD_M,
-    make_detector,
+    YoloDetector,
     peek_yolo_handoff,
 )
 from manip_dataset.base_hold import StationaryBase
+from manip_dataset.depth_approach import ApproachConfig, DepthApproachController
 from manip_dataset.graspgenx_pick import StagedGraspGenXPickRuntime
 from manip_dataset.pick_target import stable_pick_target
 
@@ -84,6 +89,8 @@ STAGE2_STUCK_TIME_S = 8.0      # if movement < threshold for this long, replan f
 STAGE2_STUCK_MOVE_M = 0.05
 STAGE2_REPLAN_CAP = 50         # fail closed if the crop stays sealed
 GOAL_TOLERANCE = 0.7           # reached test (m) around the search-area approach goal
+STAGE2_APPROACH_TIMEOUT_S = 120.0
+STAGE2_DELIVERY_RESERVE_S = 120.0
 
 # -- Pick approach --
 # Stop the chassis this far (m) in front of the object, then close the last stretch with a
@@ -111,10 +118,10 @@ class DemoParticipant:
         self._stage1_grounding_cache = {}
         self._stage1_lock = threading.Lock()
         self._stage1_projector = None
-        self._nearfield_detector = None
         self._round_clock = RoundClock()
         self._qwen_verifier = get_default_verifier()
         self._approach_snap = None
+        self._stage2_deadline = None
         self._register_handlers()
 
     # -- handler registration --
@@ -174,7 +181,11 @@ class DemoParticipant:
                 anchor_id=cached.anchor_id,
             )
             log.info("[Stage1] reused static-scene grounding key=%s", key)
-        elif key is not None and round_result.grounding is not None:
+        elif (
+            key is not None
+            and round_result.grounding is not None
+            and has_complete_camera_coverage(round_result.candidates.detections)
+        ):
             self._stage1_grounding_cache[key] = round_result
         self._last_stage1_candidates = round_result.candidates
         self._last_detections = round_result.candidates.detections
@@ -233,9 +244,10 @@ class DemoParticipant:
     def _on_stage2_mission(self, mission):
         log.info("[Stage2] task: \"%s\" (limit %.0fs)",
                  mission.task_description, mission.time_limit)
-        # Store owner_position for the delivery leg (#14); this issue does not drive there.
+        # Store the runtime-provided delivery coordinate for the post-pick leg.
         self._state.adopt_mission(mission)
         self._approach_snap = None
+        self._stage2_deadline = self.client.now_s() + float(mission.time_limit)
         if self._state.owner_xy is not None:
             log.info("[Stage2] owner_position(runtime-provided)=%s", self._state.owner_xy)
         self._round_clock.begin(getattr(mission, "time_limit", None), self.client.now_s())
@@ -318,25 +330,38 @@ class DemoParticipant:
 
         Leg 1: D* to the reveal search-area approach goal. #12 localizes in RGB-D,
         then #13 grasps only on positive is_grasping() and loads the basket.
-        Delivery to owner_position is #14 — stored, not driven here.
+        Leg 2 carries the basket to the runtime-provided owner_position.
         """
         c = self.client
         self._approach_snap = None
         # SIM-time deadline (via /clock) -- shared across all legs, robust to real-time factor < 1.
-        deadline = c.now_s() + STAGE2_NAV_TIMEOUT_S
+        deadline = min(
+            c.now_s() + STAGE2_NAV_TIMEOUT_S,
+            self._stage2_deadline or float("inf"),
+        )
         dump = stage2_dir()
 
         self._wait_for_search_goal(timeout=5.0)
         search = self._state.search_xy()
         log.info("[Stage2] navigation start -- search=%s r=%.1f type=%s (timeout %.0fs)",
                  search, self._state.hint_radius, self._state.target_type or "-",
-                 STAGE2_NAV_TIMEOUT_S)
+                 max(0.0, deadline - c.now_s()))
 
         self._stow_arm()
         unload_cctv_yolo()
         unload_qwen()
         self._qwen_verifier = None
-        detector = self._preload_nearfield()
+        target_name = self._state.target_type or ""
+        approach_controller = DepthApproachController(c, ApproachConfig.from_env())
+        approach_controller.set_target(target_name)
+        detector = YoloDetector(approach_controller._yolo)
+        try:
+            detector.load()
+        except Exception as exc:
+            log.warning("[Stage2] near-field YOLO preload failed: %s", exc)
+        nearfield = NearFieldAcquire(
+            c, detector, dump_dir=dump, people_xy=self._state.people_xy,
+        )
 
         picked = False
         reached_search = False
@@ -433,12 +458,26 @@ class DemoParticipant:
             log.warning("[Stage2] skip pick -- near-field not started (%s)", handoff)
             dump_json(dump, "pick.json", {"skipped": True, "reason": handoff})
         else:
-            log.info("[Stage2] starting near-field YOLO (%s)", handoff)
+            log.info("[Stage2] starting calibrated near-field approach (%s)", handoff)
             reveal = self._reveal if self._reveal is not None else c.stage2_reveal
-            nearfield = NearFieldAcquire(
-                c, detector, dump_dir=dump, people_xy=self._state.people_xy,
-            )
-            target = nearfield.acquire(reveal, deadline)
+            approach_target = None
+            approach_deadline = min(deadline, c.now_s() + STAGE2_APPROACH_TIMEOUT_S)
+            if approach_controller.start():
+                while c.is_running and c.now_s() < approach_deadline:
+                    if approach_controller.tick():
+                        approach_controller.settle()
+                        approach_target = approach_controller.locked_target(target_name)
+                        break
+                    c.sleep(approach_controller.cfg.tick_s)
+                if approach_controller.active:
+                    approach_controller.cancel()
+                    log.warning("[Stage2] calibrated approach timed out; using scan fallback")
+            else:
+                log.warning(
+                    "[Stage2] calibrated approach unavailable (%s); using scan fallback",
+                    approach_controller.last_failure,
+                )
+            target = approach_target or nearfield.acquire(reveal, deadline)
             for _ in range(5):
                 c.send_cmd_vel(0.0, 0.0)
                 c.sleep(0.1)
@@ -447,6 +486,7 @@ class DemoParticipant:
                     nearfield,
                     target.name or self._state.target_type or "",
                     log=log.info,
+                    posture_hint=approach_target,
                 )
                 if stable is None:
                     target.valid = False
@@ -494,6 +534,8 @@ class DemoParticipant:
 
                     pick_rt._visual_target_observer = _observe_visual_target
 
+                latest_target = [target]
+
                 def _reacquire():
                     before_reacquire(pick_rt, detector)
                     nxt = stable_pick_target(
@@ -502,56 +544,127 @@ class DemoParticipant:
                         log=log.info,
                     )
                     if nxt is not None:
+                        latest_target[0] = nxt
                         before_graspgenx(detector)
                     return nxt
 
                 pick_rt._reacquire_fn = _reacquire
-                # Zero cmd_vel does not stop gravity-driven rolling on slopes. Keep
-                # the chassis anchored for staging, inference, contact, and lift.
-                with StationaryBase(c, log=log.warning):
-                    pick = pick_rt.run(target, deadline=deadline, reveal=reveal)
-                self._state.adopt_pick(pick)
-                picked = pick.ok
+                pick_deadline = deadline - STAGE2_DELIVERY_RESERVE_S
+                pick = None
+                total_attempts = 0
+                batch = 0
+                while c.is_running and c.now_s() < pick_deadline and not picked:
+                    batch += 1
+                    # Zero cmd_vel does not stop gravity-driven rolling on slopes. Keep
+                    # the chassis anchored for staging, inference, contact, and lift.
+                    with StationaryBase(c, log=log.warning):
+                        result = pick_rt.run(
+                            target, deadline=pick_deadline, reveal=reveal,
+                        )
+                    total_attempts += result.attempts
+                    pick = replace(result, attempts=total_attempts)
+                    self._state.adopt_pick(pick)
+                    picked = pick.ok
+                    target = latest_target[0]
+                    if not picked and c.now_s() < pick_deadline:
+                        log.info(
+                            "[Stage2] pick batch %d failed after %d total attempts; "
+                            "retrying until delivery reserve",
+                            batch,
+                            total_attempts,
+                        )
                 c.send_cmd_vel(0.0, 0.0)
                 if picked:
                     after_successful_pick(pick_rt, detector)
-                dump_json(dump, "pick.json", {
-                    "ok": pick.ok,
-                    "reason": pick.reason,
-                    "attempts": pick.attempts,
-                    "grasped": pick.grasped,
-                    "basket_occupied": pick.basket_occupied,
-                    "policy": pick.policy,
-                    "target": {
-                        "name": target.name,
-                        "fwd": target.fwd,
-                        "lat": target.lat,
-                        "z": target.z,
-                        "conf": target.conf,
-                        "valid": target.valid,
-                        "bbox_xyxy": list(target.bbox_xyxy) if target.bbox_xyxy else None,
-                    },
-                })
-                log.info("[Stage2] pick %s reason=%s attempts=%d grasping=%s basket=%s policy=%s",
-                         "ok" if picked else "failed", pick.reason, pick.attempts,
-                         pick.grasped, pick.basket_occupied, pick.policy)
+                if pick is None:
+                    log.info("[Stage2] delivery reserve reached before first pick attempt")
+                    dump_json(dump, "pick.json", {
+                        "skipped": True,
+                        "reason": "delivery_reserve",
+                    })
+                else:
+                    dump_json(dump, "pick.json", {
+                        "ok": pick.ok,
+                        "reason": pick.reason,
+                        "attempts": pick.attempts,
+                        "grasped": pick.grasped,
+                        "basket_occupied": pick.basket_occupied,
+                        "policy": pick.policy,
+                        "target": {
+                            "name": target.name,
+                            "fwd": target.fwd,
+                            "lat": target.lat,
+                            "z": target.z,
+                            "conf": target.conf,
+                            "valid": target.valid,
+                            "bbox_xyxy": list(target.bbox_xyxy) if target.bbox_xyxy else None,
+                        },
+                    })
+                    log.info(
+                        "[Stage2] pick %s reason=%s attempts=%d grasping=%s "
+                        "basket=%s policy=%s",
+                        "ok" if picked else "failed",
+                        pick.reason,
+                        pick.attempts,
+                        pick.grasped,
+                        pick.basket_occupied,
+                        pick.policy,
+                    )
+
+        returned_to_owner = self._state.owner_xy is None
+        delivered = picked and returned_to_owner
+        delivery = None
+        if self._state.owner_xy is not None:
+            log.info("[Stage2] leg2 -> owner %s", self._state.owner_xy)
+            delivery = self._navigate_to(
+                self._state.owner_xy,
+                deadline,
+                tol=GOAL_TOLERANCE,
+                inflation_m=STAGE2_INFLATION_M,
+                exclude_m=0.6,
+                cruise=True,
+                leg="delivery",
+            )
+            returned_to_owner = delivery.reached
+            basket_at_owner = (
+                pick_rt.poll_basket() is True
+                if picked else c.is_basket_occupied() is True
+            )
+            delivered = returned_to_owner and basket_at_owner
+            log.info(
+                "[Stage2] leg2 result=%s reason=%s replans=%d basket=%s",
+                delivery.status.value,
+                delivery.reason,
+                delivery.replan_count,
+                basket_at_owner,
+            )
+            dump_json(dump, "delivery.json", {
+                "status": delivery.status.value,
+                "reason": delivery.reason,
+                "reached": delivery.reached,
+                "replan_count": delivery.replan_count,
+                "owner_xy": list(self._state.owner_xy),
+                "pose_xy": list(delivery.pose_xy) if delivery.pose_xy is not None else None,
+                "basket_occupied": basket_at_owner,
+            })
 
         if not picked:
             self._stow_arm()
 
         c.stop()
-        log.info("[Stage2] search-area nav finished (reached=%s yolo=%s) -> task_complete",
-                 reached_search, handoff)
-        c.task_complete()
-
-    def _preload_nearfield(self):
-        if self._nearfield_detector is None:
-            self._nearfield_detector = make_detector()
-        try:
-            self._nearfield_detector.load()
-        except Exception as exc:
-            log.warning("[Stage2] near-field YOLO preload failed: %s", exc)
-        return self._nearfield_detector
+        if returned_to_owner:
+            log.info(
+                "[Stage2] owner reached (object_delivered=%s) -> task_complete",
+                delivered,
+            )
+            c.task_complete()
+        else:
+            log.warning(
+                "[Stage2] incomplete: picked=%s owner=%s delivery=%s",
+                picked,
+                self._state.owner_xy,
+                None if delivery is None else delivery.status.value,
+            )
 
     def _stow_arm(self):
         """Fold the arm to the HOME pose to lower the center of gravity -- tip-over prevention.
@@ -715,6 +828,7 @@ class DemoParticipant:
     def run(self):
         if not self.client.connect():
             raise SystemExit("Registration failed -- check the runtime and the token.")
+        fetch_cctv_round(self.client)
         self.client.run()
 
 

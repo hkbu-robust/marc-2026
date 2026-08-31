@@ -161,6 +161,9 @@ class PickRuntimeTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual("no_grasp", result.reason)
 
+    def test_production_default_allows_two_retries(self):
+        self.assertEqual(3, PickRuntime(ScriptClient()).max_attempts)
+
     def test_openvla_policy_runs_instead_of_ik(self):
         client = ScriptClient()
         policy = object()
@@ -238,6 +241,12 @@ class PickRuntimeTests(unittest.TestCase):
         self.assertIn("unload_qwen", src)
         self.assertIn("after_successful_pick", src)
         self.assertIn("stable_pick_target", src)
+        self.assertIn('leg="delivery"', src)
+        self.assertIn("self._state.owner_xy", src)
+        self.assertIn("basket_at_owner", src)
+        self.assertIn("returned_to_owner", src)
+        self.assertIn("STAGE2_DELIVERY_RESERVE_S = 120.0", src)
+        self.assertIn("while c.is_running and c.now_s() < pick_deadline", src)
 
     def test_graspgenx_generator_pose_feeds_ik(self):
         client = ScriptClient()

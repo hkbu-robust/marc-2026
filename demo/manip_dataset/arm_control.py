@@ -758,6 +758,9 @@ class ArmTeleop:
             q = read_arm_q(self._client)
             if q is None:
                 self._sleep(dt)
+                stale_reads += 1
+                if stale_reads >= max_stale_reads:
+                    break
                 continue
             actual_T = self.kin.fk(q)
             actual = actual_T[:3, 3] + actual_T[:3, :3][:, 2] * offset
@@ -1650,8 +1653,13 @@ class ArmTeleop:
         dt = 1.0 / self.cfg.rate_hz
         recorded = 0
         prev_ee = None
+        previous_q = None
+        last_cmd = None
+        fresh_ticks = 0
+        stale_reads = 0
+        max_stale_reads = max(3, int(3.0 * self.cfg.rate_hz))
 
-        for _ in range(self.cfg.max_ticks_per_click):
+        while fresh_ticks < self.cfg.max_ticks_per_click:
             q = read_arm_q(self._client)
             if q is None:
                 self._sleep(dt)
@@ -1668,6 +1676,23 @@ class ArmTeleop:
                     )
                 )
             )
+            settled = (
+                dist < self.cfg.settle_tol_m
+                and rot_dist < self.cfg.settle_tol_rot_rad
+            )
+            if settled and (recorded > 0 or prev_ee is not None):
+                break
+            if previous_q is not None and np.array_equal(q, previous_q):
+                if last_cmd is not None:
+                    self._publish(last_cmd)
+                self._sleep(dt)
+                stale_reads += 1
+                if stale_reads >= max_stale_reads:
+                    break
+                continue
+            previous_q = q.copy()
+            stale_reads = 0
+            fresh_ticks += 1
 
             # Per-tick action: progress toward goal this tick (pos) + 0 rot after first,
             # grip held constant. First tick carries the full intended delta label.
@@ -1691,6 +1716,7 @@ class ArmTeleop:
             step = limit_joint_delta(dq, self.cfg.ik_joint_step)
             cmd = clamp_arm_q(q + step)
             self._publish(cmd)
+            last_cmd = cmd
 
             if on_step is not None:
                 obs = self.snapshot_obs()
@@ -1698,12 +1724,6 @@ class ArmTeleop:
                     on_step(obs, action)
                     recorded += 1
 
-            settled = (
-                dist < self.cfg.settle_tol_m
-                and rot_dist < self.cfg.settle_tol_rot_rad
-            )
-            if settled and (recorded > 0 or prev_ee is not None):
-                break
             prev_ee = ee.copy()
             self._sleep(dt)
 

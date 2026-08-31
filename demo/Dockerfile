@@ -16,6 +16,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 # Ubuntu 22.04 + ROS2 Humble + Python 3.10 (provides rclpy / *_msgs, default RMW=FastDDS)
 FROM ros:humble-ros-base AS agent
 
+ARG MARC_BUILD_MODE=baked
+ARG GRASPGENX_REVISION=b9429097728cb1c430dd78b92edf17ba318aad03
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Participant algorithm dependencies. numpy + pyyaml (stdlib/ROS2 for the rest), plus placo
@@ -51,23 +53,31 @@ RUN --network=host --mount=type=cache,target=/root/.cache/pip \
     && pip3 install --no-deps urdfpy \
     && pip3 install --upgrade "packaging>=26.2" "setuptools>=64,<78" wheel setuptools-scm \
     && python3 -c "import setuptools; v=tuple(map(int, setuptools.__version__.split('.')[:2])); assert v >= (64, 0), setuptools.__version__"
-# Fast-iteration branch: do not fetch or install GraspGenX.
-# RUN --network=host --mount=type=cache,target=/root/.cache/pip \
-#     git init /tmp/GraspGenX \
-#     && git -C /tmp/GraspGenX remote add origin https://github.com/NVlabs/GraspGenX.git \
-#     && git -C /tmp/GraspGenX fetch --depth 1 origin b9429097728cb1c430dd78b92edf17ba318aad03 \
-#     && git -C /tmp/GraspGenX checkout --detach FETCH_HEAD \
-#     && pip3 install --no-deps --no-build-isolation /tmp/GraspGenX \
-#     && python3 -c "from graspgenx.grasp_server import GraspGenXSampler; print('graspgenx import ok')" \
-#     && rm -rf /tmp/GraspGenX
+RUN --network=host --mount=type=cache,target=/root/.cache/pip \
+    if [ "$MARC_BUILD_MODE" = baked ]; then \
+        git init /tmp/GraspGenX \
+        && git -C /tmp/GraspGenX remote add origin https://github.com/NVlabs/GraspGenX.git \
+        && for delay in 0 15 45 90; do \
+            [ "$delay" -eq 0 ] || sleep "$delay"; \
+            git -C /tmp/GraspGenX fetch --depth 1 origin "$GRASPGENX_REVISION" && break; \
+            [ "$delay" -ne 90 ] || exit 1; \
+        done \
+        && git -C /tmp/GraspGenX checkout --detach FETCH_HEAD \
+        && pip3 install --no-deps --no-build-isolation /tmp/GraspGenX \
+        && rm -rf /tmp/GraspGenX; \
+    elif [ "$MARC_BUILD_MODE" != development ]; then \
+        echo "MARC_BUILD_MODE must be baked or development" >&2; exit 2; \
+    fi
 
 WORKDIR /agent
 
-# context = starter kit root -> copy marc_sdk, participant intelligence, demo adapter, models
-COPY marc_sdk /agent/marc_sdk
-COPY marc_agent /agent/marc_agent
-COPY demo     /agent/demo
+# Copy only the downloader and its small validation dependencies before the
+# runtime-asset layer. Participant code changes should not re-fetch model data.
 COPY models/runtime /agent/models/runtime
+COPY marc_agent/__init__.py /agent/marc_agent/__init__.py
+COPY marc_agent/graspgenx_policy.py /agent/marc_agent/graspgenx_policy.py
+COPY marc_agent/perception/bundle_paths.py /agent/marc_agent/perception/bundle_paths.py
+COPY marc_agent/perception/qwen_runtime.py /agent/marc_agent/perception/qwen_runtime.py
 
 ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 ENV PYTHONPATH=/agent:/agent/demo
@@ -81,14 +91,23 @@ ENV YOLO_CONFIG_DIR=/agent/demo/weights
 # Optional HF_TOKEN (BuildKit secret) so Hub rate limits can use a logged-in account.
 # Not required: organizers can rebuild anonymously. Never ENV the token into the image.
 # HF_HUB_DISABLE_XET: Hub Xet can abort mid-shard with "error decoding response body".
-# Bake Qwen only when MARC_QWEN_BACKEND=local (submission default). Remote/vLLM
-# practice builds skip that Hub pull so code-only --build stays fast.
-ARG MARC_QWEN_BACKEND=local
+# The agent image bakes both YOLO checkpoints and GraspGen-X. Qwen is baked into
+# the sibling vLLM image, so this image deliberately uses the remote adapter.
+ARG MARC_QWEN_BACKEND=remote
 RUN --network=host \
     --mount=type=cache,target=/root/.cache/huggingface \
     --mount=type=secret,id=HF_TOKEN,env=HF_TOKEN,required=false \
-    MARC_QWEN_BACKEND="$MARC_QWEN_BACKEND" HF_HUB_DISABLE_XET=1 \
+    MARC_BUILD_MODE="$MARC_BUILD_MODE" MARC_QWEN_BACKEND="$MARC_QWEN_BACKEND" HF_HUB_DISABLE_XET=1 \
         python3 /agent/models/runtime/fetch_runtime_weights.py
+
+RUN if [ "$MARC_BUILD_MODE" = baked ]; then \
+        python3 -c "from graspgenx.grasp_server import GraspGenXSampler; print('graspgenx import ok')"; \
+    fi
+
+# context = starter kit root -> participant SDK, intelligence, and demo adapter
+COPY marc_sdk /agent/marc_sdk
+COPY marc_agent /agent/marc_agent
+COPY demo     /agent/demo
 
 # Offline after weights are in the image. Do not download at scoring runtime.
 ENV YOLO_OFFLINE=1

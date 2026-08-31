@@ -1515,6 +1515,34 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("cam:tumbler:1", selected.target.candidate_id)
         self.assertEqual(1, len(calls))
 
+    def test_remote_weak_parking_override_keeps_strong_geometry(self):
+        text = "I dropped my tumbler as I got out of my car in the parking lot."
+        parsed = parse_command(text, expected_intent=Intent.FIND)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam:tumbler:0", "tumbler", (20, 100, 60, 160), "cam", 0.9),
+                _object("cam:tumbler:1", "tumbler", (500, 100, 505, 125), "cam", 0.08),
+                _object("cam:police_car:0", "police_car", (10, 50, 200, 200), "cam"),
+                _object("cam:sports_car:0", "sports_car", (400, 50, 620, 220), "cam"),
+            ],
+            camera_ids=["cam"],
+        )
+
+        class Verifier:
+            method = "qwen_remote"
+
+            def __call__(self, board):
+                if "TARGET_ID|ANCHOR_ID" in board.prompt:
+                    return "cam:tumbler:1|cam:sports_car:0"
+                return "cam:tumbler:1"
+
+        selected = select_object_candidate(
+            parsed, round_, command_text=text, verifier=Verifier()
+        )
+
+        self.assertEqual("cam:tumbler:0", selected.target.candidate_id)
+        self.assertEqual("cam:police_car:0", selected.anchor.candidate_id)
+
     def test_remote_on_request_keeps_strict_support_over_copresence(self):
         text = "Find the tumbler on the bench."
         parsed = parse_command(text)
