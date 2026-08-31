@@ -57,7 +57,14 @@ the 0.58 m envelope.
 Class routing is centralized in `grasp_profiles.py`. Mug, cola can, juice,
 disposable cup, and umbrella each have copied `lying_<class>` and
 `upright_<class>` profiles. Sunblock always uses `upright_sunblock`, regardless
-of observed posture. Tissue and pencilcase always use their lying profile.
+of observed posture. Its dedicated floor-load variant keeps the gripper fully
+open and solves a coordinated `1.45` rad tool tilt beside the chassis while
+elevated, making the final gripper rod nearly parallel to the floor without
+arcing inward. It extends and descends with that orientation locked, then
+advances to surround the short object, pauses, and only closes. Its auto-approach
+target is 0.65 m instead of the shared 0.70 m upright target, bringing this one
+profile slightly closer and keeping the rear descent away from full extension.
+Tissue and pencilcase always use their lying profile.
 An upright cracker box uses `upright_cracker_box`, copied from the lying-tumbler
 motion. A flat cracker box resolves to `lying_cracker_box` with `flip_required`
 and fails before arm movement until a physical flip-and-reacquire trajectory is

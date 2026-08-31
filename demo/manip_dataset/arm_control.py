@@ -1134,6 +1134,25 @@ class ArmTeleop:
                 rotation_tolerance_rad=float(grasp_profile.center_rot_tolerance_rad),
             ):
                 return False
+            rear_transit_tilt = transit_tilt
+            if grasp_profile.side_floor_load:
+                self._log(
+                    "[graspgenx] sunblock completing horizontal fold beside "
+                    "chassis tilt=%.2f before extension"
+                    % float(grasp_profile.approach_tilt_rad)
+                )
+                horizontal_q = self.move_grasp_pose_joint_path(
+                    fold_pad,
+                    yaw,
+                    "ggx-sunblock-fold-horizontal-clear",
+                    approach_tilt_rad=float(grasp_profile.approach_tilt_rad),
+                    pad_center_offset_m=pad_offset,
+                    speed_rad_s=fold_speed,
+                    control_rate_hz=transit_rate_hz,
+                )
+                if horizontal_q is None:
+                    return False
+                rear_transit_tilt = float(grasp_profile.approach_tilt_rad)
             self._log(
                 "[graspgenx] upright moving outward while already folded "
                 "to rear_high=(%.3f,%.3f,%.3f)"
@@ -1143,60 +1162,115 @@ class ArmTeleop:
                 rear_high,
                 yaw,
                 "ggx-upright-rear-align-folded",
-                approach_tilt_rad=transit_tilt,
+                approach_tilt_rad=rear_transit_tilt,
                 pad_center_offset_m=pad_offset,
                 cart_step_m=staging_cart_step,
                 joint_step_rad=staging_joint_step,
                 control_rate_hz=transit_rate_hz,
             ):
                 return False
-            self._log(
-                "[graspgenx] upright descending only to floor-safe wrist-fold "
-                "transition=(%.3f,%.3f,%.3f)"
-                % (
-                    rear_transition[0],
-                    rear_transition[1],
-                    rear_transition[2],
+            descent_xy_limit = (
+                None if grasp_profile.physically_validated else 0.025
+            )
+            if grasp_profile.side_floor_load:
+                # The short sunblock cannot tolerate the transit-angle fingers
+                # The horizontal orientation was established beside the chassis
+                # and preserved during extension, avoiding a full-reach IK solve.
+                folded_q = read_arm_q(self._client)
+                if folded_q is None:
+                    self._log(
+                        "[arm] ggx-upright-rear-align-folded: no joint_states"
+                    )
+                    return False
+                # Use the measured solved pad position for a strictly vertical
+                # descent while preserving the completed horizontal tool pose.
+                folded_high_T = self.kin.fk(folded_q)
+                folded_high_pad = (
+                    folded_high_T[:3, 3]
+                    + folded_high_T[:3, :3][:, 2] * max(0.0, pad_offset)
                 )
-            )
-            if not self.move_grasp_line(
-                rear_transition,
-                yaw,
-                "ggx-upright-descend-to-fold",
-                approach_tilt_rad=transit_tilt,
-                pad_center_offset_m=pad_offset,
-                cart_step_m=staging_cart_step,
-                joint_step_rad=staging_joint_step,
-                control_rate_hz=transit_rate_hz,
-                # The descent is still a full standoff behind the object. The
-                # copied experimental side profiles may bow slightly more than
-                # the validated tumbler trajectory at full extension, but must
-                # settle before the guarded wrist fold and final insertion.
-                max_xy_error_m=(
-                    None if grasp_profile.physically_validated else 0.025
-                ),
-            ):
-                return False
-            self._log(
-                "[graspgenx] upright folding in place at floor-safe transition "
-                "(%.3f,%.3f,%.3f); no further descent"
-                % (
-                    rear_transition[0], rear_transition[1], rear_transition[2],
+                floor_load_descent = np.array(
+                    (
+                        float(folded_high_pad[0]),
+                        float(folded_high_pad[1]),
+                        float(rear_transition[2]),
+                    ),
+                    dtype=np.float64,
                 )
-            )
-            folded_q = self.move_grasp_pose_joint_path(
-                rear_transition,
-                yaw,
-                "ggx-upright-coordinated-fold",
-                approach_tilt_rad=float(grasp_profile.approach_tilt_rad),
-                pad_center_offset_m=pad_offset,
-                speed_rad_s=fold_speed,
-                control_rate_hz=transit_rate_hz,
-                floor_z=getattr(target, "support_z", None),
-                floor_guard_m=0.03,
-            )
-            if folded_q is None:
-                return False
+                self._log(
+                    "[graspgenx] sunblock descending with L-shaped wrist locked "
+                    "to floor-load pose=(%.3f,%.3f,%.3f)"
+                    % (
+                        floor_load_descent[0],
+                        floor_load_descent[1],
+                        floor_load_descent[2],
+                    )
+                )
+                if not self.move_grasp_line(
+                    floor_load_descent,
+                    yaw,
+                    "ggx-sunblock-descend-parallel",
+                    pad_center_offset_m=pad_offset,
+                    cart_step_m=staging_cart_step,
+                    joint_step_rad=staging_joint_step,
+                    control_rate_hz=transit_rate_hz,
+                    preserve_current_orientation=True,
+                    max_xy_error_m=descent_xy_limit,
+                ):
+                    return False
+                folded_q = read_arm_q(self._client)
+                if folded_q is None:
+                    self._log(
+                        "[arm] ggx-sunblock-descend-parallel: no joint_states"
+                    )
+                    return False
+            else:
+                self._log(
+                    "[graspgenx] upright descending only to floor-safe "
+                    "wrist-fold transition=(%.3f,%.3f,%.3f)"
+                    % (
+                        rear_transition[0],
+                        rear_transition[1],
+                        rear_transition[2],
+                    )
+                )
+                if not self.move_grasp_line(
+                    rear_transition,
+                    yaw,
+                    "ggx-upright-descend-to-fold",
+                    approach_tilt_rad=transit_tilt,
+                    pad_center_offset_m=pad_offset,
+                    cart_step_m=staging_cart_step,
+                    joint_step_rad=staging_joint_step,
+                    control_rate_hz=transit_rate_hz,
+                    # The descent is still a full standoff behind the object.
+                    # Copied side profiles may bow slightly more than the
+                    # validated tumbler trajectory at full extension.
+                    max_xy_error_m=descent_xy_limit,
+                ):
+                    return False
+                self._log(
+                    "[graspgenx] upright folding in place at floor-safe "
+                    "transition (%.3f,%.3f,%.3f); no further descent"
+                    % (
+                        rear_transition[0],
+                        rear_transition[1],
+                        rear_transition[2],
+                    )
+                )
+                folded_q = self.move_grasp_pose_joint_path(
+                    rear_transition,
+                    yaw,
+                    "ggx-upright-coordinated-fold",
+                    approach_tilt_rad=float(grasp_profile.approach_tilt_rad),
+                    pad_center_offset_m=pad_offset,
+                    speed_rad_s=fold_speed,
+                    control_rate_hz=transit_rate_hz,
+                    floor_z=getattr(target, "support_z", None),
+                    floor_guard_m=0.03,
+                )
+                if folded_q is None:
+                    return False
             folded_T = self.kin.fk(folded_q)
             folded_pad = (
                 folded_T[:3, 3]
@@ -1207,14 +1281,26 @@ class ArmTeleop:
             target.folded_pad_fwd = float(folded_pad[0])
             target.folded_pad_lat = float(folded_pad[1])
             target.folded_pad_z = float(folded_pad[2])
+            final_advance = float(grasp_profile.side_final_insertion_m)
+            if grasp_profile.side_floor_load:
+                final_advance = min(
+                    final_advance,
+                    max(0.0, target_fwd - float(folded_pad[0])),
+                )
+                target.folded_final_insertion_m = final_advance
             self._log(
                 "[graspgenx] upright handoff ready after coordinated fold "
                 "pad=(%.3f,%.3f,%.3f); final advance limited to %.3fm"
                 % (
                     folded_pad[0], folded_pad[1], folded_pad[2],
-                    float(grasp_profile.side_final_insertion_m),
+                    final_advance,
                 )
             )
+            if grasp_profile.side_floor_load:
+                self._log(
+                    "[graspgenx] sunblock gripper is fully open and floor-level; "
+                    "next motion loads the object between both fingers"
+                )
             return True
 
         if object_centered:
