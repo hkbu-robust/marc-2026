@@ -89,19 +89,29 @@ DEFAULT_GRIP_EXTRA = 0.04    # rad of extra bite past confirmed contact (0 = sto
 DEFAULT_GRIP_CONFIRM_SAMPLES = 3  # reject one-frame holding sensor spikes
 DEFAULT_GRIP_STOP_ON_GRASP = False
 DEFAULT_READY_OPEN_GRIP = False  # ready pose holds whatever the gripper was commanded to
-# Basket sits behind the arm. Cartesian IK to a behind-the-shoulder XYZ with
-# the ready-pose orientation commands joint 5 past its URDF stop (±2.09 rad);
-# the wrist never follows and the proximal joints fold through the forearm.
-# Joint-1 π at carry height (same elbow/wrist as the front lift) scoops into
-# the basket without moving J5. MARC_PLACE_YAW defaults to π.
+# Basket sits behind the arm. Retract to a compact central pose before joint-1
+# rotates so the entire yaw sweep stays inside the chassis footprint.
 DEFAULT_PLACE_YAW = float(np.pi)
-DEFAULT_PLACE_APEX_FWD = 0.05
-DEFAULT_PLACE_APEX_UP = 0.50
+DEFAULT_PLACE_APEX_FWD = 0.14
+DEFAULT_PLACE_APEX_UP = 0.40
+DEFAULT_PLACE_SWEEP_RADIUS_M = 0.22
+DEFAULT_PLACE_LINK_PAD_M = 0.06
 DEFAULT_PLACE_SPEED = 0.5    # rad/s per joint; joint 1's URDF limit is 1.396
 DEFAULT_PLACE_IK_GUARD = 1.2  # rad any joint may move from its IK seed before the
                               # solution is treated as a branch jump and refused
 ARM_JOINT_LOWER = np.array([-6.2832, -2.24, -2.57, -6.2832, -2.09, -6.2832])
 ARM_JOINT_UPPER = np.array([6.2832, 2.24, 2.57, 6.2832, 2.09, 6.2832])
+PLACE_SWEEP_FRAMES = (
+    "shoulder_link",
+    "bicep_link",
+    "forearm_link",
+    "spherical_wrist_1_link",
+    "spherical_wrist_2_link",
+    "bracelet_link",
+    "end_effector_link",
+    "left_inner_finger_pad",
+    "right_inner_finger_pad",
+)
 # The overhead fold is several seconds of ticks. Recording all of them would bury
 # the part a policy has to learn (approach and grasp), so scripted joint moves log
 # every Nth tick. The release dwell is never decimated.
@@ -154,6 +164,7 @@ class TeleopConfig:
     place_yaw: float = DEFAULT_PLACE_YAW
     place_apex_fwd: float = DEFAULT_PLACE_APEX_FWD
     place_apex_up: float = DEFAULT_PLACE_APEX_UP
+    place_sweep_radius_m: float = DEFAULT_PLACE_SWEEP_RADIUS_M
     place_speed: float = DEFAULT_PLACE_SPEED
     place_ik_guard: float = DEFAULT_PLACE_IK_GUARD
     place_rec_every: int = DEFAULT_PLACE_REC_EVERY
@@ -215,6 +226,9 @@ class TeleopConfig:
             place_yaw=_env_float("MARC_PLACE_YAW", DEFAULT_PLACE_YAW),
             place_apex_fwd=_env_float("MARC_PLACE_APEX_FWD", DEFAULT_PLACE_APEX_FWD),
             place_apex_up=_env_float("MARC_PLACE_APEX_UP", DEFAULT_PLACE_APEX_UP),
+            place_sweep_radius_m=_env_float(
+                "MARC_PLACE_SWEEP_RADIUS_M", DEFAULT_PLACE_SWEEP_RADIUS_M
+            ),
             place_speed=_env_float(
                 "MARC_PLACE_SPEED", float(p.get("carry_speed", DEFAULT_PLACE_SPEED))
             ),
@@ -979,14 +993,14 @@ class ArmTeleop:
 
     def _joint_move(self, label, q_goal, on_step, speed: float,
                     timeout_s: float = 4.0, wrap: bool = False,
-                    cancel_event=None) -> int:
+                    cancel_event=None) -> Optional[int]:
         """Feedback-paced, eased joint interpolation for carrying to the basket.
 
         Every waypoint is a joint vector, so nothing here can flip an IK branch or
         drive the wrist through the forearm; the arm sweeps between two poses that are
         each known to be safe. `wrap` takes the shortest angular path per joint, which
-        is what you want coming back from an arbitrary teleop pose. Scoop yaw legs
-        use wrap off so joint 1 interpolates +π, not a random shortest wrap. The
+        is what you want coming back from an arbitrary teleop pose. Tucked yaw legs
+        use wrap off so joint 1 follows the configured direction. The
         trajectory advances only after joint feedback changes, and cosine easing
         removes the velocity jumps that can shake an object out at waypoints.
         """
@@ -994,7 +1008,7 @@ class ArmTeleop:
         q0 = read_arm_q(self._client)
         if q0 is None:
             self._log(f"  [place] {label}: no joint_states")
-            return 0
+            return None
         q_goal = np.asarray(q_goal, dtype=np.float64)
         T = self.kin.fk(q_goal)
         ee_goal = T[:3, 3]
@@ -1013,29 +1027,39 @@ class ArmTeleop:
         previous_q = q0.copy()
         last_cmd = q0.copy()
         max_stale = max(3, int(max(0.5, timeout_s) * self.cfg.rate_hz))
+        follow_tol = max(
+            float(self.cfg.settle_tol_joint),
+            2.5 * float(speed) / float(self.cfg.rate_hz),
+        )
         for i in range(1, n_ticks + 1):
             if cancel_event is not None and cancel_event.is_set():
                 break
             if i > 1:
-                stale = 0
-                while stale < max_stale:
+                waited = 0
+                followed = False
+                while waited < max_stale:
                     if cancel_event is not None and cancel_event.is_set():
                         break
                     q = read_arm_q(self._client)
                     if q is not None and not np.array_equal(q, previous_q):
                         previous_q = q.copy()
-                        break
+                        lag = float(np.max(np.abs(
+                            _shortest_joint_delta(q, last_cmd)
+                        )))
+                        if lag <= follow_tol:
+                            followed = True
+                            break
                     self._publish(last_cmd)
                     self._sleep(dt)
-                    stale += 1
+                    waited += 1
                 if cancel_event is not None and cancel_event.is_set():
                     break
-                if stale >= max_stale:
+                if not followed:
                     self._log(
-                        f"  [place] {label}: no fresh joint feedback; "
+                        f"  [place] {label}: joint feedback did not follow command; "
                         "stopped before advancing trajectory"
                     )
-                    return recorded
+                    return None
             fraction = _cosine_ease(float(i) / float(n_ticks))
             last_cmd = q0 + fraction * delta
             self._publish(last_cmd)
@@ -1046,6 +1070,7 @@ class ArmTeleop:
             self._sleep(dt)
         q_hold = q0 + delta
         hold_ticks = max(1, int(max(0.3, timeout_s) * self.cfg.rate_hz))
+        settled = False
         for i in range(1, hold_ticks + 1):
             if cancel_event is not None and cancel_event.is_set():
                 break
@@ -1056,13 +1081,23 @@ class ArmTeleop:
                     recorded += self._record_tick(q, ee_goal, on_step)
                 if float(np.linalg.norm(_shortest_joint_delta(q, q_hold))) < \
                         self.cfg.settle_tol_joint:
+                    settled = True
                     break
             self._sleep(dt)
+        if cancel_event is None or not cancel_event.is_set():
+            if not settled:
+                self._log(f"  [place] {label}: settle timeout; trajectory aborted")
+                return None
         q_end = read_arm_q(self._client)
         ee = self.kin.fk(q_hold if q_end is None else q_end)[:3, 3]
         self._log(f"  [place] {label}: {span:.2f} rad in {n_ticks} eased ticks, "
                   f"ee=({ee[0]:.3f},{ee[1]:.3f},{ee[2]:.3f}) steps+={recorded}")
         return recorded
+
+    def _place_sweep_radius(self, q) -> float:
+        positions = self.kin.frame_positions(q, PLACE_SWEEP_FRAMES)
+        return float(np.max(np.linalg.norm(positions[:, :2], axis=1))) + \
+            DEFAULT_PLACE_LINK_PAD_M
 
     def _guarded_ik(self, label, target, q_seed) -> Optional[np.ndarray]:
         """IK for `target`, refused if the solver jumped to a different branch.
@@ -1090,11 +1125,10 @@ class ArmTeleop:
         return None
 
     def _place_poses(self):
-        """Lift, yaw joint 1 by π at carry height, drop. Joint 5 stays in limits.
+        """Lift, retract inside the chassis, yaw joint 1, then extend to basket.
 
-        This is a scoop: the same elbow/wrist as the front lift, rotated about
-        the shoulder. Cartesian IK to a behind-the-shoulder XYZ is still avoided.
-        If the drop IK is rejected, return None and keep holding.
+        Only the compact pose is rotated. If IK or the conservative swept-cylinder
+        check fails, return None before moving and keep holding.
         """
         p = self._place_params
         q_home = np.asarray(arm_kin.DEFAULT_ARM_Q, dtype=np.float64)
@@ -1105,9 +1139,26 @@ class ArmTeleop:
         )
         if q_lift is None:
             return None
-        q_over = q_lift.copy()
-        q_over[0] += np.pi
+        q_tuck = self._guarded_ik(
+            "tuck-high",
+            [float(self.cfg.place_apex_fwd), 0.0, float(self.cfg.place_apex_up)],
+            q_lift,
+        )
+        if q_tuck is None:
+            return None
+        q_over = q_tuck.copy()
+        q_over[0] += float(self.cfg.place_yaw)
         q_over = clamp_arm_q(q_over)
+        sweep_radius = max(
+            self._place_sweep_radius(q_tuck),
+            self._place_sweep_radius(q_over),
+        )
+        if sweep_radius > float(self.cfg.place_sweep_radius_m):
+            self._log(
+                "  [place] tuck REJECTED: swept radius %.3fm exceeds %.3fm chassis envelope"
+                % (sweep_radius, float(self.cfg.place_sweep_radius_m))
+            )
+            return None
         q_drop = self._guarded_ik(
             "in-basket",
             [float(p["place_fwd"]), float(p["place_lat"]), float(p["place_up"])],
@@ -1115,20 +1166,19 @@ class ArmTeleop:
         )
         if q_drop is None:
             return None
-        return q_lift, q_over, q_drop
+        return q_lift, q_tuck, q_over, q_drop
 
     def place_in_basket(
         self,
         on_step: Optional[Callable[[dict, np.ndarray], None]] = None,
         cancel_event=None,
     ) -> int:
-        """Keep the latched squeeze, scoop (joint-1 π at carry height) into the basket, drop, reverse.
+        """Keep the squeeze, tuck inside the chassis, rotate into the basket, drop.
 
         Dataset collection passes `on_step=None`: place is hard-coded, so its ticks must
         not enter the training set. Pass a callback only when you want those steps logged.
 
-        Yaw legs use wrap=False so interpolation is +π. Cartesian tracking to a point
-        behind the shoulder is still avoided.
+        Yaw legs use wrap=False so interpolation follows the configured direction.
         """
         if read_arm_q(self._client) is None:
             self._log("[place] no joint_states")
@@ -1137,23 +1187,18 @@ class ArmTeleop:
         q_home = np.asarray(arm_kin.DEFAULT_ARM_Q, dtype=np.float64)
         poses = self._place_poses()
         if poses is None:
-            self._log("[place] cannot solve the scoop basket poses — nothing moved, still "
-                      "holding (check pnp_params place_fwd/place_lat/place_up/carry_up)")
+            self._log("[place] cannot solve a body-contained basket path — nothing moved, "
+                      "still holding")
             return 0
-        q_lift, q_over, q_drop = poses
+        q_lift, q_tuck, q_over, q_drop = poses
         speed = float(self.cfg.place_speed)
         dwell = max(float(self.cfg.grip_dwell_s), 0.4)
-        ee_over = self.kin.fk(q_over)[:3, 3]
         self._log(
-            "[place] scoop j1=%.2f j5=%.2f ee=(%.3f,%.3f,%.3f) at %.2f rad/s, carry z=%.3f"
+            "[place] tucked sweep radius=%.3fm j1=%.2f at %.2f rad/s"
             % (
+                self._place_sweep_radius(q_tuck),
                 float(q_over[0]),
-                float(q_over[4]),
-                float(ee_over[0]),
-                float(ee_over[1]),
-                float(ee_over[2]),
                 speed,
-                float(self._place_params["carry_up"]),
             )
         )
 
@@ -1192,13 +1237,18 @@ class ArmTeleop:
             return n
         moves = (
             ("raise to carry height", q_lift, False),
-            ("rotate over basket", q_over, False),
-            ("lower into basket", q_drop, False),
+            ("tuck inside chassis", q_tuck, False),
+            ("rotate tucked over basket", q_over, False),
+            ("extend into basket", q_drop, False),
         )
         for label, goal, wrap in moves:
-            n += self._joint_move(
+            moved = self._joint_move(
                 label, goal, on_step, speed, wrap=wrap, cancel_event=cancel_event
             )
+            if moved is None:
+                self._log(f"[place] {label} failed — stopped while still holding")
+                return n
+            n += moved
             if stop_if_requested():
                 return n
         n += self._grip_segment(
@@ -1207,14 +1257,18 @@ class ArmTeleop:
         if stop_if_requested():
             return n
         return_moves = (
-            ("raise clear of basket", q_over),
-            ("rotate back to front", q_lift),
+            ("retract inside chassis", q_over),
+            ("rotate tucked back to front", q_tuck),
             ("fold to ready", q_home),
         )
         for label, goal in return_moves:
-            n += self._joint_move(
+            moved = self._joint_move(
                 label, goal, on_step, speed, cancel_event=cancel_event
             )
+            if moved is None:
+                self._log(f"[place] {label} failed — trajectory stopped")
+                return n
+            n += moved
             if stop_if_requested():
                 return n
 

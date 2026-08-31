@@ -139,7 +139,7 @@ and yaw each scene so boxes are not glued to one patch of the image.
 
    The motion is **pure joint space** — interpolations between poses, no Cartesian tracking:
 
-   `keep latched grip` (no re-squeeze) → `raise to carry height` → **`rotate over basket` (joint 1 +π)** → `lower into basket` → `release` → `raise clear` → `rotate back to front` → `fold to ready`.
+   `keep latched grip` → `raise` → **`tuck inside chassis`** → `rotate tucked +π` → `extend into basket` → `release` → `retract` → `rotate tucked back` → `fold to ready`.
 
    Place copies the live squeeze command and does **not** start another close ramp. It
    also does not fold to the 9 cm ready pose while holding.
@@ -147,12 +147,11 @@ and yaw each scene so boxes are not glued to one patch of the image.
    Why it is built this way: a straight Cartesian line to a point behind the shoulder has no
    collision-free interpolation, and IK will cheerfully return a pose that reaches the basket
    with the elbow folded through the forearm. Servoing toward it drives the arm into itself.
-   Rotating a single joint cannot do that — every other joint holds the shape it had at carry
-   height, which is the same height and the same idea as the arc in `arm_pick.py`. IK is used
-   only twice (the vertical raise in front, and the drop into the basket), always seeded at the
-   neighbouring pose, and **refused if it moves any joint more than `MARC_PLACE_IK_GUARD` rad
-   from that seed** — a branch jump shows up as a deviation of radians, a real move as tenths.
-   If either solve is refused, `P` aborts *before moving* and keeps holding, so you can `N`.
+   The arm first retracts to a checked central pose, then only joint 1 rotates. Every sampled
+   arm-link origin plus collision padding must stay inside `MARC_PLACE_SWEEP_RADIUS_M`; otherwise
+   placement is refused before motion. IK solves are seeded from neighbouring poses and rejected
+   on branch jumps. Missing or unsettled joint feedback also stops the current trajectory while
+   the gripper remains closed.
 6. **`E`** — after `P` finishes, sensor-only keep if grasp was seen after close **and** `basket/occupied` is true; else discard to `datasets/marc_pnp_failed/`. During the blocking `P` motion, `E` is an immediate manual approval: it cancels the remaining scripted placement at the next control tick, holds the measured arm pose, keeps the episode without requiring basket occupancy, opens the gripper, returns home, and resets directly to the next collection cycle. No second `E` is needed.
 
 So a keepable episode is: `A` → grasp with `v` → **`P` + `E` at any point during/after placement**. Without `P` the basket is never
@@ -419,6 +418,8 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_PLACE_YAW` | `3.1416` | Joint-1 rotation from front to basket. Trim if the drop lands off-centre |
 | `MARC_PLACE_SPEED` | `pnp_params.carry_speed`, `.env` sets `0.5` | Maximum joint rate (rad/s) for feedback-paced, cosine-eased `P` motion. Joint 1's URDF limit is `1.396` |
 | `MARC_PLACE_IK_GUARD` | `1.2` | Max rad any joint may move from its IK seed before the solution is rejected as a branch jump (which is what folds the arm into itself) |
+| `MARC_PLACE_APEX_FWD` / `UP` | `0.14` / `0.40` | Central tucked EE waypoint used before either 180° rotation |
+| `MARC_PLACE_SWEEP_RADIUS_M` | `0.22` | Maximum conservative arm-link sweep radius during basket rotation; larger paths fail closed |
 | `MARC_PLACE_REC_EVERY` | `3` | Unused for the dataset (`P` is not recorded); kept only if you pass a custom `on_step` to `place_in_basket` |
 | `MARC_READY_J1`…`J6` | `DEFAULT_ARM_Q` = `0, 0.262, -2.094, 0, -0.785, 1.571` | **Joint-space ready start** (rad). Unset = default pose; set any subset to override those joints only. Interpolated once; no Cartesian IK during ready |
 | `MARC_READY_MOVE_S` | `2.0` | Seconds to interpolate into the ready joint pose |

@@ -216,8 +216,11 @@ class GripperCloseTests(unittest.TestCase):
             published.append(client.q.copy())
 
         arm._publish = publish
-        arm._joint_move("test", np.array([1.0, 0, 0, 0, 0, 0]), None, 1.0)
+        result = arm._joint_move(
+            "test", np.array([1.0, 0, 0, 0, 0, 0]), None, 1.0
+        )
 
+        self.assertEqual(0, result)
         positions = np.array([q[0] for q in published[:16]])
         increments = np.diff(np.concatenate(([0.0], positions)))
         self.assertAlmostEqual(1.0, positions[-1])
@@ -258,6 +261,33 @@ class GripperCloseTests(unittest.TestCase):
 
         self.assertEqual(3, len(published))
         self.assertLess(float(published[-1][0]), 1.0)
+
+    def test_place_trajectory_fails_closed_when_feedback_does_not_follow(self):
+        client = _FollowingClient()
+
+        def drifting_state():
+            client.q += 1e-5
+            return SimpleNamespace(name=ARM_JOINT_NAMES, position=client.q.copy())
+
+        client.get_arm_state = drifting_state
+        arm = object.__new__(ArmTeleop)
+        arm._client = client
+        arm.cfg = SimpleNamespace(
+            rate_hz=10.0,
+            place_rec_every=3,
+            settle_tol_joint=0.01,
+        )
+        arm.kin = _LinearKin()
+        arm.grip_cmd = 0.3
+        arm._log = lambda _line: None
+        arm._sleep = lambda _dt: None
+        arm._publish = lambda _q: None
+
+        result = arm._joint_move(
+            "stale", np.array([1.0, 0, 0, 0, 0, 0]), None, 1.0
+        )
+
+        self.assertIsNone(result)
 
     def test_transient_hold_does_not_stop_close(self):
         client = _TransientContactClient()
