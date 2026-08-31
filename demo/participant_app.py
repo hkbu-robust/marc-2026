@@ -804,6 +804,9 @@ class DemoParticipant:
         if score.is_final:
             log.info("[FINAL] %s", score.scores)
             self._final_score_payload = payload
+            self._experiment.finish(
+                "completed", final_score=score.scores, total=score.total,
+            )
         else:
             log.info("[Score] round %s: total=%s", score.round, score.total)
 

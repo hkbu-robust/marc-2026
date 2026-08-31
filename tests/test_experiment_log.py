@@ -27,7 +27,7 @@ class ExperimentLogTests(unittest.TestCase):
             node for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef) and node.name == "_on_score"
         )
-        self.assertFalse(any(
+        self.assertTrue(any(
             isinstance(node, ast.Attribute) and node.attr == "finish"
             for node in ast.walk(score_callback)
         ))
