@@ -53,7 +53,7 @@ MANUAL_BASE:
   H       wrist-YOLO pick + basket
   V       zero-shot OpenVLA pick + basket
 ANY:
-  O       cycle target object
+  O       cycle target object (must match the spawned class before A/G/H/V)
   C       cancel auto-approach (-> MANUAL_BASE)
   N       recover / ready pose (nothing is saved)
   ?       help
@@ -203,9 +203,14 @@ class PickTestApp:
             self._set_base(0.0, 0.0)
         elif ch == "A":
             self._set_base(0.0, 0.0)
-            print("[approach] locking cameras + YOLO...")
-            if not self.approach.start():
-                print("[approach] FAILED — YOLO or cameras unavailable; stay in MANUAL_BASE")
+            print(
+                "[approach] locking cameras + YOLO "
+                f"target={self.target_object}..."
+            )
+            started = self.approach.start()
+            if not started:
+                reason = getattr(self.approach, "last_failure", "") or "camera lock failed"
+                print(f"[approach] FAILED — {reason}; stay in MANUAL_BASE")
                 return
             self.phase = Phase.AUTO_APPROACH
             print("[approach] AUTO_APPROACH crawling (C to cancel)...")
@@ -238,8 +243,17 @@ class PickTestApp:
         # arm reaction cannot rotate the carefully composed camera view.
         grasp_hold = StationaryBase(self.client, log=print, yaw_kp=0.0)
         with grasp_hold:
+            locked_target = getattr(self.approach, "locked_target", None)
+            posture_hint = (
+                locked_target(self.target_object)
+                if callable(locked_target)
+                else None
+            )
             target = stable_pick_target(
-                self.nearfield, self.target_object, log=print
+                self.nearfield,
+                self.target_object,
+                log=print,
+                posture_hint=posture_hint,
             )
             if target is None:
                 print("[pick] GraspGen-X found no safe high-confidence localization")

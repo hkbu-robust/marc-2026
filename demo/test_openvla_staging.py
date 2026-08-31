@@ -10,7 +10,11 @@ import numpy as np
 from nearfield import LocalizedTarget
 
 from manip_dataset.app import CollectorApp
-from manip_dataset.depth_approach import ApproachConfig, DepthApproachController
+from manip_dataset.depth_approach import (
+    ApproachConfig,
+    DepthApproachController,
+    arm_center_error,
+)
 from manip_dataset.openvla_pick import (
     StagedOpenVLAPickRuntime,
     graspgenx_stage_goal,
@@ -21,7 +25,7 @@ from manip_dataset.openvla_pick import (
     openvla_target_is_safe,
     target_moved_with_gripper,
 )
-from manip_dataset.pick_target import snapshot_pick_target
+from manip_dataset.pick_target import snapshot_pick_target, stable_pick_target
 from manip_dataset.to_rlds import _pick_image_key
 
 
@@ -100,6 +104,96 @@ class OpenVLAStagingTests(unittest.TestCase):
 
         self.assertIs(target, result)
         self.assertTrue(any("localized tumbler" in line for line in logs))
+
+    def test_upright_tumbler_uses_its_farther_pick_reach_envelope(self):
+        # Regression for ten stable 0.94-confidence samples previously rejected
+        # only because the upright ceiling was still 0.63 m.
+        upright = _target(fwd=0.671)
+        upright.conf = 0.91
+        upright.bbox_xyxy = (20.0, 10.0, 70.0, 140.0)
+        nearfield = SimpleNamespace(detector=None, snapshot=lambda _name: upright)
+
+        result = stable_pick_target(nearfield, "tumbler", log=lambda _line: None)
+
+        self.assertIs(upright, result)
+
+    def test_lying_tumbler_keeps_the_validated_nearer_pick_envelope(self):
+        lying = _target(fwd=0.601)
+        lying.conf = 0.91
+        lying.bbox_xyxy = (10.0, 20.0, 110.0, 70.0)
+        nearfield = SimpleNamespace(detector=None, snapshot=lambda _name: lying)
+
+        result = stable_pick_target(nearfield, "tumbler", log=lambda _line: None)
+
+        self.assertIsNone(result)
+
+    def test_initial_pick_inherits_nearby_upright_approach_posture(self):
+        # Close-range boxes can become almost square without the object falling.
+        candidate = _target(fwd=0.593, lat=-0.017, z=-0.281)
+        candidate.conf = 0.73
+        candidate.bbox_xyxy = (20.0, 20.0, 120.0, 110.0)
+        hint = _target(fwd=0.579, lat=-0.006, z=-0.370)
+        hint.conf = 0.88
+        hint.bbox_xyxy = (40.0, 10.0, 90.0, 140.0)
+        nearfield = SimpleNamespace(detector=None, snapshot=lambda _name: candidate)
+        logs = []
+
+        result = stable_pick_target(
+            nearfield,
+            "tumbler",
+            log=logs.append,
+            posture_hint=hint,
+        )
+
+        self.assertIs(candidate, result)
+        self.assertEqual("upright", candidate.grasp_posture)
+        self.assertTrue(any("inherits approach posture=upright" in x for x in logs))
+
+    def test_one_fresh_snapshot_can_confirm_maintained_approach_lock(self):
+        candidate = _target(fwd=0.591, lat=0.010, z=-0.429)
+        candidate.conf = 0.91
+        candidate.bbox_xyxy = (40.0, 10.0, 90.0, 140.0)
+        hint = _target(fwd=0.576, lat=0.006, z=-0.430)
+        hint.conf = 0.93
+        hint.bbox_xyxy = (40.0, 10.0, 90.0, 140.0)
+        snapshots = iter((candidate,) + (None,) * 9)
+        calls = []
+
+        def snapshot(_name):
+            calls.append(True)
+            return next(snapshots)
+
+        logs = []
+        result = stable_pick_target(
+            SimpleNamespace(detector=None, snapshot=snapshot),
+            "tumbler",
+            log=logs.append,
+            posture_hint=hint,
+        )
+
+        self.assertIs(candidate, result)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("upright", candidate.grasp_posture)
+        self.assertTrue(any("seeded localization consensus" in x for x in logs))
+
+    def test_initial_upright_hint_survives_a_truncated_horizontal_box(self):
+        candidate = _target(fwd=0.593, lat=-0.017, z=-0.281)
+        candidate.conf = 0.91
+        candidate.bbox_xyxy = (10.0, 40.0, 150.0, 90.0)
+        hint = _target(fwd=0.579, lat=-0.006, z=-0.370)
+        hint.conf = 0.88
+        hint.bbox_xyxy = (40.0, 10.0, 90.0, 140.0)
+        nearfield = SimpleNamespace(detector=None, snapshot=lambda _name: candidate)
+
+        result = stable_pick_target(
+            nearfield,
+            "tumbler",
+            log=lambda _line: None,
+            posture_hint=hint,
+        )
+
+        self.assertIs(candidate, result)
+        self.assertEqual("upright", candidate.grasp_posture)
 
     def test_collector_stages_before_unlocking_manual_demonstration(self):
         target = _target()
@@ -297,6 +391,47 @@ class OpenVLAStagingTests(unittest.TestCase):
         self.assertGreater(lin, 0.0)
         self.assertEqual(0.0, ang)
 
+    def test_arm_center_error_targets_robot_axis_not_left_pixel_midpoint(self):
+        # The historical pixel error can look centered while RGB-D says the
+        # object is still 6 cm off the arm axis.
+        pixel_err = -0.03
+
+        error = arm_center_error(0.60, 0.06)
+
+        self.assertAlmostEqual(-0.10, error)
+        self.assertNotAlmostEqual(pixel_err, error)
+
+    def test_range_boundary_blocks_forward_but_keeps_final_centering_yaw(self):
+        controller = DepthApproachController(
+            _Client(),
+            cfg=ApproachConfig(
+                already_near_m=0.70,
+                upright_already_near_m=0.70,
+                center_tol=0.03,
+                yaw_gain=1.2,
+                yaw_min=0.10,
+                yaw_max=0.35,
+                log_every=0,
+            ),
+        )
+        controller._phase = "drive"
+        off_axis = {
+            "lat_n_obj": 1,
+            "lat_err": -0.08,
+            "fwd": 0.68,
+            "name": "tumbler",
+            "bbox": (20.0, 10.0, 70.0, 140.0),
+            "is_new": True,
+        }
+
+        linear, angular = controller._command(off_axis)
+
+        self.assertEqual(0.0, linear)
+        self.assertGreater(angular, 0.0)
+        self.assertEqual("align", controller._phase)
+        centered = {**off_axis, "lat_err": -0.02}
+        self.assertEqual((0.0, 0.0), controller._command(centered))
+
     def test_far_or_wrong_class_glimpse_cannot_establish_approach_lock(self):
         controller = DepthApproachController(
             _Client(), cfg=ApproachConfig(already_near_m=0.49)
@@ -333,14 +468,15 @@ class OpenVLAStagingTests(unittest.TestCase):
             cfg=ApproachConfig(
                 already_near_m=0.49,
                 upright_bbox_aspect=1.20,
-                upright_already_near_m=0.56,
+                upright_already_near_m=0.70,
             ),
         )
         common = {
             "lat_n_obj": 1,
             "lat_err": 0.0,
-            "fwd": 0.54,
+            "fwd": 0.68,
             "d_obj": 0.45,
+            "name": "tumbler",
         }
 
         self.assertTrue(
@@ -349,6 +485,32 @@ class OpenVLAStagingTests(unittest.TestCase):
         self.assertFalse(
             controller._too_near({**common, "bbox": (10.0, 10.0, 90.0, 50.0)})
         )
+
+    def test_tall_non_tumbler_keeps_generic_approach_stop(self):
+        controller = DepthApproachController(
+            _Client(),
+            cfg=ApproachConfig(
+                already_near_m=0.49,
+                upright_bbox_aspect=1.20,
+                upright_already_near_m=0.70,
+            ),
+        )
+        measurement = {
+            "lat_n_obj": 1,
+            "lat_err": 0.0,
+            "fwd": 0.68,
+            "d_obj": 0.45,
+            "name": "bottle",
+            "bbox": (10.0, 10.0, 50.0, 90.0),
+        }
+
+        self.assertFalse(controller._too_near(measurement))
+
+    def test_default_upright_stop_preserves_side_grasp_workspace(self):
+        cfg = ApproachConfig()
+
+        self.assertEqual(0.70, cfg.upright_already_near_m)
+        self.assertGreater(cfg.upright_already_near_m, cfg.already_near_m)
 
     def test_explicit_base_view_never_falls_back_to_gripper(self):
         class Steps(dict):
@@ -412,6 +574,19 @@ class OpenVLAStagingTests(unittest.TestCase):
         self.assertEqual(current[2], forward[2])
         self.assertEqual(current[2], align[2])
         np.testing.assert_allclose(view[:2], [target.fwd, target.lat])
+
+    def test_upright_graspgenx_stage_stays_behind_singular_full_reach(self):
+        cfg = SimpleNamespace(openvla_stage_up_m=0.225)
+        current = np.array([0.329, 0.001, 0.094])
+        target = _target(fwd=0.591, lat=0.013, z=-0.315)
+
+        goal = graspgenx_stage_goal(target, cfg, stage_back_m=0.05)
+        waypoints = graspgenx_stage_waypoints(
+            current, target, cfg, stage_back_m=0.05
+        )
+
+        np.testing.assert_allclose(goal, [0.541, 0.013, -0.090], atol=1e-9)
+        self.assertTrue(all(point[0] == goal[0] for _label, point in waypoints))
 
     def test_finite_localization_is_not_rejected_by_guessed_target_ranges(self):
         self.assertTrue(openvla_target_is_safe(_target(fwd=0.325))[0])

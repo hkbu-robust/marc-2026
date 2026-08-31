@@ -83,6 +83,41 @@ class DepthApproachOverrunTests(unittest.TestCase):
         self.assertFalse(ctrl.active)
         self.assertFalse(ctrl._overrun)
 
+    def test_command_stops_before_object_reaches_bottom_of_frame(self):
+        ctrl = self._ctrl(frame_bottom_margin=0.10)
+        ctrl._phase = "drive"
+        ctrl._phase_t0 = time.monotonic()
+        m = dict(
+            lat_n_obj=1,
+            fwd=0.31,
+            lat_err=0.0,
+            bbox=(250.0, 280.0, 390.0, 435.0),
+            rgb_shape=(480, 640),
+            is_new=True,
+        )
+
+        self.assertTrue(ctrl._frame_bottom_limit(m))
+        self.assertEqual((0.0, 0.0), ctrl._command(m))
+
+    def test_overrun_stops_at_frame_margin_before_range_floor(self):
+        m = dict(
+            lat_n_obj=1,
+            fwd=0.31,
+            d_obj=0.49,
+            lat_err=0.02,
+            bbox=(250.0, 280.0, 390.0, 435.0),
+            rgb_shape=(480, 640),
+            is_new=True,
+        )
+        ctrl = self._ctrl(measure=m, frame_bottom_margin=0.10)
+        ctrl._overrun = True
+        ctrl._overrun_t0 = time.monotonic()
+        ctrl._overrun_need_s = 20.0
+
+        self.assertTrue(ctrl.tick())
+        self.assertFalse(ctrl.active)
+        self.assertFalse(ctrl._overrun)
+
     def test_overrun_keeps_crawling_while_farther_than_pick_range(self):
         m = dict(lat_n_obj=1, fwd=0.31, d_obj=0.49, lat_err=0.02, is_new=True)
         ctrl = self._ctrl(measure=m)

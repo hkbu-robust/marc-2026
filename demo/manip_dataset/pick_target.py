@@ -7,6 +7,8 @@ import os
 
 from marc_agent.gpu_handoff import reload_nearfield_detector
 
+from .grasp_profiles import resolve_grasp_profile
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -63,6 +65,7 @@ def stable_pick_target(
     *,
     visual: bool = False,
     require_reach: bool = True,
+    posture_hint=None,
 ):
     """Return two agreeing, confident YOLO RGB-D localizations or fail closed."""
     min_conf = _env_float(
@@ -70,14 +73,65 @@ def stable_pick_target(
         else "MARC_GRASPGENX_MIN_LOCALIZE_CONF",
         0.3 if visual else 0.45,
     )
-    min_fwd = _env_float("MARC_GRASPGENX_MIN_FWD_M", 0.32)
-    max_fwd = _env_float("MARC_GRASPGENX_MAX_FWD_M", 0.58)
+    generic_min_fwd = _env_float("MARC_GRASPGENX_MIN_FWD_M", 0.32)
+    generic_max_fwd = _env_float("MARC_GRASPGENX_MAX_FWD_M", 0.58)
     attempts = max(2, int(_env_float("MARC_GRASPGENX_SNAPSHOT_ATTEMPTS", 10)))
     xy_tol = _env_float("MARC_GRASPGENX_LOCALIZE_XY_TOL_M", 0.04)
     z_tol = _env_float("MARC_GRASPGENX_LOCALIZE_Z_TOL_M", 0.05)
+    hint_profile = (
+        None if posture_hint is None else resolve_grasp_profile(posture_hint)
+    )
+    hint_name = str(getattr(posture_hint, "name", "") or "").strip().lower()
     safe = []
+    if hint_profile is not None and getattr(posture_hint, "valid", False) is True:
+        try:
+            hint_values = (
+                float(getattr(posture_hint, "fwd", float("nan"))),
+                float(getattr(posture_hint, "lat", float("nan"))),
+                float(getattr(posture_hint, "z", float("nan"))),
+                float(getattr(posture_hint, "conf", 0.0) or 0.0),
+            )
+        except (TypeError, ValueError):
+            hint_values = (float("nan"),) * 4
+        hint_in_reach = (
+            float(hint_profile.min_fwd_m)
+            <= hint_values[0]
+            <= float(hint_profile.max_fwd_m)
+        )
+        if (
+            hint_name == str(target_object or "").strip().lower()
+            and all(math.isfinite(value) for value in hint_values)
+            and hint_values[3] >= min_conf
+            and (not require_reach or hint_in_reach)
+        ):
+            # Auto-approach maintained this class-keyed RGB-D lock immediately
+            # before stopping. Treat it as the first independent observation;
+            # one agreeing post-stop chassis snapshot then completes consensus.
+            safe.append(posture_hint)
+            log("[pick] seeded localization consensus from maintained approach lock")
     for _ in range(attempts):
         candidate = snapshot_pick_target(nearfield, target_object, log=log)
+        profile = None if candidate is None else resolve_grasp_profile(candidate)
+        use_hint = False
+        if candidate is not None and hint_profile is not None:
+            candidate_name = str(getattr(candidate, "name", "") or "").strip().lower()
+            hint_dxy = math.hypot(
+                float(candidate.fwd) - float(posture_hint.fwd),
+                float(candidate.lat) - float(posture_hint.lat),
+            )
+            use_hint = (
+                hint_profile.approach_style == "front_side"
+                and candidate_name == hint_name
+                and hint_dxy <= max(0.10, xy_tol)
+            )
+            if use_hint:
+                profile = hint_profile
+        min_fwd = (
+            generic_min_fwd if profile is None else float(profile.min_fwd_m)
+        )
+        max_fwd = (
+            generic_max_fwd if profile is None else float(profile.max_fwd_m)
+        )
         if (
             candidate is None
             or not (float(candidate.conf) >= min_conf)
@@ -90,6 +144,11 @@ def stable_pick_target(
                 float(candidate.lat) - float(previous.lat),
             )
             if dxy <= xy_tol and abs(float(candidate.z) - float(previous.z)) <= z_tol:
+                if use_hint:
+                    setattr(candidate, "grasp_posture", "upright")
+                    log(
+                        "[pick] stable localization inherits approach posture=upright"
+                    )
                 return candidate
         safe.append(candidate)
     return None

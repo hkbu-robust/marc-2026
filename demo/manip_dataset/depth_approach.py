@@ -12,6 +12,7 @@ from typing import Optional
 import numpy as np
 
 from .images import depth_in_bbox, image_to_depth, image_to_rgb
+from .grasp_profiles import uses_upright_side_profile
 from .yolo_detect import YoloConfig, YoloTracker
 
 from nearfield import (
@@ -60,7 +61,7 @@ DEFAULT_OVERRUN_M = 0.68
 DEFAULT_YAW_GAIN = 1.2
 DEFAULT_YAW_MAX = 0.35
 DEFAULT_YAW_MIN = 0.10
-DEFAULT_CENTER_TOL = 0.05
+DEFAULT_CENTER_TOL = 0.03
 DEFAULT_REALIGN = 0.12
 DEFAULT_ALIGN_HOLD = 2
 DEFAULT_ALIGN_SETTLE_S = 0.15
@@ -72,10 +73,12 @@ DEFAULT_LAT_MAX_M = 20.0
 DEFAULT_STOP_M = 0.56
 # Hard range fallback: never drive closer even if the box-edge signal is bad.
 DEFAULT_ALREADY_NEAR_M = 0.44
-# A tall/upright object fills the lower camera view sooner and needs more room
-# for the deterministic overhead stage than the same object lying flat.
+# Posture detection selects the upright-tumbler profile only; other classes and
+# a lying tumbler retain the generic braking point.
 DEFAULT_UPRIGHT_BBOX_ASPECT = 1.20
-DEFAULT_UPRIGHT_ALREADY_NEAR_M = DEFAULT_ALREADY_NEAR_M
+# Upright side grasps need additional forward workspace. The settled near-field
+# pose has measured roughly 0.08-0.11 m nearer than the last base-camera estimate.
+DEFAULT_UPRIGHT_ALREADY_NEAR_M = 0.70
 # Preserve this fraction of the image below the YOLO box during final crawl.
 DEFAULT_FRAME_BOTTOM_MARGIN = 0.10
 # Any exact target class may flicker in the base-camera view. A lock is still
@@ -205,6 +208,23 @@ def _stamp_key(msg) -> Optional[tuple]:
         return None
 
 
+def arm_center_error(fwd: float, lat: float) -> Optional[float]:
+    """Return centering error about the arm/base centerline.
+
+    Deprojected ``lat`` is expressed at the arm base. ``-lat/fwd`` has the
+    detector error's sign convention but targets the manipulation centerline
+    instead of the left imager's pixel midpoint.
+    """
+    try:
+        forward = float(fwd)
+        lateral = float(lat)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(forward) or not math.isfinite(lateral) or forward <= 0.0:
+        return None
+    return float(np.clip(-lateral / max(0.10, forward), -1.0, 1.0))
+
+
 class DepthApproachController:
     """Approach an object by alternating turn-in-place centering with straight crawls.
 
@@ -255,6 +275,10 @@ class DepthApproachController:
 
     def detector_ready(self) -> bool:
         return self._yolo.model is not None
+
+    @property
+    def last_failure(self) -> str:
+        return self._last_fail
 
     def set_target(self, name: Optional[str]):
         target = None if not name else str(name).strip()
@@ -538,7 +562,7 @@ class DepthApproachController:
 
         n_obj = 0 if det is None else int(det.get("n_obj") or 0)
         n_raw = 0 if det is None else int(det.get("n_raw") or 0)
-        lat = None if det is None or n_obj <= 0 else det.get("error")
+        pixel_lat = None if det is None or n_obj <= 0 else det.get("error")
 
         d_obj = None
         if n_obj <= 0 or det is None or det.get("bbox") is None:
@@ -560,10 +584,8 @@ class DepthApproachController:
         else:
             d_obj = self._d_obj_cached
 
-        if n_obj > 0 and lat is not None:
-            self._lat_err = float(lat)
-
         fwd = None
+        lat_m = None
         localized = None
         if n_obj > 0 and det is not None:
             if det.get("near_lock_reused"):
@@ -576,15 +598,32 @@ class DepthApproachController:
             if fwd is not None:
                 self._fwd_cached = float(fwd)
                 self._maybe_lock_near_target(det, localized)
+                lat_m = float(localized.lat)
             else:
                 fwd = self._fwd_cached
         else:
             fwd = None
 
+        lat = pixel_lat
+        center_source = "pixel"
+        localized_err = (
+            None
+            if localized is None
+            else arm_center_error(localized.fwd, localized.lat)
+        )
+        if localized_err is not None:
+            lat = localized_err
+            center_source = "arm"
+        if n_obj > 0 and lat is not None:
+            self._lat_err = float(lat)
+
         self._last_good_t = now
         self._last_fail = ""
         return {
             "lat_err": lat,
+            "pixel_err": pixel_lat,
+            "lat_m": lat_m,
+            "center_source": center_source,
             "lat_n_obj": n_obj,
             "n_raw": n_raw,
             "d_obj": None if d_obj is None else float(d_obj),
@@ -644,16 +683,14 @@ class DepthApproachController:
         return n_obj > 0 and d is not None and lim > 0.0 and d <= lim
 
     def _near_limit(self, m: Optional[dict]) -> float:
-        """Use a farther hard stop when the current target box is upright."""
+        """Use the farther hard stop for every copied upright side profile."""
         base = float(self.cfg.already_near_m)
         if m is None:
             return base
         bbox = m.get("bbox")
-        if bbox is None or len(bbox) < 4:
-            return base
-        width = float(bbox[2]) - float(bbox[0])
-        height = float(bbox[3]) - float(bbox[1])
-        if width <= 1.0 or height / width < float(self.cfg.upright_bbox_aspect):
+        if not uses_upright_side_profile(
+            m.get("name"), bbox, min_aspect=self.cfg.upright_bbox_aspect
+        ):
             return base
         return max(base, float(self.cfg.upright_already_near_m))
 
@@ -701,19 +738,27 @@ class DepthApproachController:
         is_new = bool(m is not None and m.get("is_new"))
         has_obj = lat is not None and n_obj > 0
         lock_active = bool(m is not None and m.get("target_lock_active"))
+        range_ready = self._range_m(m) is not None
         if has_obj:
             self._lat_err = float(lat)
         err = self._lat_err
         speed = self._speed()
         since = now - (self._phase_t0 or now)
 
-        if self._too_near(m) or self._frame_bottom_limit(m):
-            return 0.0, 0.0
+        at_boundary = self._too_near(m) or self._frame_bottom_limit(m)
+        if at_boundary:
+            # Range/frame limits prohibit more forward travel, not final yaw.
+            # Finish centering on the arm axis before declaring arrival.
+            if not has_obj or err is None or abs(err) <= self.cfg.center_tol:
+                return 0.0, 0.0
+            if self._phase != "align":
+                self._enter("align", f"range reached; final arm-center err={err:+.2f}")
+            return 0.0, self._yaw(err)
         lock_drive_tol = min(
             float(self.cfg.realign),
             max(float(self.cfg.center_tol), float(self.cfg.target_lock_drive_tol)),
         )
-        if lock_active and has_obj and abs(float(lat)) <= lock_drive_tol:
+        if lock_active and range_ready and has_obj and abs(float(lat)) <= lock_drive_tol:
             if self._phase != "drive":
                 self._enter(
                     "drive",
@@ -721,7 +766,7 @@ class DepthApproachController:
                     f"tol={lock_drive_tol:.2f}",
                 )
             return speed, 0.0
-        if self._is_centered(m):
+        if self._is_centered(m) and range_ready:
             if self._phase != "drive":
                 self._enter("drive", f"already centered err={err:+.2f}")
             return speed, 0.0
@@ -736,6 +781,8 @@ class DepthApproachController:
                 if is_new:
                     self._align_ok += 1
                 if self._align_ok >= max(1, self.cfg.align_hold):
+                    if not range_ready:
+                        return 0.0, 0.0
                     self._enter("drive", f"centered err={err:+.2f}")
                     return speed, 0.0
                 return 0.0, 0.0
@@ -866,7 +913,7 @@ class DepthApproachController:
         dcounts = Counter(depth_shapes)
         self._lock_depth = choose_lock_depth(list(dcounts.elements()), self._lock_rgb)
         if self._lock_depth is None:
-            self._last_fail = "no depth during lock"
+            self._last_fail = "calibrated 360x640 chassis depth absent during lock"
             return False
         print(
             f"[approach] depth lock {self._lock_depth[0]}x{self._lock_depth[1]} "
@@ -917,21 +964,21 @@ class DepthApproachController:
         self._hit_count = 0
         self._timeout_logged = False
         m0 = self._measure()
-        if self._frame_bottom_limit(m0):
-            self._enter("drive", "object at frame margin")
+        frame_limited = self._frame_bottom_limit(m0)
+        range_limited = self._too_near(m0)
+        if (frame_limited or range_limited) and self._is_centered(m0):
+            reason = "object at frame margin" if frame_limited else "already near"
+            self._enter("drive", reason)
             self._arrive_now = True
             self._skip_overrun = True
-            self._detect_reason = "object at frame margin"
-        elif self._too_near(m0):
-            self._enter("drive", "already near")
-            self._arrive_now = True
-            self._skip_overrun = True
-            self._detect_reason = "already near"
+            self._detect_reason = reason
+        elif frame_limited or range_limited:
+            self._enter("align", "range reached; final arm-center")
         elif self._obj_stop(m0) and self._is_centered(m0):
             self._enter("drive", "already in range")
             self._arrive_now = True
             self._detect_reason = "already in range"
-        elif self._is_centered(m0):
+        elif self._is_centered(m0) and self._range_m(m0) is not None:
             self._enter("drive", "already centered")
         else:
             self._enter("align", "start")
@@ -958,7 +1005,8 @@ class DepthApproachController:
             f"lock_err≤{self.cfg.target_lock_drive_tol:.2f}"
         )
         print(
-            "[approach] live: err from YOLO box vs image center; "
+            "[approach] live: err from arm-base lateral/fwd when RGB-D localizes "
+            "(YOLO pixel fallback); "
             "fwd=arm-base forward (pick localize); d=bbox depth. "
             "obj=used/raw. A nearby centered detection establishes a "
             "class-specific world lock; flicker then follows that lock. "
@@ -1022,11 +1070,20 @@ class DepthApproachController:
                 f"[approach] t={t_s:5.2f}s  OVERRUN {elapsed:.2f}/{need:.2f}s "
                 f"fwd={d_s} d={b_s}  pick≤{self.cfg.already_near_m:.2f}m"
             )
-        if self._frame_bottom_limit(m):
-            return self._stop_approach("object at frame margin", t_s)
-        if self._too_near(m):
-            d_s = "--" if d is None else f"{d:.3f}"
-            return self._stop_approach(f"overrun pick range fwd={d_s}", t_s)
+        frame_limited = self._frame_bottom_limit(m)
+        range_limited = self._too_near(m)
+        if frame_limited or range_limited:
+            if self._is_centered(m):
+                reason = "object at frame margin"
+                if range_limited:
+                    d_s = "--" if d is None else f"{d:.3f}"
+                    reason = f"overrun pick range fwd={d_s}"
+                return self._stop_approach(reason, t_s)
+            self._overrun = False
+            self._overrun_t0 = None
+            self._enter("align", "overrun boundary; final arm-center")
+            self._client.send_cmd_vel(0.0, 0.0)
+            return False
         if elapsed >= need:
             extra = "" if d is None else f" fwd={d:.3f}"
             return self._stop_approach(
@@ -1103,7 +1160,10 @@ class DepthApproachController:
 
         lin, ang = self._command(m)
         frame_limit = self._frame_bottom_limit(m)
-        near = self._obj_stop(m) or self._too_near(m) or frame_limit
+        centered = self._is_centered(m)
+        near = centered and (
+            self._obj_stop(m) or self._too_near(m) or frame_limit
+        )
         if near and m.get("is_new"):
             self._hit_count += 1
         elif not near:
@@ -1124,6 +1184,9 @@ class DepthApproachController:
             n_obj = int(m.get("lat_n_obj") or 0)
             d_obj = m.get("d_obj")
             fwd = m.get("fwd")
+            lat_m = m.get("lat_m")
+            pixel_err = m.get("pixel_err")
+            center_source = m.get("center_source") or "pixel"
             name = m.get("name") or "-"
             conf = m.get("conf")
             n_raw = int(m.get("n_raw") or 0)
@@ -1133,6 +1196,9 @@ class DepthApproachController:
                 f"obj={n_obj}/{n_raw} {name}"
                 f"{'' if conf is None else f' {conf:.2f}'}  "
                 f"fwd={'--' if fwd is None else f'{float(fwd):.2f}'} "
+                f"lat={'--' if lat_m is None else f'{float(lat_m):+.3f}'} "
+                f"ctr={center_source} "
+                f"px={'--' if pixel_err is None else f'{float(pixel_err):+.2f}'} "
                 f"d={'--' if d_obj is None else f'{float(d_obj):.2f}'}  "
                 f"ang={ang:+.2f}  "
                 f"hit={self._hit_count}/{self.cfg.persist_k}  "

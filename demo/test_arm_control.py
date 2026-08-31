@@ -12,6 +12,7 @@ import numpy as np
 from arm_pick import ARM_JOINT_NAMES
 from manip_dataset import arm_control
 from manip_dataset.arm_control import ArmTeleop, _cosine_ease
+from manip_dataset.grasp_profiles import TUMBLER_UPRIGHT
 
 
 class _ContactClient:
@@ -36,6 +37,20 @@ class _FollowingClient:
 
     def get_arm_state(self):
         return SimpleNamespace(name=ARM_JOINT_NAMES, position=self.q.copy())
+
+
+class _CommandFollowingClient(_FollowingClient):
+    def __init__(self):
+        super().__init__()
+        self.commands = []
+        self.elapsed = 0.0
+
+    def send_arm_command(self, msg):
+        self.q = np.asarray(msg.position[:6], dtype=float)
+        self.commands.append(self.q.copy())
+
+    def sleep(self, dt):
+        self.elapsed += float(dt)
 
 
 class _TransientContactClient(_ContactClient):
@@ -111,6 +126,234 @@ class GripperCloseTests(unittest.TestCase):
 
         self.assertAlmostEqual(np.pi / 2.0, relative)
         np.testing.assert_allclose(target_R[:2, 0], (1.0, 0.0), atol=1e-9)
+
+    def test_upright_tilt_rotates_about_aligned_jaw_axis(self):
+        base_R = np.array(
+            [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+        yaw = -0.5 * np.pi
+        tilt = 0.80
+
+        target_quat, relative_yaw = arm_control.grasp_target_quat(
+            base_R, yaw, tilt
+        )
+        c, s = np.cos(tilt), np.sin(tilt)
+        expected_R = base_R @ np.array(
+            [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]]
+        )
+
+        self.assertAlmostEqual(0.0, relative_yaw, places=6)
+        self.assertLess(expected_R[0, 2], 0.0)
+        self.assertGreater(expected_R[2, 2], 0.0)
+        np.testing.assert_allclose(expected_R[:, 0], (0.0, -1.0, 0.0))
+        self.assertLess(
+            np.linalg.norm(
+                arm_control.arm_kin.quat_error_axis_angle(
+                    target_quat,
+                    arm_control.arm_kin.R_to_quat(expected_R),
+                )
+            ),
+            1e-9,
+        )
+
+    def test_pad_center_goal_compensates_local_gripper_offset(self):
+        target_R = np.array(
+            [[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+        )
+
+        goal = arm_control.pad_center_to_ee_goal(
+            (0.55, -0.01, -0.35), target_R, 0.0205
+        )
+
+        np.testing.assert_allclose(goal, (0.5705, -0.01, -0.35), atol=1e-9)
+
+    def test_upright_handoff_clears_folds_and_descends_before_returning(self):
+        client = _FollowingClient()
+        client.q[:3] = (0.329, 0.001, 0.094)
+        arm = object.__new__(ArmTeleop)
+        arm._client = client
+        arm.kin = _XYZKin()
+        arm.cfg = SimpleNamespace()
+        arm._log = lambda line: events.append(("log", line))
+        arm.set_grip = lambda value: events.append(("grip", value)) or True
+        arm.reset_grasp_flags = lambda: events.append(("reset",))
+        def move_ee_to(xyz, label):
+            client.q[:3] = xyz
+            events.append((label, tuple(xyz), {}))
+            return True
+
+        arm.move_ee_to = move_ee_to
+        def move_grasp_line(xyz, yaw, label, **kwargs):
+            client.q[:3] = xyz
+            events.append((label, tuple(xyz), yaw, kwargs))
+            return True
+
+        arm.move_grasp_line = move_grasp_line
+        arm.move_grasp_pose = lambda xyz, yaw, label, **kwargs: (
+            events.append((label, tuple(xyz), yaw, kwargs)) or True
+        )
+        def move_grasp_pose_joint_path(xyz, yaw, label, **kwargs):
+            events.append((label, tuple(xyz), yaw, kwargs))
+            folded_q = client.q.copy()
+            folded_q[:3] = (0.481, 0.044, -0.2795)
+            return folded_q
+
+        arm.move_grasp_pose_joint_path = move_grasp_pose_joint_path
+        events = []
+        target = SimpleNamespace(
+            fwd=0.581,
+            lat=0.044,
+            z=-0.359,
+            fold_z=-0.090,
+            grasp_yaw=-0.5 * np.pi,
+            valid=True,
+        )
+
+        ok = arm.stage_for_graspgenx(target, profile=TUMBLER_UPRIGHT)
+
+        self.assertTrue(ok)
+        moves = [event for event in events if event[0].startswith("ggx-")]
+        self.assertEqual(
+            [
+                "ggx-upright-clear-up",
+                "ggx-upright-fold-clear",
+                "ggx-upright-rear-align-folded",
+                "ggx-upright-descend-to-fold",
+                "ggx-upright-coordinated-fold",
+            ],
+            [event[0] for event in moves],
+        )
+        np.testing.assert_allclose(moves[0][1], (0.329, 0.001, 0.234))
+        np.testing.assert_allclose(moves[1][1], (0.329, 0.001, 0.2545))
+        np.testing.assert_allclose(moves[2][1], (0.481, 0.044, 0.2545))
+        np.testing.assert_allclose(moves[3][1], (0.481, 0.044, -0.259))
+        np.testing.assert_allclose(moves[4][1], (0.481, 0.044, -0.259))
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_tilt_rad,
+            moves[1][3]["approach_tilt_rad"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_tilt_rad,
+            moves[2][3]["approach_tilt_rad"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_tilt_rad,
+            moves[3][3]["approach_tilt_rad"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_fold_speed_rad_s,
+            moves[4][3]["speed_rad_s"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_joint_step_rad,
+            moves[2][3]["joint_step_rad"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_joint_step_rad,
+            moves[3][3]["joint_step_rad"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_cart_step_m,
+            moves[2][3]["cart_step_m"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_cart_step_m,
+            moves[3][3]["cart_step_m"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_rate_hz,
+            moves[2][3]["control_rate_hz"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_rate_hz,
+            moves[3][3]["control_rate_hz"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_cart_step_m,
+            moves[0][3]["cart_step_m"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_joint_step_rad,
+            moves[0][3]["joint_step_rad"],
+        )
+        self.assertEqual(
+            TUMBLER_UPRIGHT.side_transit_rate_hz,
+            moves[0][3]["control_rate_hz"],
+        )
+        self.assertTrue(moves[0][3]["preserve_current_orientation"])
+        self.assertAlmostEqual(0.481, target.folded_pad_fwd)
+        self.assertAlmostEqual(0.044, target.folded_pad_lat)
+        self.assertAlmostEqual(-0.259, target.folded_pad_z)
+
+    def test_joint_delta_limit_preserves_dls_direction(self):
+        delta = np.array((0.10, -0.05, 0.025))
+
+        limited = arm_control.limit_joint_delta(delta, 0.02)
+
+        self.assertAlmostEqual(0.02, float(np.max(np.abs(limited))))
+        np.testing.assert_allclose(limited / limited[0], delta / delta[0])
+
+    def test_coordinated_fold_uses_one_eased_twenty_hz_joint_path(self):
+        client = _CommandFollowingClient()
+        arm = object.__new__(ArmTeleop)
+        arm._client = client
+        arm.kin = _XYZKin()
+        arm.cfg = SimpleNamespace(rate_hz=30.0, settle_tol_joint=0.01)
+        arm.grip_cmd = 0.0
+        arm._log = lambda _line: None
+
+        q_goal = np.array((0.10, 0.0, 0.0, 0.0, -0.20, 0.0))
+        with patch.object(arm_control.arm_kin, "dls_solve", return_value=q_goal):
+            result = arm.move_grasp_pose_joint_path(
+                (0.10, 0.0, 0.0205),
+                0.0,
+                "test-fold",
+                approach_tilt_rad=0.0,
+                pad_center_offset_m=0.0205,
+                speed_rad_s=0.80,
+                control_rate_hz=20.0,
+            )
+
+        self.assertIsNotNone(result)
+        np.testing.assert_allclose(result[:4], (0.10, 0.0, 0.0, 0.0))
+        self.assertAlmostEqual(-0.20, result[4])
+        self.assertAlmostEqual(0.0, result[5])
+        self.assertEqual(9, len(client.commands))
+        self.assertAlmostEqual(8.0 / 20.0, client.elapsed)
+
+    def test_cartesian_servo_preserves_dls_direction_near_joint_limit(self):
+        client = _FollowingClient()
+        arm = object.__new__(ArmTeleop)
+        arm._client = client
+        arm.cfg = SimpleNamespace(
+            rate_hz=20.0,
+            max_ticks_per_click=1,
+            pos_step=0.008,
+            settle_tol_m=0.015,
+            settle_tol_rot_rad=0.05,
+            ik_joint_step=0.02,
+            grip_close=0.68,
+        )
+        arm.kin = _XYZKin()
+        arm.grip_cmd = 0.0
+        arm.grip_target = 0.0
+        arm.target_pos = None
+        arm.target_quat = None
+        arm._closed_since_last_open = False
+        arm._log = lambda _line: None
+        arm._sleep = lambda _dt: None
+        published = []
+        arm._publish = lambda q: published.append(np.asarray(q).copy())
+
+        def solve(_kin, q, _target_pos, _target_quat):
+            return np.asarray(q) + np.array((0.10, 0.05, 0.025, 0.0, 0.0, 0.0))
+
+        with patch.object(arm_control.arm_kin, "dls_solve", side_effect=solve):
+            arm.apply_delta(dx=0.10)
+
+        np.testing.assert_allclose(
+            published[0], (0.02, 0.01, 0.005, 0.0, 0.0, 0.0), atol=1e-9
+        )
 
     def test_cartesian_servo_waits_for_yaw_after_position_is_settled(self):
         client = _FollowingClient()
