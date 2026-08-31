@@ -51,7 +51,6 @@ class ExperimentLog:
         self.events_path = self.run_dir / "events.jsonl"
         self.summary_path = self.run_dir / "summary.json"
         self.log_path = self.run_dir / "agent.log"
-        self._env = env
         self._started_monotonic = time.monotonic()
         self._lock = threading.Lock()
         self._disabled = False
@@ -78,6 +77,15 @@ class ExperimentLog:
                     "stage1_cctv_weights": str(
                         repository / "models/runtime/stage1-cctv-detector/model.pt"
                     ),
+                    "stage2_nearfield_weights": env.get("MARC_YOLO_WEIGHTS") or str(
+                        repository / "models/runtime/stage2-nearfield-detector/model.pt"
+                    ),
+                    "graspgenx_checkpoint_dir": (
+                        env.get("MARC_GRASPGENX_WEIGHTS")
+                        or env.get("GRASPGENX_CHECKPOINT_DIR")
+                        or str(repository / "models/runtime/graspgenx")
+                    ),
+                    "pick_policy": env.get("MARC_PICK_POLICY", "graspgenx"),
                     "existing_checksum_manifests": checksums,
                 },
             )
@@ -159,7 +167,10 @@ class ExperimentLog:
     def finish(self, outcome: str = "completed", **fields) -> None:
         if self._disabled or self._finished:
             return
-        self.event("run.completed", status=outcome, **fields)
+        self.event(
+            "run.completed", status=outcome,
+            terminal=outcome in {"failed", "timeout"}, **fields,
+        )
         try:
             events = []
             for line in self.events_path.read_text(encoding="utf-8").splitlines():
@@ -171,7 +182,10 @@ class ExperimentLog:
                 event for event in events
                 if isinstance(event.get("duration_ms"), (int, float))
             ]
-            failures = [event for event in events if event.get("status") in _FAILURE_STATUSES]
+            failures = [
+                event for event in events
+                if event.get("terminal") and event.get("status") in _FAILURE_STATUSES
+            ]
             scores = [event for event in events if event.get("event") == "score.received"]
             scores_by_round = {
                 event.get("round"): event

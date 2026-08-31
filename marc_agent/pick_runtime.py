@@ -540,6 +540,7 @@ class PickRuntime:
         attempts = 0
         for attempt in range(1, self.max_attempts + 1):
             attempts = attempt
+            self._current_attempt = attempt
             experiment = current_experiment()
             if experiment is not None:
                 experiment.event(

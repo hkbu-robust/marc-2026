@@ -146,6 +146,46 @@ def _grounding_payload(grounding) -> Optional[dict]:
     }
 
 
+def _save_qwen_artifacts(out_dir: Path, object_sel, sar) -> None:
+    qwen_bits = _qwen_transcript(object_sel, sar)
+    qwen_path = out_dir / "qwen.txt"
+    if qwen_bits:
+        _write_text(qwen_path, qwen_bits)
+    elif qwen_path.exists():
+        qwen_path.unlink()
+    for pattern in ("qwen_object_*.png", "qwen_sar_*.png"):
+        for stale in out_dir.glob(pattern):
+            stale.unlink()
+    for label, result in (("object", object_sel), ("sar", sar)):
+        for index, image in enumerate(
+            getattr(result, "evidence_images", ()) if result is not None else (),
+            start=1,
+        ):
+            image.save(out_dir / f"qwen_{label}_{index:02d}.png")
+
+
+def dump_stage_artifacts(out_dir: Path, round_result) -> Optional[Path]:
+    """Save only image/text evidence; structured facts belong in events.jsonl."""
+    if not dump_enabled():
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    candidates = getattr(round_result, "candidates", None)
+    detections = getattr(candidates, "detections", CctvDetectionRound())
+    _save_qwen_artifacts(
+        out_dir,
+        getattr(candidates, "object_selection", None),
+        getattr(candidates, "sar_selection", None),
+    )
+    saved = save_camera_frames(
+        out_dir,
+        detections,
+        target_id=getattr(round_result, "target_id", None),
+        anchor_id=getattr(round_result, "anchor_id", None),
+    )
+    log.info("[round-dump] %s cameras=%d -> %s", out_dir.name, saved, out_dir.resolve())
+    return out_dir
+
+
 def dump_stage_round(
     out_dir: Path,
     round_result,
@@ -204,22 +244,7 @@ def dump_stage_round(
             "requested_situation": sar.requested_situation,
             "selected_id": sar.selected.candidate_id if sar.selected else None,
         }
-    qwen_bits = _qwen_transcript(object_sel, sar)
-    qwen_path = out_dir / "qwen.txt"
-    if qwen_bits:
-        _write_text(qwen_path, qwen_bits)
-    elif qwen_path.exists():
-        qwen_path.unlink()
-    for stale in out_dir.glob("qwen_object_*.png"):
-        stale.unlink()
-    for stale in out_dir.glob("qwen_sar_*.png"):
-        stale.unlink()
-    for label, result in (("object", object_sel), ("sar", sar)):
-        for index, image in enumerate(
-            getattr(result, "evidence_images", ()) if result is not None else (),
-            start=1,
-        ):
-            image.save(out_dir / f"qwen_{label}_{index:02d}.png")
+    _save_qwen_artifacts(out_dir, object_sel, sar)
     if extra:
         selection["extra"] = extra
     _write_json(out_dir / "summary.json", selection)

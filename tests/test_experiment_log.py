@@ -1,5 +1,6 @@
 """Structured experiment logs remain useful, safe, and fail-open."""
 
+import ast
 import json
 import logging
 import tempfile
@@ -12,6 +13,17 @@ from marc_agent.perception.round_dump import stage1_dir, stage2_dir
 
 
 class ExperimentLogTests(unittest.TestCase):
+    def test_stage1_callback_does_not_use_worker_result(self):
+        tree = ast.parse(Path("demo/participant_app.py").read_text(encoding="utf-8"))
+        callback = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_on_mission"
+        )
+        self.assertNotIn(
+            "round_result",
+            {node.id for node in ast.walk(callback) if isinstance(node, ast.Name)},
+        )
+
     def test_run_files_summary_artifacts_and_safe_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = {
@@ -26,10 +38,16 @@ class ExperimentLogTests(unittest.TestCase):
                 "stage1.pipeline.completed", stage="stage1", round=1,
                 duration_ms=12.0,
             )
+            with run.span("stage1.selection", stage="stage1", round=1):
+                pass
             run.event("stage1.round.completed", stage="stage1", round=1)
             run.event(
+                "stage2.manipulation.grasp_feedback", stage="stage2",
+                status="failed", attempt=1,
+            )
+            run.event(
                 "stage2.navigation.completed", stage="stage2", status="failed",
-                duration_ms=30.0, reason="no_path",
+                terminal=True, duration_ms=30.0, reason="no_path",
             )
             run.finish("failed")
 

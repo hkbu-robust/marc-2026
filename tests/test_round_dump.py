@@ -16,7 +16,7 @@ from PIL import Image
 
 from marc_agent.command_parser import Intent, ParsedCommand, Relation
 from marc_agent.perception.object_selection import ObjectSelection
-from marc_agent.perception.round_dump import dump_stage_round
+from marc_agent.perception.round_dump import dump_stage_artifacts, dump_stage_round
 from marc_agent.perception.stage1_pipeline import Stage1CandidateResult, Stage1RoundResult
 from marc_agent.types import CctvDetectionRound, CctvFrame, ObjectCandidate
 
@@ -67,6 +67,15 @@ def _round_result():
 
 
 class RoundDumpTests(unittest.TestCase):
+    def test_artifact_only_dump_contains_no_structured_json(self):
+        round_result = _round_result()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "stage1" / "round-001"
+            with patch.dict(os.environ, {"MARC_ROUND_DUMP": "1"}, clear=False):
+                dump_stage_artifacts(out, round_result)
+            self.assertTrue((out / "cameras" / "cam1_boxes.png").is_file())
+            self.assertEqual([], list(out.rglob("*.json")))
+
     def test_writes_command_overlay_and_detections(self):
         round_result = _round_result()
         with tempfile.TemporaryDirectory() as tmp:

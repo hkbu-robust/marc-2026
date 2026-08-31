@@ -56,6 +56,7 @@ class CctvRoundMetrics:
     """Structured measurements and failures for one candidate-collection round."""
 
     fetch_ms: float = 0.0
+    load_ms: float = 0.0
     inference_ms: float = 0.0
     cameras_discovered: int = 0
     frames_loaded: int = 0

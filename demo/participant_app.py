@@ -37,8 +37,7 @@ from marc_agent.gpu_handoff import (
     unload_qwen,
 )
 from marc_agent.perception.round_dump import (
-    dump_json,
-    dump_stage_round,
+    dump_stage_artifacts,
     stage1_dir,
     stage2_dir,
 )
@@ -138,7 +137,6 @@ class DemoParticipant:
     def _on_mission(self, mission):
         log.info("[Stage1] round %s/%s: \"%s\"",
                  mission.round, mission.total_rounds, mission.voice_command)
-        dump_path = dump_stage_round(stage1_dir(mission.round), round_result)
         self._experiment.event(
             "stage1.round.received", stage="stage1", status="started",
             round=mission.round, total_rounds=mission.total_rounds,
@@ -159,7 +157,8 @@ class DemoParticipant:
             except Exception as exc:
                 self._experiment.event(
                     "stage1.round.completed", stage="stage1", status="error",
-                    round=mission.round, error_type=type(exc).__name__,
+                    terminal=True, round=mission.round,
+                    error_type=type(exc).__name__,
                 )
                 log.exception("[Stage1] round %s failed", mission.round)
 
@@ -191,10 +190,12 @@ class DemoParticipant:
             self._stage1_grounding_cache[key] = round_result
         self._last_stage1_candidates = round_result.candidates
         self._last_detections = round_result.candidates.detections
+        dump_path = dump_stage_artifacts(stage1_dir(mission.round), round_result)
         self._experiment.event(
             "stage1.pipeline.completed",
             stage="stage1",
             status="failed" if round_result.grounding is None else "ok",
+            terminal=round_result.grounding is None,
             round=mission.round,
             duration_ms=round_result.candidates.total_ms + round_result.projection_ms,
             projection_ms=round_result.projection_ms,
@@ -223,7 +224,8 @@ class DemoParticipant:
             )
             self._experiment.event(
                 "stage1.round.completed", stage="stage1", status="failed",
-                round=mission.round, failure_reason=round_result.failure_reason,
+                terminal=True, round=mission.round,
+                failure_reason=round_result.failure_reason,
             )
             return
         seq = self.client.submit_grounding(grounding)
@@ -286,22 +288,6 @@ class DemoParticipant:
             self._state.adopt_grounding(result.target_coord)
             log.info("[Stage2] submitted mock grounding target=%s (owner stored=%s)",
                      self._state.grounding_xy, self._state.owner_xy)
-            dump_json(
-                stage2_dir("grounding"),
-                "grounding.json",
-                {
-                    "submitted": {
-                        "target_coord": getattr(result, "target_coord", None),
-                        "target_type": getattr(result, "target_type", None),
-                    },
-                    "method": "mock_vla",
-                    "failure_reason": None,
-                },
-            )
-            dump_json(stage2_dir("grounding"), "summary.json", {
-                "method": "mock_vla",
-                "task": mission.task_description,
-            })
             return
         if self._stage1_projector is None:
             self._stage1_projector = CctvProjector.from_client(self.client)
@@ -315,11 +301,12 @@ class DemoParticipant:
             clock=self._round_clock,
             verifier=self._qwen_verifier,
         )
-        dump_path = dump_stage_round(stage2_dir("grounding"), round_result)
+        dump_path = dump_stage_artifacts(stage2_dir("grounding"), round_result)
         self._experiment.event(
             "stage2.grounding.pipeline.completed",
             stage="stage2",
             status="failed" if round_result.grounding is None else "ok",
+            terminal=round_result.grounding is None,
             duration_ms=round_result.candidates.total_ms + round_result.projection_ms,
             projection_ms=round_result.projection_ms,
             method=round_result.method,
@@ -335,7 +322,7 @@ class DemoParticipant:
             )
             self._experiment.event(
                 "stage2.mission.completed", stage="stage2", status="failed",
-                failure_reason=round_result.failure_reason,
+                terminal=True, failure_reason=round_result.failure_reason,
             )
             return
         self.client.submit_stage2_grounding(grounding)
@@ -423,10 +410,6 @@ class DemoParticipant:
         navigation_started = time.perf_counter()
         if search is None:
             log.warning("[Stage2] no search goal (no reveal, no grounding) -- skip nav and pick")
-            dump_json(
-                navigation_dump, "nav.json",
-                {"skipped": True, "reason": "no_search_goal"},
-            )
         else:
             pose = c.get_world_pose()
             pose_xy = (pose[0], pose[1]) if pose is not None else search
@@ -489,34 +472,19 @@ class DemoParticipant:
                      result.reason if result is not None else "",
                      result.replan_count if result is not None else 0,
                      handoff)
-            dump_json(navigation_dump, "nav.json", {
-                "status": None if result is None else result.status.value,
-                "reason": None if result is None else result.reason,
-                "reached": reached_search,
-                "replan_count": 0 if result is None else result.replan_count,
-                "search": list(search) if search is not None else None,
-                "hint_radius": self._state.hint_radius,
-                "approach": list(approach),
-                "pose_xy": list(pose_xy) if pose_xy is not None else None,
-                "handoff": handoff,
-                "last_method": None if result is None else result.last_method,
-                "waypoint_count": 0 if result is None or not result.path else len(result.path),
-                "first_waypoint": (
-                    None if result is None or not result.path else list(result.path[0])
-                ),
-                "last_waypoint": (
-                    None if result is None or not result.path else list(result.path[-1])
-                ),
-            })
         self._experiment.event(
             "stage2.navigation.completed",
             stage="stage2",
             status="ok" if reached_search else "failed",
+            terminal=(not reached_search and str(handoff).startswith("skip")),
             duration_ms=(time.perf_counter() - navigation_started) * 1000.0,
             reached=reached_search,
             result_status=None if result is None else result.status.value,
             reason=None if result is None else result.reason,
             replan_count=0 if result is None else result.replan_count,
+            stall_count=0 if result is None else result.stall_count,
+            lidar_interventions=0 if result is None else result.lidar_interventions,
+            recovery_count=0 if result is None else result.recovery_count,
             planner_method=None if result is None else result.last_method,
             goal_xy=None if result is None else result.goal_xy,
             path_waypoints=0 if result is None or not result.path else len(result.path),
@@ -543,10 +511,6 @@ class DemoParticipant:
                 "stage2.manipulation.completed", stage="stage2", status="skipped",
                 reason=handoff, artifact_dir=str(manipulation_dump),
             )
-            dump_json(
-                manipulation_dump, "pick.json",
-                {"skipped": True, "reason": handoff},
-            )
         else:
             log.info("[Stage2] starting near-field YOLO (%s)", handoff)
             reveal = self._reveal if self._reveal is not None else c.stage2_reveal
@@ -555,6 +519,7 @@ class DemoParticipant:
             )
             nearfield_started = time.perf_counter()
             target = nearfield.acquire(reveal, deadline)
+            stable_consensus = None
             for _ in range(5):
                 c.send_cmd_vel(0.0, 0.0)
                 c.sleep(0.1)
@@ -565,14 +530,17 @@ class DemoParticipant:
                     log=log.info,
                 )
                 if stable is None:
+                    stable_consensus = False
                     target.valid = False
                     target.reason = "unstable_localization"
                 else:
+                    stable_consensus = True
                     target = stable
             self._experiment.event(
                 "stage2.nearfield.completed",
                 stage="stage2",
                 status="ok" if target.valid else "failed",
+                terminal=not target.valid,
                 duration_ms=(time.perf_counter() - nearfield_started) * 1000.0,
                 target_type=target.name or self._state.target_type,
                 confidence=target.conf,
@@ -581,6 +549,8 @@ class DemoParticipant:
                 target_arm_xyz=(target.fwd, target.lat, target.z),
                 depth_valid=target.depth is not None,
                 detector=getattr(detector, "metrics", None),
+                localization=getattr(nearfield, "diagnostics", None),
+                stable_consensus=stable_consensus,
                 artifact_dir=str(nearfield_dump),
             )
             if not target.valid:
@@ -590,11 +560,6 @@ class DemoParticipant:
                     "stage2.manipulation.completed", stage="stage2", status="skipped",
                     reason=target.reason, artifact_dir=str(manipulation_dump),
                 )
-                dump_json(manipulation_dump, "pick.json", {
-                    "skipped": True,
-                    "reason": target.reason,
-                    "valid": False,
-                })
             else:
                 log.info("[Stage2] localized %s grasp=(%.2f, %.2f, z=%.2f) conf=%.2f",
                          target.name or "?", target.fwd, target.lat, target.z, target.conf)
@@ -649,6 +614,7 @@ class DemoParticipant:
                     "stage2.manipulation.completed",
                     stage="stage2",
                     status="ok" if pick.ok else "failed",
+                    terminal=not pick.ok,
                     duration_ms=(time.perf_counter() - manipulation_started) * 1000.0,
                     reason=pick.reason,
                     attempts=pick.attempts,
@@ -662,23 +628,6 @@ class DemoParticipant:
                 c.send_cmd_vel(0.0, 0.0)
                 if picked:
                     after_successful_pick(pick_rt, detector)
-                dump_json(manipulation_dump, "pick.json", {
-                    "ok": pick.ok,
-                    "reason": pick.reason,
-                    "attempts": pick.attempts,
-                    "grasped": pick.grasped,
-                    "basket_occupied": pick.basket_occupied,
-                    "policy": pick.policy,
-                    "target": {
-                        "name": target.name,
-                        "fwd": target.fwd,
-                        "lat": target.lat,
-                        "z": target.z,
-                        "conf": target.conf,
-                        "valid": target.valid,
-                        "bbox_xyxy": list(target.bbox_xyxy) if target.bbox_xyxy else None,
-                    },
-                })
                 log.info("[Stage2] pick %s reason=%s attempts=%d grasping=%s basket=%s policy=%s",
                          "ok" if picked else "failed", pick.reason, pick.attempts,
                          pick.grasped, pick.basket_occupied, pick.policy)
@@ -689,6 +638,7 @@ class DemoParticipant:
         c.stop()
         self._experiment.event(
             "stage2.delivery.completed", stage="stage2", status="not_implemented",
+            terminal=True, duration_ms=0.0, leg="delivery",
             reason="owner position is stored but delivery is not implemented",
             owner_xy=self._state.owner_xy,
         )
@@ -834,11 +784,15 @@ class DemoParticipant:
             replan_cap=STAGE2_REPLAN_CAP,
             cruise=cruise,
         )
-        return nav.navigate_to(
+        result = nav.navigate_to(
             goal, deadline, leg=leg, tol=tol,
             search_xy=search_xy, search_radius=search_radius,
             handoff_fn=handoff_fn,
         )
+        result.stall_count = nav.stall_count
+        result.lidar_interventions = nav.lidar_interventions
+        result.recovery_count = nav.recovery_count
+        return result
 
     # -- notifications --
 
@@ -853,12 +807,9 @@ class DemoParticipant:
         self._experiment.event("score.received", **payload)
         if score.is_final:
             log.info("[FINAL] %s", score.scores)
-            dump_json(stage2_dir(), "score.json", payload)
             self._experiment.finish("completed", final_score=score.scores, total=score.total)
         else:
             log.info("[Score] round %s: total=%s", score.round, score.total)
-            if score.round is not None:
-                dump_json(stage1_dir(score.round), "score.json", payload)
 
     def _on_state_change(self, old, new):
         log.info("[STATE] %s -> %s", old, new)
@@ -869,7 +820,9 @@ class DemoParticipant:
 
     def _on_time_expired(self, which):
         log.info("[TIME] expired: %s", which)
-        self._experiment.event("platform.time.expired", status="timeout", which=which)
+        self._experiment.event(
+            "platform.time.expired", status="timeout", terminal=True, which=which,
+        )
 
     # -- run --
 

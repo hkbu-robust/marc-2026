@@ -457,9 +457,17 @@ class YoloDetector:
         self._yolo = tracker
         self._inference_calls = 0
         self._inference_ms = 0.0
+        self._load_ms = 0.0
+        self._status_counts = {}
+        self._candidates_seen = 0
+        self._last_candidates = []
 
     def load(self) -> bool:
-        return bool(self._yolo.load())
+        started = time.perf_counter()
+        try:
+            return bool(self._yolo.load())
+        finally:
+            self._load_ms += (time.perf_counter() - started) * 1000.0
 
     def set_target(self, name: Optional[str]) -> None:
         self._yolo.set_target(name)
@@ -467,7 +475,21 @@ class YoloDetector:
     def detect_candidates(self, rgb: np.ndarray, target_type: str) -> dict:
         started = time.perf_counter()
         try:
-            return self._yolo.detect_candidates(rgb, target_type)
+            result = self._yolo.detect_candidates(rgb, target_type)
+            status = str(result.get("status") or "unknown")
+            self._status_counts[status] = self._status_counts.get(status, 0) + 1
+            candidates = result.get("candidates") or ()
+            self._candidates_seen += len(candidates)
+            self._last_candidates = [
+                {
+                    "class_name": item.get("class_name"),
+                    "confidence": item.get("confidence"),
+                    "bbox_xyxy": item.get("xyxy"),
+                    "rank": item.get("rank"),
+                }
+                for item in candidates[:20]
+            ]
+            return result
         finally:
             self._inference_calls += 1
             self._inference_ms += (time.perf_counter() - started) * 1000.0
@@ -483,8 +505,12 @@ class YoloDetector:
     @property
     def metrics(self) -> dict:
         return {
+            "load_ms": self._load_ms,
             "inference_calls": self._inference_calls,
             "inference_ms": self._inference_ms,
+            "status_counts": self._status_counts,
+            "candidates_seen": self._candidates_seen,
+            "last_candidates": self._last_candidates,
         }
 
     def unload(self) -> None:
@@ -653,6 +679,8 @@ class NearFieldAcquire:
         self._lock_depth = None
         self._lock_frame = None
         self._phase = "scan"
+        self._phase_history = ["scan"]
+        self._rejection_counts = {}
         self._phase_t0 = 0.0
         self._align_ok = 0
         self._scan_sign = 1.0
@@ -784,6 +812,9 @@ class NearFieldAcquire:
                     R=R, t=tvec,
                 )
                 if cand.reason == "outside_radius":
+                    self._rejection_counts[cand.reason] = (
+                        self._rejection_counts.get(cand.reason, 0) + 1
+                    )
                     n_obj = 0
                     err = None
                     d_obj = None
@@ -873,9 +904,18 @@ class NearFieldAcquire:
         )
 
     def _enter(self, phase: str, now: float):
+        if not self._phase_history or self._phase_history[-1] != phase:
+            self._phase_history.append(phase)
         self._phase = phase
         self._phase_t0 = now
         self._align_ok = 0
+
+    @property
+    def diagnostics(self) -> dict:
+        return {
+            "phase_history": self._phase_history,
+            "rejection_counts": self._rejection_counts,
+        }
 
     def _command(self, now: float, n_obj: int, err, fwd_obj,
                  *, may_center: bool = True) -> tuple:

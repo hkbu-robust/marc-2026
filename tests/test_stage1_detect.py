@@ -194,7 +194,7 @@ class StubDetectionTests(unittest.TestCase):
             )
             with patch(
                 "marc_agent.perception.stage1_detect.detect_frames_with_yolo",
-                return_value=([], people),
+                return_value=([], people, 2.0, 3.0),
             ):
                 round_ = detect_stage1_round(client)
         finally:
@@ -214,6 +214,8 @@ class StubDetectionTests(unittest.TestCase):
         self.assertEqual(people, round_.people)
         self.assertEqual(2, round_.metrics.cameras_discovered)
         self.assertEqual(1, round_.metrics.frames_loaded)
+        self.assertEqual(2.0, round_.metrics.load_ms)
+        self.assertEqual(3.0, round_.metrics.inference_ms)
         self.assertEqual(("missing_frame:rig_missing",), round_.metrics.failures)
 
     def test_filters_unknown_cameras(self):
