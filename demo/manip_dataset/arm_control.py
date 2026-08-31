@@ -960,6 +960,67 @@ class ArmTeleop:
         )
         return settled_q.copy()
 
+    def move_distal_wrist_joint(
+        self,
+        joint5_rad: float,
+        label: str,
+        *,
+        speed_rad_s: float = 0.8,
+        control_rate_hz: float = 20.0,
+    ) -> Optional[np.ndarray]:
+        """Move only joint 5 through a smooth elevated wrist arc."""
+        q0 = read_arm_q(self._client)
+        if q0 is None:
+            self._log(f"[arm] {label}: no joint_states")
+            return None
+        q_goal = q0.copy()
+        q_goal[4] = float(
+            np.clip(float(joint5_rad), ARM_JOINT_LOWER[4], ARM_JOINT_UPPER[4])
+        )
+        delta = float(q_goal[4] - q0[4])
+        rate_hz = min(
+            float(self.cfg.rate_hz), max(1.0, float(control_rate_hz)), 20.0
+        )
+        ticks = max(
+            2,
+            int(
+                math.ceil(
+                    0.5
+                    * math.pi
+                    * abs(delta)
+                    * rate_hz
+                    / max(0.05, float(speed_rad_s))
+                )
+            ),
+        )
+        dt = 1.0 / rate_hz
+        for tick in range(1, ticks + 1):
+            q_cmd = q0.copy()
+            q_cmd[4] = q0[4] + _cosine_ease(
+                float(tick) / float(ticks)
+            ) * delta
+            self._publish(q_cmd)
+            self._sleep(dt)
+        settled_q = None
+        for _ in range(max(3, int(math.ceil(rate_hz)))):
+            self._publish(q_goal)
+            q = read_arm_q(self._client)
+            if q is not None and abs(float(q[4] - q_goal[4])) <= float(
+                self.cfg.settle_tol_joint
+            ):
+                settled_q = q
+                break
+            self._sleep(dt)
+        if settled_q is None:
+            self._log(f"[arm] {label} FAILED: distal wrist did not settle")
+            return None
+        self._sync_ee_targets_from_q(settled_q)
+        self._log(
+            "[arm] %s OK joint5=%+.3f->%+.3f ticks=%d rate=%.1fHz"
+            % (label, q0[4], settled_q[4], ticks, rate_hz)
+        )
+        return settled_q.copy()
+
     def stabilize_grasp_pose(
         self,
         label: str = "grasp-settle",
@@ -1135,24 +1196,35 @@ class ArmTeleop:
             ):
                 return False
             rear_transit_tilt = transit_tilt
+            preserve_rear_orientation = False
             if grasp_profile.side_floor_load:
+                joint5_goal = grasp_profile.side_pre_descent_joint5_rad
+                if joint5_goal is None:
+                    self._log(
+                        "[graspgenx] floor-load profile missing distal wrist "
+                        "target -- fail closed"
+                    )
+                    return False
                 self._log(
-                    "[graspgenx] sunblock completing horizontal fold beside "
-                    "chassis tilt=%.2f before extension"
-                    % float(grasp_profile.approach_tilt_rad)
+                    "[graspgenx] sunblock folding distal rod outward beside "
+                    "chassis joint5=%+.2f before extension"
+                    % float(joint5_goal)
                 )
-                horizontal_q = self.move_grasp_pose_joint_path(
-                    fold_pad,
-                    yaw,
-                    "ggx-sunblock-fold-horizontal-clear",
-                    approach_tilt_rad=float(grasp_profile.approach_tilt_rad),
-                    pad_center_offset_m=pad_offset,
+                horizontal_q = self.move_distal_wrist_joint(
+                    joint5_goal,
+                    "ggx-sunblock-fold-outward-clear",
                     speed_rad_s=fold_speed,
                     control_rate_hz=transit_rate_hz,
                 )
                 if horizontal_q is None:
                     return False
-                rear_transit_tilt = float(grasp_profile.approach_tilt_rad)
+                horizontal_T = self.kin.fk(horizontal_q)
+                horizontal_pad = (
+                    horizontal_T[:3, 3]
+                    + horizontal_T[:3, :3][:, 2] * max(0.0, pad_offset)
+                )
+                rear_high[2] = float(horizontal_pad[2])
+                preserve_rear_orientation = True
             self._log(
                 "[graspgenx] upright moving outward while already folded "
                 "to rear_high=(%.3f,%.3f,%.3f)"
@@ -1167,15 +1239,15 @@ class ArmTeleop:
                 cart_step_m=staging_cart_step,
                 joint_step_rad=staging_joint_step,
                 control_rate_hz=transit_rate_hz,
+                preserve_current_orientation=preserve_rear_orientation,
             ):
                 return False
             descent_xy_limit = (
                 None if grasp_profile.physically_validated else 0.025
             )
             if grasp_profile.side_floor_load:
-                # The short sunblock cannot tolerate the transit-angle fingers
-                # The horizontal orientation was established beside the chassis
-                # and preserved during extension, avoiding a full-reach IK solve.
+                # The outward distal orientation was established beside the
+                # chassis and preserved during extension.
                 folded_q = read_arm_q(self._client)
                 if folded_q is None:
                     self._log(

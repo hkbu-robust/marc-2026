@@ -25,6 +25,7 @@ class GraspProfile:
     side_transit_cart_step_m: float
     side_transit_joint_step_rad: float
     side_floor_load: bool
+    side_pre_descent_joint5_rad: Optional[float]
     side_contact_fold_clearance_m: float
     side_final_insertion_m: float
     side_fold_speed_rad_s: float
@@ -64,6 +65,7 @@ LYING_TUMBLER = GraspProfile(
     side_transit_cart_step_m=0.004,
     side_transit_joint_step_rad=0.0125,
     side_floor_load=False,
+    side_pre_descent_joint5_rad=None,
     side_contact_fold_clearance_m=0.0,
     side_final_insertion_m=0.0,
     side_fold_speed_rad_s=0.0,
@@ -114,6 +116,7 @@ TUMBLER_UPRIGHT = GraspProfile(
     side_transit_cart_step_m=0.020,
     side_transit_joint_step_rad=0.055,
     side_floor_load=False,
+    side_pre_descent_joint5_rad=None,
     # Stop the descent at the safe transition. Fold in place there, then make
     # only a slow 15 mm level advance before closing; never restore the lower
     # cloud-contact Z after the fold.
@@ -194,8 +197,8 @@ LYING_SUNBLOCK = _copied_profile(LYING_TUMBLER, "lying_sunblock")
 UPRIGHT_SUNBLOCK = replace(
     _copied_profile(TUMBLER_UPRIGHT, "upright_sunblock"),
     approach_already_near_m=0.65,
-    approach_tilt_rad=1.45,
     side_floor_load=True,
+    side_pre_descent_joint5_rad=0.95,
     side_contact_fold_clearance_m=0.0,
     side_final_insertion_m=0.10,
     floor_clearance_m=0.035,
