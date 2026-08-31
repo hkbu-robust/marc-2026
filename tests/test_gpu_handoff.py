@@ -124,7 +124,7 @@ class GpuHandoffTests(unittest.TestCase):
         self.assertIn("before_reacquire", src)
         self.assertIn("after_successful_pick", src)
         self.assertIn("nearfield_start_reason", src)
-        self.assertIn("dump_stage_round", src)
+        self.assertIn("dump_stage_artifacts", src)
         self.assertIn("from marc_agent.perception.cctv_project import CctvProjector", src)
 
 
