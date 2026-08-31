@@ -38,8 +38,33 @@ The platform publishes base and gripper stereo RGB, `32FC1` depth, and organized
 the already-aligned base depth crop. **G** now runs this sequence: base YOLO/depth
 snapshot → support-plane-reduced object cloud → deterministic camera-entry stage
 → GraspMoE pose selection → Robotiq base-to-fingertip transform → short top-down
-pregrasp/contact motion → immediate `0.68` close → lift → base-camera verification.
+pregrasp/contact motion → immediate `0.703` close → lift → hold verification.
 Side grasps, far TCPs, missing depth, and unverified `holding=True` all fail closed.
+The handoff stays above the observed object top. YOLO supplies the crop, while its
+deprojected depth cloud supplies a robust top-down footprint: elongated objects
+finalize jaw yaw on the footprint's narrow axis and execute at its centre
+cross-section. The GraspGen-X candidate still has to provide a safe top-down pose,
+and the measured narrow width must fit the configured aperture. World closing-axis
+yaw is converted through the default wrist frame before IK (the default local +X
+points toward arm-base -Y). The arm centres and rotates at a safe height before a
+vertical pregrasp/contact descent. Final contact treats the lower object envelope
+as a conservative local support-plane estimate and fails closed when fingertip
+floor clearance cannot be preserved. Its base contact plane is 35% down from the
+observed top with at least 8 cm between the finger-pad midpoint and support, then
+a calibrated 3 cm upward offset prevents the final close from touching the floor.
+Clearly elongated footprints use their narrow-axis yaw; near-round/upright objects
+keep the default jaw axis and avoid an arbitrary wrist rotation. The saved cloud
+determines width/yaw, while fresh YOLO RGB-D localization is gated independently
+per axis against the saved centre. This keeps a valid lateral correction even when
+staged-arm occlusion corrupts forward depth by more than 4 cm. Out-of-reach
+post-stage depth remains optional input instead of aborting the saved-cloud grasp.
+The GraspGen-X deterministic handoff ends directly above the saved object centre,
+including the live-calibrated forward TCP correction, while the chassis actively
+holds its forward world position. GraspGen-X then
+sends one immediate `0.703` close with ramping and sensor early-stop disabled.
+Three consecutive post-lift hold samples verify the grasp without reloading the
+base-camera stack; camera-motion verification is only a fallback when hold is not
+confirmed.
 
 ## Dataset collector
 
@@ -98,7 +123,7 @@ and yaw each scene so boxes are not glued to one patch of the image.
 
 1. Arm moves to a **joint-space ready** pose (`MARC_READY_J1…J6`), then teleop uses EE-delta IK.
 2. **MANUAL_BASE** — `i/k/j/l` place and aim the chassis; `A` starts auto-approach.
-3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** and **prefers 360×640 chassis depth** when that shape is in the lock window. Then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **arm-base forward using the calibrated pitched/offset base-camera transform** (`MARC_APPROACH_STOP_M`, default 0.56 m). After that it keeps crawling until that forward range is at pick range (`MARC_APPROACH_ALREADY_NEAR`, default 0.44 m); wall-clock `OVERRUN_M / speed` is only a cap, because the practice sim often closes much slower than `cmd_vel`. No extra crawl if already closer than `ALREADY_NEAR` (`C` cancels).
+3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** and **prefers 360×640 chassis depth** when that shape is in the lock window. Then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **arm-base forward using the calibrated pitched/offset base-camera transform** (`MARC_APPROACH_STOP_M`, default 0.56 m). The final crawl stops at whichever safety boundary arrives first: the object's lower box edge entering the configured bottom-frame margin (`MARC_APPROACH_FRAME_BOTTOM_MARGIN`, default 10%) or arm-base forward reaching the hard range fallback (`MARC_APPROACH_ALREADY_NEAR`, default 0.44 m). Wall-clock `OVERRUN_M / speed` is only a cap, because the practice sim often closes much slower than `cmd_vel` (`C` cancels).
    Each tick logs `err` (box vs image center), `obj=used/raw`, `name`/`conf`, `fwd` (arm-base), and `d` (bbox depth). `obj=0/0` means YOLO saw nothing; `obj=0/3` means boxes existed but were skipped (e.g. `person`).
    Inference is always restricted to the exact `MARC_TARGET_OBJECT`; an unsupported target fails closed and never falls back to all classes. RGB is passed as a PIL image. Lock dumps PNGs under `datasets/yolo_debug/`.
 4. The collector takes the same validated near-field RGB-D snapshot as
@@ -340,7 +365,7 @@ trainer-side object pose/mesh export before running GraspGenX training.
 The Dockerfile `COPY`s `demo/` into the image, so an edit is invisible until the
 image is rebuilt — except bind-mounted paths. `agent-manip-probe` mounts
 `manip_dataset/`. `agent-manip-pick` also mounts `marc_agent/`, `nearfield.py`,
-`arm_pick.py`, and `pnp_params.json`, and reuses the full local `marc-agent:local`
+`arm_kin.py`, `arm_pick.py`, and `pnp_params.json`, and reuses the full local `marc-agent:local`
 image so its Python changes are immediate. The collector's YOLO/torch live in the
 `manip-probe` image target (`marc-agent-manip-probe:local`); dependency or
 Dockerfile changes there still need `--build`.
@@ -371,7 +396,8 @@ A `.env` under `manip_dataset/` is **not** read by Compose.
 | `MARC_YOLO_CAM` | `base_left` | RGB camera for centering (`base_left`/`base_right`) |
 | `MARC_TARGET_OBJECT` | `tumbler` | Exact required class; unsupported names fail closed |
 | `MARC_APPROACH_STOP_M` | `0.56` | Stop when calibrated arm-base forward is below this (m) |
-| `MARC_APPROACH_ALREADY_NEAR` | `0.44` | Calibrated arm-base fwd (m) counted as pick range: stops the final crawl 2 cm earlier to preserve the full object in frame |
+| `MARC_APPROACH_ALREADY_NEAR` | `0.44` | Hard calibrated arm-base fwd floor (m); the base never crawls closer even if box-edge geometry is noisy |
+| `MARC_APPROACH_FRAME_BOTTOM_MARGIN` | `0.10` | Stop forward motion when the object's lower YOLO-box edge enters this bottom fraction of the RGB frame |
 | `MARC_APPROACH_CRAWL` | `0.30` (`.env`: `0.80`) | Requested approach speed (m/s); clamped by `MAX_STEP` |
 | `MARC_APPROACH_MAX_STEP` | `0.04` (`.env`: `0.08`) | Max distance travelled per camera frame (m). Caps effective speed to the sensor rate |
 | `MARC_APPROACH_STALE_STOP` | `0.5` | Hold still if no usable RGB/depth for this long (s), instead of driving blind |

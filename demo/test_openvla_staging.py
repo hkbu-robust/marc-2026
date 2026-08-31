@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -12,6 +13,8 @@ from manip_dataset.app import CollectorApp
 from manip_dataset.depth_approach import ApproachConfig, DepthApproachController
 from manip_dataset.openvla_pick import (
     StagedOpenVLAPickRuntime,
+    graspgenx_stage_goal,
+    graspgenx_stage_waypoints,
     openvla_ee_is_safe,
     openvla_stage_goal,
     openvla_stage_waypoints,
@@ -167,7 +170,11 @@ class OpenVLAStagingTests(unittest.TestCase):
 
     def test_near_lock_is_class_keyed_and_drives_range_from_world_pose(self):
         client = _Client()
-        controller = DepthApproachController(client, cfg=ApproachConfig())
+        # This test isolates world-pose lock projection, not the approach stop
+        # boundary; keep its projected 0.50 m sample outside the range floor.
+        controller = DepthApproachController(
+            client, cfg=ApproachConfig(already_near_m=0.44)
+        )
         controller.set_target("sunblock")
         locked = LocalizedTarget(
             fwd=0.60,
@@ -208,6 +215,140 @@ class OpenVLAStagingTests(unittest.TestCase):
         self.assertEqual(0.0, ang)
         client.pose = (0.10, 0.40, 0.0)
         self.assertIsNone(controller._reuse_near_lock(None, (480, 640)))
+
+    def test_near_flicker_lock_is_available_for_every_selected_class(self):
+        for object_name in ("tumbler", "bottle", "tissue", "sunblock"):
+            with self.subTest(object_name=object_name):
+                client = _Client()
+                controller = DepthApproachController(
+                    client, cfg=ApproachConfig(already_near_m=0.49)
+                )
+                controller.set_target(object_name)
+                localized = LocalizedTarget(
+                    fwd=0.58,
+                    lat=0.02,
+                    z=-0.30,
+                    name=object_name,
+                    conf=0.21,
+                    world_xy=(0.76, 0.02),
+                    valid=True,
+                    reason="ok",
+                )
+                det = {
+                    "bbox": (250.0, 200.0, 350.0, 330.0),
+                    "rgb_shape": (480, 640),
+                    "name": object_name,
+                    "conf": 0.21,
+                    "n_obj": 1,
+                }
+
+                controller._maybe_lock_near_target(det, localized)
+                self.assertIs(localized, controller.locked_target(object_name))
+                reused = controller._reuse_near_lock(None, (480, 640))
+
+                self.assertIsNotNone(reused)
+                self.assertTrue(reused["near_lock_reused"])
+                self.assertEqual(object_name, reused["name"])
+
+    def test_logged_flicker_case_locks_and_drives_before_strict_center(self):
+        controller = DepthApproachController(
+            _Client(),
+            cfg=ApproachConfig(
+                stop_m=0.56,
+                already_near_m=0.49,
+                center_tol=0.05,
+                realign=0.12,
+                target_lock_acquire_pad_m=0.25,
+                target_lock_drive_tol=0.10,
+            ),
+        )
+        controller.set_target("tumbler")
+        localized = LocalizedTarget(
+            fwd=0.72,
+            lat=0.05,
+            z=-0.30,
+            name="tumbler",
+            conf=0.54,
+            world_xy=(0.90, 0.05),
+            valid=True,
+            reason="ok",
+        )
+        det = {
+            "bbox": (300.0, 200.0, 390.0, 330.0),
+            "rgb_shape": (480, 640),
+            "name": "tumbler",
+            "conf": 0.54,
+            "n_obj": 1,
+        }
+
+        controller._maybe_lock_near_target(det, localized)
+        lin, ang = controller._command(
+            {
+                "lat_n_obj": 1,
+                "lat_err": 0.08,
+                "fwd": 0.72,
+                "d_obj": 0.59,
+                "target_lock_active": True,
+                "is_new": True,
+            }
+        )
+
+        self.assertIsNotNone(controller.locked_target("tumbler"))
+        self.assertGreater(lin, 0.0)
+        self.assertEqual(0.0, ang)
+
+    def test_far_or_wrong_class_glimpse_cannot_establish_approach_lock(self):
+        controller = DepthApproachController(
+            _Client(), cfg=ApproachConfig(already_near_m=0.49)
+        )
+        controller.set_target("tumbler")
+        det = {
+            "bbox": (250.0, 200.0, 350.0, 330.0),
+            "rgb_shape": (480, 640),
+            "name": "tumbler",
+            "conf": 0.21,
+            "n_obj": 1,
+        }
+        far = LocalizedTarget(
+            fwd=0.90,
+            lat=0.0,
+            z=-0.30,
+            name="tumbler",
+            world_xy=(1.08, 0.0),
+            valid=True,
+        )
+        wrong_class = replace(far, fwd=0.58, name="bottle")
+        no_world_pose = replace(far, fwd=0.58, world_xy=None)
+
+        controller._maybe_lock_near_target(det, far)
+        self.assertIsNone(controller.locked_target("tumbler"))
+        controller._maybe_lock_near_target(det, wrong_class)
+        self.assertIsNone(controller.locked_target("tumbler"))
+        controller._maybe_lock_near_target(det, no_world_pose)
+        self.assertIsNone(controller.locked_target("tumbler"))
+
+    def test_upright_bbox_uses_farther_hard_approach_stop(self):
+        controller = DepthApproachController(
+            _Client(),
+            cfg=ApproachConfig(
+                already_near_m=0.49,
+                upright_bbox_aspect=1.20,
+                upright_already_near_m=0.56,
+            ),
+        )
+        common = {
+            "lat_n_obj": 1,
+            "lat_err": 0.0,
+            "fwd": 0.54,
+            "d_obj": 0.45,
+        }
+
+        self.assertTrue(
+            controller._too_near({**common, "bbox": (10.0, 10.0, 50.0, 90.0)})
+        )
+        self.assertFalse(
+            controller._too_near({**common, "bbox": (10.0, 10.0, 90.0, 50.0)})
+        )
 
     def test_explicit_base_view_never_falls_back_to_gripper(self):
         class Steps(dict):
@@ -257,6 +398,20 @@ class OpenVLAStagingTests(unittest.TestCase):
         self.assertEqual(current[2], forward[2])
         self.assertEqual(current[2], align[2])
         self.assertLess(view[2], align[2])
+
+    def test_graspgenx_stage_ends_directly_above_object_centre(self):
+        cfg = SimpleNamespace(openvla_stage_up_m=0.225)
+        current = np.array([0.329, 0.001, 0.094])
+        target = _target(fwd=0.413, lat=-0.095, z=-0.303)
+
+        goal = graspgenx_stage_goal(target, cfg)
+        waypoints = graspgenx_stage_waypoints(current, target, cfg)
+        forward, align, view = (waypoint for _label, waypoint in waypoints)
+
+        np.testing.assert_allclose(goal, [0.413, -0.095, -0.078])
+        self.assertEqual(current[2], forward[2])
+        self.assertEqual(current[2], align[2])
+        np.testing.assert_allclose(view[:2], [target.fwd, target.lat])
 
     def test_finite_localization_is_not_rejected_by_guessed_target_ranges(self):
         self.assertTrue(openvla_target_is_safe(_target(fwd=0.325))[0])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -41,6 +42,25 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+def closing_axis_relative_yaw(base_R, desired_world_yaw: float) -> float:
+    """Convert a world XY closing-axis angle to wrist-local yaw.
+
+    The safe default pose's local +X (the physical jaw-closing axis) points
+    roughly toward arm-base -Y, not +X. Applying a world angle directly as a
+    local wrist delta therefore rotates the jaws by 90 degrees from the chosen
+    object width.
+    """
+    rotation = np.asarray(base_R, dtype=np.float64)
+    if rotation.shape != (3, 3) or not np.all(np.isfinite(rotation)):
+        raise ValueError("base_R must be a finite 3x3 rotation")
+    base_axis = rotation[:2, 0]
+    if float(np.linalg.norm(base_axis)) <= 1e-9:
+        raise ValueError("default closing axis has no XY projection")
+    base_yaw = float(math.atan2(float(base_axis[1]), float(base_axis[0])))
+    relative = float(desired_world_yaw) - base_yaw
+    return math.atan2(math.sin(relative), math.cos(relative))
+
+
 # The SDK exposes both stereo rigs and depth, but vanilla OpenVLA fine-tuning loads
 # one primary RGB view only. Collection therefore touches and stores only that view.
 RGB_CAMERAS = ("base_left", "base_right", "gripper_left", "gripper_right")
@@ -77,10 +97,16 @@ DEFAULT_READY_UP = 0.28
 DEFAULT_RATE_HZ = 15.0
 DEFAULT_POS_STEP = 0.008
 DEFAULT_SETTLE_TOL_M = 0.015
+DEFAULT_SETTLE_TOL_ROT_RAD = 0.05
 DEFAULT_SETTLE_TOL_JOINT = 0.05
 DEFAULT_READY_MOVE_S = 2.0
 DEFAULT_MAX_TICKS_PER_CLICK = 40
 DEFAULT_IK_JOINT_STEP = 0.04  # rad/tick; bounds DLS speed while avoiding branch jumps
+DEFAULT_GRASP_LINE_STEP_M = 0.03
+DEFAULT_GRASP_LINE_MAX_XY_ERROR_M = 0.02
+DEFAULT_GRASP_LINE_JOINT_STEP_RAD = 0.025
+DEFAULT_GRASP_CONTACT_SETTLE_S = 0.50
+DEFAULT_GRASP_CONTACT_MAX_DRIFT_M = 0.006
 DEFAULT_GRIP_DWELL_S = 1.0  # fingers need ~1s to travel before holding can be observed
 # Closing jumps to the configured target by default. A positive MARC_GRIP_RAMP restores
 # interpolation; the optional sensor-stop mode can then confirm and stop on a hold.
@@ -99,6 +125,7 @@ DEFAULT_PLACE_LINK_PAD_M = 0.06
 DEFAULT_PLACE_SPEED = 0.5    # rad/s per joint; joint 1's URDF limit is 1.396
 DEFAULT_PLACE_IK_GUARD = 1.2  # rad any joint may move from its IK seed before the
                               # solution is treated as a branch jump and refused
+DEFAULT_PLACE_LIFT_IK_GUARD = 1.4  # long vertical lift from a low grasp pose
 ARM_JOINT_LOWER = np.array([-6.2832, -2.24, -2.57, -6.2832, -2.09, -6.2832])
 ARM_JOINT_UPPER = np.array([6.2832, 2.24, 2.57, 6.2832, 2.09, 6.2832])
 PLACE_SWEEP_FRAMES = (
@@ -149,6 +176,7 @@ class TeleopConfig:
     rate_hz: float = DEFAULT_RATE_HZ
     pos_step: float = DEFAULT_POS_STEP
     settle_tol_m: float = DEFAULT_SETTLE_TOL_M
+    settle_tol_rot_rad: float = DEFAULT_SETTLE_TOL_ROT_RAD
     settle_tol_joint: float = DEFAULT_SETTLE_TOL_JOINT
     ready_move_s: float = DEFAULT_READY_MOVE_S
     max_ticks_per_click: int = DEFAULT_MAX_TICKS_PER_CLICK
@@ -167,6 +195,7 @@ class TeleopConfig:
     place_sweep_radius_m: float = DEFAULT_PLACE_SWEEP_RADIUS_M
     place_speed: float = DEFAULT_PLACE_SPEED
     place_ik_guard: float = DEFAULT_PLACE_IK_GUARD
+    place_lift_ik_guard: float = DEFAULT_PLACE_LIFT_IK_GUARD
     place_rec_every: int = DEFAULT_PLACE_REC_EVERY
     openvla_stage_back_m: float = DEFAULT_OPENVLA_STAGE_BACK_M
     openvla_stage_min_forward_m: float = DEFAULT_OPENVLA_STAGE_MIN_FORWARD_M
@@ -193,6 +222,12 @@ class TeleopConfig:
             ready_lat=_env_float("MARC_READY_LAT", DEFAULT_READY_LAT),
             ready_up=_env_float("MARC_READY_UP", DEFAULT_READY_UP),
             ready_move_s=_env_float("MARC_READY_MOVE_S", DEFAULT_READY_MOVE_S),
+            settle_tol_rot_rad=max(
+                0.01,
+                _env_float(
+                    "MARC_SETTLE_TOL_ROT_RAD", DEFAULT_SETTLE_TOL_ROT_RAD
+                ),
+            ),
             ik_joint_step=max(
                 0.01,
                 _env_float("MARC_IK_JOINT_STEP", DEFAULT_IK_JOINT_STEP),
@@ -233,6 +268,9 @@ class TeleopConfig:
                 "MARC_PLACE_SPEED", float(p.get("carry_speed", DEFAULT_PLACE_SPEED))
             ),
             place_ik_guard=_env_float("MARC_PLACE_IK_GUARD", DEFAULT_PLACE_IK_GUARD),
+            place_lift_ik_guard=_env_float(
+                "MARC_PLACE_LIFT_IK_GUARD", DEFAULT_PLACE_LIFT_IK_GUARD
+            ),
             place_rec_every=max(
                 1, int(_env_float("MARC_PLACE_REC_EVERY", DEFAULT_PLACE_REC_EVERY))
             ),
@@ -382,10 +420,15 @@ class ArmTeleop:
         self._client.send_arm_command(_make_js(q, self.grip_cmd))
 
     def warm_cameras(self, seconds: float = 1.0):
-        """Touch only the training camera so its lazy subscription is warm."""
+        """Warm the base RGB and wrist depth streams used during a grasp."""
         t0 = time.monotonic()
         while time.monotonic() - t0 < seconds:
             self._client.get_robot_image(self.cfg.primary_camera)
+            try:
+                self._client.get_robot_depth("gripper")
+                self._client.get_robot_info("gripper_left")
+            except Exception:
+                pass
             self._sleep(0.05)
 
     def _ready_q(self) -> np.ndarray:
@@ -439,7 +482,7 @@ class ArmTeleop:
         return ok
 
     def move_grasp_pose(self, xyz, yaw: float, label: str = "grasp-pose") -> bool:
-        """Move the finger-pad contact point to ``xyz`` at an absolute tool yaw.
+        """Move pads to ``xyz`` at an absolute world-XY jaw-closing yaw.
 
         GraspGen-X poses use +X as the closing axis and +Z as the approach axis.
         The analytic arm baseline is intentionally restricted to top-down grasps,
@@ -454,45 +497,224 @@ class ArmTeleop:
         current = self.kin.fk(q0)[:3, 3]
         base_R = self.kin.fk(arm_kin.DEFAULT_ARM_Q)[:3, :3]
         base_quat = arm_kin.R_to_quat(base_R)
+        relative_yaw = closing_axis_relative_yaw(base_R, float(yaw))
         yaw_quat = arm_kin.rotvec_to_quat(
-            np.array([0.0, 0.0, float(yaw)], dtype=np.float64)
+            np.array([0.0, 0.0, relative_yaw], dtype=np.float64)
         )
         target_quat = arm_kin.quat_mul(base_quat, yaw_quat)
         norm = float(np.linalg.norm(target_quat))
         if norm <= 1e-9:
             self._log(f"[arm] {label}: invalid target orientation")
             return False
-        self.target_pos = current.copy()
-        self.target_quat = target_quat / norm
         goal = np.asarray(xyz, dtype=np.float64).reshape(3)
-        delta = goal - current
-        self.apply_delta(dx=float(delta[0]), dy=float(delta[1]), dz=float(delta[2]))
-        q1 = read_arm_q(self._client)
-        if q1 is None:
-            self._log(f"[arm] {label}: no final joint_states")
-            return False
-        actual = self.kin.fk(q1)[:3, 3]
-        err = float(np.linalg.norm(actual - goal))
+        pos_tol = max(0.03, 2.0 * float(self.cfg.settle_tol_m))
+        rot_tol = max(0.08, 2.0 * float(self.cfg.settle_tol_rot_rad))
+        servo_passes = max(
+            1, int(_env_float("MARC_GRASP_POSE_SERVO_PASSES", 3.0))
+        )
+        actual = current
+        err = float("inf")
+        rot_err = float("inf")
+        q1 = q0
+        for _ in range(servo_passes):
+            current_T = self.kin.fk(q1)
+            current = current_T[:3, 3]
+            self.target_pos = current.copy()
+            self.target_quat = target_quat / norm
+            delta = goal - current
+            self.apply_delta(
+                dx=float(delta[0]), dy=float(delta[1]), dz=float(delta[2])
+            )
+            q1 = read_arm_q(self._client)
+            if q1 is None:
+                self._log(f"[arm] {label}: no final joint_states")
+                return False
+            actual_T = self.kin.fk(q1)
+            actual = actual_T[:3, 3]
+            err = float(np.linalg.norm(actual - goal))
+            rot_err = float(
+                np.linalg.norm(
+                    arm_kin.quat_error_axis_angle(
+                        target_quat,
+                        arm_kin.R_to_quat(actual_T[:3, :3]),
+                    )
+                )
+            )
+            if err <= pos_tol and rot_err <= rot_tol:
+                break
         self._sync_ee_targets_from_q(q1)
         # Preserve the requested absolute orientation for the next straight-line
         # waypoint; _sync_ee_targets_from_q is used only to refresh live position.
         self.target_quat = target_quat / norm
-        ok = err <= max(0.03, 2.0 * float(self.cfg.settle_tol_m))
+        ok = err <= pos_tol and rot_err <= rot_tol
         self._log(
             "[arm] %s %s goal=(%.3f,%.3f,%.3f) actual=(%.3f,%.3f,%.3f) "
-            "yaw=%.2f err=%.3fm"
+            "closing_yaw=%.2f wrist_delta=%.2f pos_err=%.3fm rot_err=%.3frad"
             % (
                 label,
                 "OK" if ok else "FAILED",
                 goal[0], goal[1], goal[2],
                 actual[0], actual[1], actual[2],
-                float(yaw), err,
+                float(yaw), relative_yaw, err, rot_err,
             )
         )
         return ok
 
-    def stage_for_openvla(self, target) -> bool:
-        """Move forward clear of the base, then descend into the base-camera view."""
+    def move_grasp_line(self, xyz, yaw: float, label: str = "grasp-line") -> bool:
+        """Continuously track one Cartesian line without stop/start corrections."""
+        q0 = read_arm_q(self._client)
+        if q0 is None:
+            self._log(f"[arm] {label}: no joint_states")
+            return False
+        start = self.kin.fk(q0)[:3, 3].copy()
+        goal = np.asarray(xyz, dtype=np.float64).reshape(3)
+        distance = float(np.linalg.norm(goal - start))
+        if distance <= 1e-6:
+            return self.move_grasp_pose(goal, yaw, label)
+        direction = (goal - start) / distance
+        base_R = self.kin.fk(arm_kin.DEFAULT_ARM_Q)[:3, :3]
+        base_quat = arm_kin.R_to_quat(base_R)
+        relative_yaw = closing_axis_relative_yaw(base_R, float(yaw))
+        target_quat = arm_kin.quat_mul(
+            base_quat,
+            arm_kin.rotvec_to_quat(
+                np.array([0.0, 0.0, relative_yaw], dtype=np.float64)
+            ),
+        )
+        target_quat /= max(1e-9, float(np.linalg.norm(target_quat)))
+        cart_step = min(
+            max(0.002, float(self.cfg.pos_step)),
+            max(0.002, _env_float("MARC_GRASP_LINE_STEP_M", DEFAULT_GRASP_LINE_STEP_M)),
+        )
+        joint_step = max(
+            0.005,
+            _env_float(
+                "MARC_GRASP_LINE_JOINT_STEP_RAD",
+                DEFAULT_GRASP_LINE_JOINT_STEP_RAD,
+            ),
+        )
+        max_xy_error = max(
+            0.005,
+            _env_float(
+                "MARC_GRASP_LINE_MAX_XY_ERROR_M",
+                DEFAULT_GRASP_LINE_MAX_XY_ERROR_M,
+            ),
+        )
+        dt = 1.0 / float(self.cfg.rate_hz)
+        max_ticks = max(
+            int(self.cfg.max_ticks_per_click),
+            int(math.ceil(distance / cart_step)) * 10,
+        )
+        progress = 0.0
+        max_seen_xy_error = 0.0
+        settled = 0
+        ticks = 0
+        for ticks in range(1, max_ticks + 1):
+            q = read_arm_q(self._client)
+            if q is None:
+                self._sleep(dt)
+                continue
+            actual_T = self.kin.fk(q)
+            actual = actual_T[:3, 3]
+            along = float(np.clip(np.dot(actual - start, direction), 0.0, distance))
+            progress = max(progress, along)
+            setpoint_distance = min(distance, progress + cart_step)
+            setpoint = start + direction * setpoint_distance
+            closest = start + direction * along
+            xy_error = float(np.linalg.norm(actual[:2] - closest[:2]))
+            max_seen_xy_error = max(max_seen_xy_error, xy_error)
+            if xy_error > max_xy_error:
+                self._log(
+                    "[arm] %s ABORTED: path XY error %.3fm exceeds %.3fm"
+                    % (label, xy_error, max_xy_error)
+                )
+                return False
+            raw_cmd = arm_kin.dls_solve(
+                self.kin, q, setpoint, target_quat
+            )
+            dq = _shortest_joint_delta(q, raw_cmd)
+            self._publish(clamp_arm_q(q + np.clip(dq, -joint_step, joint_step)))
+            pos_err = float(np.linalg.norm(actual - goal))
+            rot_err = float(
+                np.linalg.norm(
+                    arm_kin.quat_error_axis_angle(
+                        target_quat,
+                        arm_kin.R_to_quat(actual_T[:3, :3]),
+                    )
+                )
+            )
+            if pos_err <= 0.006 and rot_err <= float(self.cfg.settle_tol_rot_rad):
+                settled += 1
+                if settled >= 3:
+                    break
+            else:
+                settled = 0
+            self._sleep(dt)
+        if settled < 3:
+            self._log(f"[arm] {label} FAILED: continuous line did not settle")
+            return False
+        q_end = read_arm_q(self._client)
+        if q_end is not None:
+            self._sync_ee_targets_from_q(q_end)
+            self.target_quat = target_quat
+        self._log(
+            "[arm] %s continuous-line OK ticks=%d max_xy_error=%.3fm"
+            % (label, ticks, max_seen_xy_error)
+        )
+        return True
+
+    def stabilize_grasp_pose(
+        self,
+        label: str = "grasp-settle",
+        *,
+        dwell_s: Optional[float] = None,
+        max_drift_m: Optional[float] = None,
+    ) -> bool:
+        """Hold one measured contact pose steady before commanding finger closure."""
+        q_hold = read_arm_q(self._client)
+        if q_hold is None:
+            self._log(f"[arm] {label}: no joint_states")
+            return False
+        reference = self.kin.fk(q_hold)[:3, 3]
+        configured_dwell_s = max(
+            0.2,
+            _env_float("MARC_GRASP_CONTACT_SETTLE_S", DEFAULT_GRASP_CONTACT_SETTLE_S)
+            if dwell_s is None
+            else float(dwell_s),
+        )
+        max_allowed = max(
+            0.002,
+            _env_float(
+                "MARC_GRASP_CONTACT_MAX_DRIFT_M",
+                DEFAULT_GRASP_CONTACT_MAX_DRIFT_M,
+            )
+            if max_drift_m is None
+            else float(max_drift_m),
+        )
+        dt = 1.0 / float(self.cfg.rate_hz)
+        max_seen = 0.0
+        for _ in range(max(1, int(math.ceil(configured_dwell_s * self.cfg.rate_hz)))):
+            self._publish(q_hold)
+            self._sleep(dt)
+            q = read_arm_q(self._client)
+            if q is None:
+                return False
+            drift = float(np.linalg.norm(self.kin.fk(q)[:3, 3] - reference))
+            max_seen = max(max_seen, drift)
+            if drift > max_allowed:
+                self._log(
+                    "[arm] %s FAILED drift=%.3fm limit=%.3fm"
+                    % (label, drift, max_allowed)
+                )
+                return False
+        self._log(
+            "[arm] %s OK dwell=%.2fs max_drift=%.3fm"
+            % (label, configured_dwell_s, max_seen)
+        )
+        return True
+
+    def _stage_for_policy(self, target, *, object_centered: bool) -> bool:
+        """Move through a collision-safe high path into one policy handoff."""
         if not self.set_grip(GRIPPER_OPEN):
             return False
         self.reset_grasp_flags()
@@ -505,6 +727,8 @@ class ArmTeleop:
         target_lat = float(target.lat)
         target_z = float(target.z)
         from .openvla_pick import (
+            graspgenx_stage_goal,
+            graspgenx_stage_waypoints,
             openvla_stage_goal,
             openvla_stage_waypoints,
             openvla_target_is_safe,
@@ -515,22 +739,37 @@ class ArmTeleop:
             self._log(f"[openvla] target invalid: {why}")
             return False
 
-        goal = openvla_stage_goal(target, self.cfg, current_fwd=float(current[0]))
+        if object_centered:
+            goal = graspgenx_stage_goal(target, self.cfg)
+            waypoints = graspgenx_stage_waypoints(current, target, self.cfg)
+            policy = "graspgenx"
+        else:
+            goal = openvla_stage_goal(
+                target, self.cfg, current_fwd=float(current[0])
+            )
+            waypoints = openvla_stage_waypoints(current, target, self.cfg)
+            policy = "openvla"
         self._log(
-            "[openvla] deterministic stage target=(%.3f,%.3f,%.3f) "
+            "[%s] deterministic stage target=(%.3f,%.3f,%.3f) "
             "pregrasp=(%.3f,%.3f,%.3f)"
             % (
+                policy,
                 target_fwd, target_lat, target_z,
                 goal[0], goal[1], goal[2],
             )
         )
-        # Clear the base/camera in +X before any descent.  At the normal ready pose
-        # this is an 8–10 cm forward move, matching the demonstrated entry trajectory.
-        waypoints = openvla_stage_waypoints(current, target, self.cfg)
         for label, waypoint in waypoints:
             if not self.move_ee_to(waypoint, label):
                 return False
         return True
+
+    def stage_for_openvla(self, target) -> bool:
+        """Move forward clear of the base, then descend into the policy view."""
+        return self._stage_for_policy(target, object_centered=False)
+
+    def stage_for_graspgenx(self, target) -> bool:
+        """Stage safely with the final high waypoint centred over the object."""
+        return self._stage_for_policy(target, object_centered=True)
 
     def lift_for_grasp_verification(self) -> bool:
         """Lift a candidate grasp so vision can distinguish cargo from finger contact."""
@@ -554,6 +793,18 @@ class ArmTeleop:
             return False
         self._grip_click(float(grip), None)
         return True
+
+    def set_grip_immediate(self, grip: float) -> bool:
+        """Jump to a grip target in one command, ignoring ramp/early-stop settings."""
+        ramp_s = self.cfg.grip_ramp_s
+        stop_on_grasp = self.cfg.grip_stop_on_grasp
+        try:
+            self.cfg.grip_ramp_s = 0.0
+            self.cfg.grip_stop_on_grasp = False
+            return self.set_grip(float(grip))
+        finally:
+            self.cfg.grip_ramp_s = ramp_s
+            self.cfg.grip_stop_on_grasp = stop_on_grasp
 
     def go_ready(self, timeout_s: float = 8.0, open_grip: Optional[bool] = None) -> bool:
         """Move to the configured joint-space ready pose (no Cartesian IK).
@@ -753,9 +1004,18 @@ class ArmTeleop:
             if q is None:
                 self._sleep(dt)
                 continue
-            ee = self.kin.fk(q)[:3, 3]
+            current_T = self.kin.fk(q)
+            ee = current_T[:3, 3]
             remaining = self.target_pos - ee
             dist = float(np.linalg.norm(remaining))
+            rot_dist = float(
+                np.linalg.norm(
+                    arm_kin.quat_error_axis_angle(
+                        self.target_quat,
+                        arm_kin.R_to_quat(current_T[:3, :3]),
+                    )
+                )
+            )
 
             # Per-tick action: progress toward goal this tick (pos) + 0 rot after first,
             # grip held constant. First tick carries the full intended delta label.
@@ -786,9 +1046,11 @@ class ArmTeleop:
                     on_step(obs, action)
                     recorded += 1
 
-            if dist < self.cfg.settle_tol_m and recorded > 0:
-                break
-            if prev_ee is not None and dist < self.cfg.settle_tol_m:
+            settled = (
+                dist < self.cfg.settle_tol_m
+                and rot_dist < self.cfg.settle_tol_rot_rad
+            )
+            if settled and (recorded > 0 or prev_ee is not None):
                 break
             prev_ee = ee.copy()
             self._sleep(dt)
@@ -1099,7 +1361,9 @@ class ArmTeleop:
         return float(np.max(np.linalg.norm(positions[:, :2], axis=1))) + \
             DEFAULT_PLACE_LINK_PAD_M
 
-    def _guarded_ik(self, label, target, q_seed) -> Optional[np.ndarray]:
+    def _guarded_ik(
+        self, label, target, q_seed, max_joint_dev=None
+    ) -> Optional[np.ndarray]:
         """IK for `target`, refused if the solver jumped to a different branch.
 
         A branch jump is what wrecked the old Cartesian path: the solver happily
@@ -1114,18 +1378,40 @@ class ArmTeleop:
         q = clamp_arm_q(q)
         err = float(np.linalg.norm(target - self.kin.fk(q)[:3, 3]))
         dev = float(np.max(np.abs(q - q_seed)))
-        if err < self.cfg.settle_tol_m * 2.0 and dev <= float(self.cfg.place_ik_guard):
+        guard = float(
+            self.cfg.place_ik_guard if max_joint_dev is None else max_joint_dev
+        )
+        if err < self.cfg.settle_tol_m * 2.0 and dev <= guard:
             self._log(
                 f"  [place] {label} solved: err={err:.3f}m dev={dev:.2f} rad "
                 f"j5={float(q[4]):+.3f} j6={float(q[5]):+.3f}"
             )
             return q
         self._log(f"  [place] {label} REJECTED: err={err:.3f}m dev={dev:.2f} rad "
-                  f"(guard {self.cfg.place_ik_guard:.2f})")
+                  f"(guard {guard:.2f})")
         return None
 
+    def _grasp_lift_pose(self, q_start) -> Optional[np.ndarray]:
+        """Plan a straight-up first carry leg in the live grasp orientation."""
+        q_start = np.asarray(q_start, dtype=np.float64)
+        ee_start = self.kin.fk(q_start)[:3, 3]
+        carry_z = float(self._place_params["carry_up"])
+        return self._guarded_ik(
+            "grasp-high",
+            [
+                float(ee_start[0]),
+                float(ee_start[1]),
+                max(float(ee_start[2]), carry_z),
+            ],
+            q_start,
+            max_joint_dev=max(
+                float(self.cfg.place_ik_guard),
+                float(self.cfg.place_lift_ik_guard),
+            ),
+        )
+
     def _place_poses(self):
-        """Lift, retract inside the chassis, yaw joint 1, then extend to basket.
+        """Build the compact neutral-orientation path to the basket.
 
         Only the compact pose is rotated. If IK or the conservative swept-cylinder
         check fails, return None before moving and keep holding.
@@ -1185,8 +1471,13 @@ class ArmTeleop:
             return 0
         self._place_params = load_params()
         q_home = np.asarray(arm_kin.DEFAULT_ARM_Q, dtype=np.float64)
+        q_now = read_arm_q(self._client)
+        if q_now is None:
+            self._log("[place] lost joint_states before planning")
+            return 0
+        q_grasp_lift = self._grasp_lift_pose(q_now)
         poses = self._place_poses()
-        if poses is None:
+        if q_grasp_lift is None or poses is None:
             self._log("[place] cannot solve a body-contained basket path — nothing moved, "
                       "still holding")
             return 0
@@ -1214,16 +1505,13 @@ class ArmTeleop:
             self._log("[place] E stop received — scripted placement cancelled")
             return True
 
-        q_now = read_arm_q(self._client)
         self._place_quat = arm_kin.R_to_quat(self.kin.fk(q_now)[:3, :3])
         if stop_if_requested():
             return n
         # Keep the latched squeeze. Publishing json/env close after contact ejects
         # the object. grip_target already means "closed" even if grip_cmd is 0.33.
         if self.closing or self._closed_since_last_open:
-            n += self._grip_segment("hold", self.grip_cmd, on_step, dwell,
-                                    intent=self.cfg.grip_close,
-                                    cancel_event=cancel_event)
+            self._log(f"[place] reuse verified grip={self.grip_cmd:.3f}; no pre-carry dwell")
         else:
             self._log("[place] gripper is open — closing before the move")
             n += self._grip_click(self.cfg.grip_close, on_step, cancel_event)
@@ -1236,6 +1524,7 @@ class ArmTeleop:
         if stop_if_requested():
             return n
         moves = (
+            ("raise grasp vertically", q_grasp_lift, False),
             ("raise to carry height", q_lift, False),
             ("tuck inside chassis", q_tuck, False),
             ("rotate tucked over basket", q_over, False),
