@@ -12,7 +12,10 @@ from typing import Optional
 import numpy as np
 
 from .images import depth_in_bbox, image_to_depth, image_to_rgb
-from .grasp_profiles import uses_upright_side_profile
+from .grasp_profiles import (
+    upright_side_approach_near_override,
+    uses_upright_side_profile,
+)
 from .yolo_detect import YoloConfig, YoloTracker
 
 from nearfield import (
@@ -692,6 +695,11 @@ class DepthApproachController:
             m.get("name"), bbox, min_aspect=self.cfg.upright_bbox_aspect
         ):
             return base
+        profile_override = upright_side_approach_near_override(
+            m.get("name"), bbox, min_aspect=self.cfg.upright_bbox_aspect
+        )
+        if profile_override is not None:
+            return max(base, float(profile_override))
         return max(base, float(self.cfg.upright_already_near_m))
 
     def _frame_bottom_limit(self, m: Optional[dict]) -> bool:

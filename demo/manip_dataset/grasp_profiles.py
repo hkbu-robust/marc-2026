@@ -16,6 +16,7 @@ class GraspProfile:
     physically_validated: bool
     min_fwd_m: float
     max_fwd_m: float
+    approach_already_near_m: Optional[float]
     approach_style: str
     stage_back_m: float
     approach_tilt_rad: float
@@ -23,6 +24,8 @@ class GraspProfile:
     side_transit_rate_hz: float
     side_transit_cart_step_m: float
     side_transit_joint_step_rad: float
+    side_floor_load: bool
+    side_pre_descent_joint5_rad: Optional[float]
     side_contact_fold_clearance_m: float
     side_final_insertion_m: float
     side_fold_speed_rad_s: float
@@ -53,6 +56,7 @@ LYING_TUMBLER = GraspProfile(
     physically_validated=True,
     min_fwd_m=0.32,
     max_fwd_m=0.58,
+    approach_already_near_m=None,
     approach_style="top_down",
     stage_back_m=0.0,
     approach_tilt_rad=0.0,
@@ -60,6 +64,8 @@ LYING_TUMBLER = GraspProfile(
     side_transit_rate_hz=20.0,
     side_transit_cart_step_m=0.004,
     side_transit_joint_step_rad=0.0125,
+    side_floor_load=False,
+    side_pre_descent_joint5_rad=None,
     side_contact_fold_clearance_m=0.0,
     side_final_insertion_m=0.0,
     side_fold_speed_rad_s=0.0,
@@ -95,6 +101,7 @@ TUMBLER_UPRIGHT = GraspProfile(
     # The guarded coordinated-fold path was checked through 0.671 m using the
     # real URDF. Keep a narrow 9 mm ceiling above that observed target.
     max_fwd_m=0.68,
+    approach_already_near_m=None,
     approach_style="front_side",
     stage_back_m=0.10,
     # Keep the absolute contact tilt as a conservative fallback for generic
@@ -108,6 +115,8 @@ TUMBLER_UPRIGHT = GraspProfile(
     side_transit_rate_hz=20.0,
     side_transit_cart_step_m=0.020,
     side_transit_joint_step_rad=0.055,
+    side_floor_load=False,
+    side_pre_descent_joint5_rad=None,
     # Stop the descent at the safe transition. Fold in place there, then make
     # only a slow 15 mm level advance before closing; never restore the lower
     # cloud-contact Z after the fold.
@@ -181,7 +190,20 @@ UPRIGHT_DISPOSABLE_CUP = _copied_profile(
 LYING_UMBRELLA = _copied_profile(LYING_TUMBLER, "lying_umbrella")
 UPRIGHT_UMBRELLA = _copied_profile(TUMBLER_UPRIGHT, "upright_umbrella")
 LYING_SUNBLOCK = _copied_profile(LYING_TUMBLER, "lying_sunblock")
-UPRIGHT_SUNBLOCK = _copied_profile(TUMBLER_UPRIGHT, "upright_sunblock")
+# A sunblock is too short for the tumbler's elevated side pinch. Keep the same
+# collision-clear upright transit, but finish with the open gripper at a guarded
+# floor-level pad height and load the object fully between the fingers before
+# closing. This remains isolated from every other copied upright profile.
+UPRIGHT_SUNBLOCK = replace(
+    _copied_profile(TUMBLER_UPRIGHT, "upright_sunblock"),
+    approach_already_near_m=0.65,
+    side_floor_load=True,
+    side_pre_descent_joint5_rad=0.95,
+    side_contact_fold_clearance_m=0.0,
+    side_final_insertion_m=0.10,
+    floor_clearance_m=0.035,
+    contact_settle_s=0.75,
+)
 
 # Pencil cases and tissues always use the top-down/lying motion, even when a
 # tall or folded detection box looks upright.
@@ -216,6 +238,12 @@ _POSTURE_PROFILES = {
 _ALWAYS_LYING_PROFILES = {
     "pencilcase": LYING_PENCILCASE,
     "tissue": LYING_TISSUE,
+}
+
+_ALWAYS_UPRIGHT_PROFILES = {
+    # Sunblock is narrow enough in either resting posture for the side-style
+    # handoff; avoid the copied overhead descent entirely.
+    "sunblock": UPRIGHT_SUNBLOCK,
 }
 
 
@@ -254,10 +282,28 @@ def is_upright_tumbler(name, bbox, min_aspect: float = 1.20) -> bool:
 def uses_upright_side_profile(name, bbox, min_aspect: float = 1.20) -> bool:
     """Whether this class and observed posture use the farther side workspace."""
     canonical = _canonical_name(name)
+    if canonical in _ALWAYS_UPRIGHT_PROFILES:
+        return True
     return (
         canonical in _POSTURE_PROFILES
         and bbox_xyxy_is_upright(bbox, min_aspect=min_aspect)
     )
+
+
+def upright_side_approach_near_override(
+    name, bbox, min_aspect: float = 1.20
+) -> Optional[float]:
+    """Return a calibrated class-only auto-approach distance, if one exists."""
+    canonical = _canonical_name(name)
+    profile = _ALWAYS_UPRIGHT_PROFILES.get(canonical)
+    if profile is None:
+        profiles = _POSTURE_PROFILES.get(canonical)
+        if profiles is None or not bbox_xyxy_is_upright(
+            bbox, min_aspect=min_aspect
+        ):
+            return None
+        profile = profiles[1]
+    return profile.approach_already_near_m
 
 
 def resolve_grasp_profile(target) -> Optional[GraspProfile]:
@@ -269,6 +315,10 @@ def resolve_grasp_profile(target) -> Optional[GraspProfile]:
     always_lying = _ALWAYS_LYING_PROFILES.get(name)
     if always_lying is not None:
         return always_lying
+
+    always_upright = _ALWAYS_UPRIGHT_PROFILES.get(name)
+    if always_upright is not None:
+        return always_upright
 
     if name == "cracker_box":
         if posture == "lying":

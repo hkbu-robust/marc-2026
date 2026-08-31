@@ -879,12 +879,21 @@ class StagedGraspGenXPickRuntime(PickRuntime):
         if side_profile:
             # Build the upright handoff only from the saved, unoccluded base
             # cloud. The arm reaches the folded rear pregrasp before inference.
-            side_contact_z = contact_z_from_extent(
-                support_z,
-                top_z,
-                contact_depth_fraction=profile.contact_depth_fraction,
-                floor_clearance_m=profile.floor_clearance_m,
-            )
+            if profile.side_floor_load:
+                # A short object must be loaded from floor level rather than
+                # pinched at the tumbler's elevated side-contact fraction. The
+                # value is the pad midpoint; the guarded wrist fold still keeps
+                # all tracked gripper frames above the measured support plane.
+                side_contact_z = float(support_z) + float(
+                    profile.floor_clearance_m
+                )
+            else:
+                side_contact_z = contact_z_from_extent(
+                    support_z,
+                    top_z,
+                    contact_depth_fraction=profile.contact_depth_fraction,
+                    floor_clearance_m=profile.floor_clearance_m,
+                )
             if side_contact_z is None:
                 self._emit(
                     "[pick] GraspGen-X object too short for upright side handoff "
@@ -912,6 +921,16 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                     side_contact_z,
                 )
             )
+            if profile.side_floor_load:
+                self._emit(
+                    "[pick] sunblock floor-load plan fully_open=True "
+                    "support_z=%.3f pad_z=%.3f level_advance=%.3fm"
+                    % (
+                        support_z,
+                        side_contact_z,
+                        profile.side_final_insertion_m,
+                    )
+                )
         else:
             # Overhead profiles retain the demonstrated camera handoff. Feed a
             # synthetic Z so its stage is measured from the observed object top.
@@ -1077,17 +1096,24 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                 dtype=np.float64,
             )
             cloud_contact_z = float(z)
-            # The final upright correction is deliberately tiny and level.
-            # The object-centre target and lower cloud Z must not be restored.
-            fwd = float(folded_pregrasp[0]) + float(
-                profile.side_final_insertion_m
+            # The final upright correction is level. Tumbler-shaped profiles
+            # use a tiny correction; the sunblock floor-load profile traverses
+            # its whole rear standoff while the gripper remains fully open.
+            # The lower cloud Z must never be restored after the guarded fold.
+            final_insertion = float(
+                getattr(
+                    stage_target,
+                    "folded_final_insertion_m",
+                    profile.side_final_insertion_m,
+                )
             )
+            fwd = float(folded_pregrasp[0]) + final_insertion
             lat = float(folded_pregrasp[1])
             z = float(folded_pregrasp[2])
             self._emit(
                 "[pick] upright measured folded precontact height %.3f "
                 "(cloud contact %.3f); final level advance %.3fm"
-                % (z, cloud_contact_z, profile.side_final_insertion_m)
+                % (z, cloud_contact_z, final_insertion)
             )
         min_fwd = (
             _env_float("MARC_GRASPGENX_MIN_FWD_M", DEFAULT_MIN_FWD_M)
