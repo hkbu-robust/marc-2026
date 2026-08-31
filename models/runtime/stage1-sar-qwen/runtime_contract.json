@@ -1,8 +1,8 @@
 {
   "model": {
-    "name": "Qwen3-VL-8B-Instruct",
-    "upstream_repository": "Qwen/Qwen3-VL-8B-Instruct",
-    "revision": "60595ebc30ec8e3b1d3b9e65d4943ca011c0006a",
+    "name": "qwen3-vl-8b-stage1-finetuned",
+    "upstream_repository": "roBUst-marc-2026/qwen3-vl-8b-stage1-finetuned",
+    "revision": "b2360c86972018edd3df1c7ac21e28c129317928",
     "local_directory": "model",
     "format": "Hugging Face Transformers safetensors snapshot"
   },
@@ -18,6 +18,7 @@
     "output_grammar": "<candidate_id>|<normal|abnormal|emergency|accident>"
   },
   "framework": {
+    "vllm": "0.22.0",
     "transformers": "4.57.1",
     "accelerate": "1.10.1",
     "safetensors": "0.6.2"

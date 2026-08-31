@@ -53,6 +53,19 @@ class _CommandFollowingClient(_FollowingClient):
         self.elapsed += float(dt)
 
 
+class _DelayedFollowingClient(_FollowingClient):
+    def __init__(self):
+        super().__init__()
+        self.pending = None
+        self.reads = 0
+
+    def get_arm_state(self):
+        self.reads += 1
+        if self.pending is not None and self.reads % 3 == 0:
+            self.q = self.pending.copy()
+        return super().get_arm_state()
+
+
 class _TransientContactClient(_ContactClient):
     def __init__(self):
         super().__init__(contact_sample=0)
@@ -354,6 +367,38 @@ class GripperCloseTests(unittest.TestCase):
         np.testing.assert_allclose(
             published[0], (0.02, 0.01, 0.005, 0.0, 0.0, 0.0), atol=1e-9
         )
+
+    def test_cartesian_servo_does_not_spend_ticks_on_stale_feedback(self):
+        client = _DelayedFollowingClient()
+        arm = object.__new__(ArmTeleop)
+        arm._client = client
+        arm.cfg = SimpleNamespace(
+            rate_hz=20.0,
+            max_ticks_per_click=3,
+            pos_step=0.008,
+            settle_tol_m=0.015,
+            settle_tol_rot_rad=0.05,
+            ik_joint_step=0.05,
+            grip_close=0.68,
+        )
+        arm.kin = _XYZKin()
+        arm.grip_cmd = 0.0
+        arm.grip_target = 0.0
+        arm.target_pos = None
+        arm.target_quat = None
+        arm._closed_since_last_open = False
+        arm._log = lambda _line: None
+        arm._sleep = lambda _dt: None
+        arm._publish = lambda q: setattr(client, "pending", np.asarray(q).copy())
+
+        def solve(_kin, q, target_pos, _target_quat):
+            result = np.asarray(q).copy()
+            result[0] = float(target_pos[0])
+            return result
+
+        with patch.object(arm_control.arm_kin, "dls_solve", side_effect=solve):
+            self.assertTrue(arm.move_ee_to((0.10, 0.0, 0.0), "delayed"))
+        self.assertGreaterEqual(client.reads, 9)
 
     def test_cartesian_servo_waits_for_yaw_after_position_is_settled(self):
         client = _FollowingClient()

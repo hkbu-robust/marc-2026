@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+ARG VLLM_IMAGE=vllm/vllm-openai:v0.22.0
+FROM ${VLLM_IMAGE}
+
+ARG MARC_BUILD_MODE=baked
+
+WORKDIR /opt/marc
+COPY marc_agent /opt/marc/marc_agent
+COPY models/runtime /opt/marc/models/runtime
+COPY demo/vllm-entrypoint.sh /usr/local/bin/marc-vllm-entrypoint
+
+RUN --network=host \
+    --mount=type=cache,target=/root/.cache/huggingface \
+    --mount=type=secret,id=HF_TOKEN,env=HF_TOKEN,required=false \
+    if [ "$MARC_BUILD_MODE" = baked ]; then \
+        HF_HUB_DISABLE_XET=1 PYTHONPATH=/opt/marc \
+            python3 /opt/marc/models/runtime/fetch_runtime_weights.py \
+                --only qwen --destination /models/qwen3-vl; \
+    elif [ "$MARC_BUILD_MODE" != development ]; then \
+        echo "MARC_BUILD_MODE must be baked or development" >&2; exit 2; \
+    fi
+
+RUN chmod 0755 /usr/local/bin/marc-vllm-entrypoint \
+    && mkdir -p /models-dev/qwen
+
+ENV MARC_BUILD_MODE=${MARC_BUILD_MODE} \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    VLLM_MODEL_NAME=qwen3-vl-8b
+
+ENTRYPOINT ["/usr/local/bin/marc-vllm-entrypoint"]

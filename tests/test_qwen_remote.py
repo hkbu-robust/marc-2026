@@ -8,6 +8,7 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -265,12 +266,16 @@ class QwenRemoteTests(unittest.TestCase):
         self.assertIn("attempt=1/2", output)
         self.assertIn("attempt=2/2", output)
 
-    def test_wall_timeout_caps_deadline_and_retries_when_budget_allows(self):
+    def test_round_budget_is_shared_across_requests(self):
+        now = [100.0]
         calls = []
 
         def post(_url, _body, _headers, timeout):
             calls.append(timeout)
-            raise QwenRemoteTimeout(f"vLLM did not respond within {timeout:.1f}s")
+            now[0] += 20.0 if len(calls) == 1 else 8.0
+            return json.dumps(
+                {"choices": [{"message": {"content": "rig_a:person_prone:0|emergency"}}]}
+            ).encode("utf-8")
 
         config = QwenRemoteConfig(
             base_url="http://workstation:8000/v1",
@@ -280,16 +285,22 @@ class QwenRemoteTests(unittest.TestCase):
             max_new_tokens=8,
         )
         verifier = RemoteQwenSarVerifier(config, post=post)
-        verifier.set_budget_timeout(27.9)
-        with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
-            with self.assertRaises(QwenRemoteTimeout):
+        with patch("marc_agent.perception.qwen_remote.time.monotonic", side_effect=lambda: now[0]):
+            verifier.set_budget_timeout(27.9)
+            with self.assertLogs("marc_agent.qwen_remote", level="INFO") as captured:
                 verifier(_board())
-        self.assertEqual([12.0, 12.0], calls)
+                verifier(_board())
+                with self.assertRaisesRegex(QwenRemoteTimeout, "budget exhausted"):
+                    verifier(_board())
+
+        self.assertEqual(2, len(calls))
+        self.assertAlmostEqual(27.9, calls[0])
+        self.assertAlmostEqual(7.9, calls[1])
         output = "\n".join(captured.output)
-        self.assertIn("deadline=12.0s", output)
+        self.assertIn("deadline=27.9s", output)
+        self.assertIn("deadline=7.9s", output)
         self.assertIn("budget=27.9s", output)
-        self.assertIn("attempt=1/2", output)
-        self.assertIn("attempt=2/2", output)
+        self.assertIn("attempt=1/1", output)
 
     def test_timeout_retry_exhausted_raises(self):
         calls = []

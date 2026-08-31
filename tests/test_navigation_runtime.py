@@ -21,6 +21,8 @@ from marc_agent.navigation_runtime import (
     _frontal_escape,
     _plan_attempts,
     _ram_bumper_disc,
+    _ram_replan_discs,
+    _remaining_blocked,
 )
 from marc_agent.retrieval_state import search_area_approach_goal
 
@@ -258,6 +260,9 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertIn("STAGE2_INFLATION_M = 0.55", src)
         self.assertIn("peek_yolo_handoff", src)
         self.assertIn("handoff_fn", src)
+        self.assertIn("DepthApproachController", src)
+        self.assertIn("approach_controller.tick()", src)
+        self.assertIn("StagedGraspGenXPickRuntime", src)
 
     def test_unknown_cells_are_not_traversable(self):
         grid = np.full((20, 40), -1, dtype=np.int8)
@@ -291,12 +296,95 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual("no_path", result.status.value)
         self.assertLessEqual(result.replan_count, 1)
 
-    def test_plan_attempts_keep_configured_inflation(self):
+    def test_plan_to_measures_live_route_without_driving(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([2.0, 5.0, 0.0], occ=occ)
+        nav = Stage2Navigator(client, inflation_m=0.0)
+
+        route = nav.plan_to((8.0, 5.0))
+
+        self.assertTrue(route.available)
+        self.assertGreater(route.length_m, 5.0)
+        self.assertLess(route.length_m, 7.0)
+        self.assertEqual((8.0, 5.0), route.requested_goal_xy)
+        self.assertTrue(route.waypoints)
+        self.assertEqual([], client.cmds)
+        self.assertEqual(0.0, client.now_s())
+
+    def test_plan_to_reports_effective_snapped_goal(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        grid[10, 16] = 100
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        nav = Stage2Navigator(FakeClient([2.0, 5.0, 0.0], occ=occ), inflation_m=0.0)
+
+        route = nav.plan_to((8.0, 5.0))
+
+        self.assertTrue(route.available)
+        self.assertEqual((8.0, 5.0), route.requested_goal_xy)
+        self.assertNotEqual(route.requested_goal_xy, route.effective_goal_xy)
+
+    def test_observe_fn_can_stop_navigation_without_reporting_reached(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([2.0, 5.0, 0.0], occ=occ)
+        calls = []
+
+        def observe(_pose):
+            calls.append(True)
+            return "basket_drop_recovery"
+
+        result = Stage2Navigator(client, inflation_m=0.0).navigate_to(
+            (8.0, 5.0), 5.0, observe_fn=observe,
+        )
+
+        self.assertEqual(NavStatus.ABORTED, result.status)
+        self.assertEqual("basket_drop_recovery", result.reason)
+        self.assertEqual([True], calls)
+        self.assertEqual((0.0, 0.0), client.cmds[-1])
+
+    def test_plan_attempts_prefer_clearance_then_fall_back(self):
         attempts = _plan_attempts(0.25)
-        self.assertTrue(all(abs(infl - 0.25) < 1e-9 for infl, _margin in attempts))
-        self.assertTrue(all(infl > 0.0 for infl, _margin in attempts))
+        self.assertEqual([0.45] * 3 + [0.25] * 3, [infl for infl, _ in attempts])
         zero = _plan_attempts(0.0)
         self.assertTrue(all(abs(infl) < 1e-9 for infl, _margin in zero))
+
+    def test_plan_path_uses_baseline_when_wide_attempts_fail(self):
+        class Planner:
+            ready = False
+            last_method = "dstar"
+
+            def __init__(self):
+                self.inflations = []
+
+            def cell_free(self, *_args):
+                return True
+
+            def plan(self, _start, goal, *, inflation_m, **_kwargs):
+                self.inflations.append(inflation_m)
+                return [goal] if inflation_m <= 0.25 else None
+
+        planner = Planner()
+        nav = Stage2Navigator(FakeClient([0.0, 0.0, 0.0]), inflation_m=0.25)
+        self.assertEqual([(2.0, 0.0)], nav._plan_path(planner, (0.0, 0.0), (2.0, 0.0)))
+        self.assertEqual([0.45] * 3 + [0.25], planner.inflations)
+
+    def test_remaining_path_accepts_spawn_inside_curb_margin(self):
+        from mock_agent_navigation import OccupancyGridPlanner
+
+        grid = np.zeros((20, 80), dtype=np.int8)
+        grid[0, :] = 100
+        planner = OccupancyGridPlanner()
+        planner.update_from_array(grid, 0.1, 0.0, 0.0)
+
+        self.assertFalse(
+            _remaining_blocked(
+                planner,
+                (1.0, 0.15),
+                [(1.0, 0.55), (6.0, 0.55)],
+                inflation_m=0.25,
+            )
+        )
 
     def test_free_approach_does_not_sit_in_occupied_cell(self):
         from mock_agent_navigation import OccupancyGridPlanner
@@ -958,7 +1046,7 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertLess(cmd[0], 0.0)
         self.assertEqual(0.0, cmd[1])
 
-    def test_inside_disc_aborts_before_approach_edge(self):
+    def test_inside_disc_does_not_skip_collision_safe_approach_goal(self):
         grid = np.zeros((20, 40), dtype=np.int8)
         occ = _Occ(grid, 0.5, 0.0, 0.0)
         start = [5.0, 5.0, 0.0]
@@ -968,14 +1056,14 @@ class NavigationRuntimeTests(unittest.TestCase):
             stuck_time_s=30.0, replan_cap=20,
         )
         result = nav.navigate_to(
-            (16.0, 5.0), 5.0, leg="search", tol=0.7,
+            (8.0, 5.0), 10.0, leg="search", tol=0.7,
             search_xy=(5.0, 5.0), search_radius=2.0,
         )
         self.assertEqual("reached", result.status.value)
-        self.assertEqual("inside_disc", result.reason)
+        self.assertEqual("reached", result.reason)
         pose = client.get_world_pose()
-        self.assertLess(math.hypot(pose[0] - 5.0, pose[1] - 5.0), 0.05)
-        self.assertTrue(all(v <= 1e-9 for v, _w in client.cmds))
+        self.assertLess(math.hypot(pose[0] - 8.0, pose[1] - 5.0), 0.7)
+        self.assertTrue(any(v > 0.0 for v, _w in client.cmds))
 
     def test_handoff_fn_true_on_tick_two(self):
         grid = np.zeros((20, 40), dtype=np.int8)
@@ -1007,6 +1095,10 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertAlmostEqual(disc[0], start[0] + STOP_X_MAX)
         self.assertAlmostEqual(disc[1], start[1])
         self.assertAlmostEqual(disc[2], DISC_R)
+        ram_discs = _ram_replan_discs(start)
+        self.assertEqual(2, len(ram_discs))
+        self.assertGreater(ram_discs[1][0], ram_discs[0][0])
+        self.assertAlmostEqual(ram_discs[1][1], ram_discs[0][1])
         # Live occupancy is 5 cm; a 0.5 m test grid would let the start hole eat the bumper disc.
         grid = np.zeros((200, 400), dtype=np.int8)
         planner = OccupancyGridPlanner()

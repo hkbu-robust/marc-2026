@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from marc_agent.command_parser import PARKED_VEHICLE_LANDMARKS, parse_command
-from marc_agent.perception.bundle_paths import STAGE1_CCTV_CONTRACT, STAGE1_CCTV_WEIGHTS
+from marc_agent.perception.bundle_paths import STAGE1_CCTV_CONTRACT
 from marc_agent.perception.cctv_yolo import (
     CctvYoloDetector,
     RuntimeContract,
@@ -77,9 +77,12 @@ class CctvYoloTests(unittest.TestCase):
                 _resolve_device("0")
         self.assertEqual("cpu", _resolve_device("cpu"))
 
-    def test_bundle_files_exist(self):
-        self.assertTrue(STAGE1_CCTV_WEIGHTS.is_file(), "model.pt should be in the repo bundle")
+    def test_bundle_metadata_exists_and_weight_is_not_tracked(self):
         self.assertTrue(STAGE1_CCTV_CONTRACT.is_file())
+        self.assertIn(
+            "/models/runtime/stage1-cctv-detector/model.pt",
+            Path(".gitignore").read_text(encoding="utf-8"),
+        )
 
     def test_runtime_contract_loads(self):
         with patch.dict(os.environ, {"MARC_CCTV_YOLO_CONF": ""}):

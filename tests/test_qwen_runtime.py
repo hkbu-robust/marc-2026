@@ -95,7 +95,7 @@ class QwenRuntimeTests(unittest.TestCase):
             }
         )
         self.assertEqual(90.0, config.timeout_s)
-        self.assertEqual(12.0, config.wall_timeout_s)
+        self.assertEqual(90.0, config.wall_timeout_s)
 
     def test_remote_wall_timeout_is_configurable(self):
         config = QwenRemoteConfig.load(

@@ -612,6 +612,13 @@ def static_scene_key(parsed: Optional[ParsedCommand]) -> Optional[tuple]:
     )
 
 
+def has_complete_camera_coverage(detections: CctvDetectionRound) -> bool:
+    """True when every discovered CCTV camera supplied a usable frame."""
+    return bool(detections.camera_ids) and all(
+        camera_id in detections.frames for camera_id in detections.camera_ids
+    )
+
+
 def _xyz_list(xyz: tuple[float, float, float]) -> list[float]:
     return [float(xyz[0]), float(xyz[1]), float(xyz[2])]
 

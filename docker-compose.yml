@@ -1,16 +1,59 @@
-# MARC 2026 submission entry point. Development Qwen overrides live under demo/.
+# MARC 2026 submission entry point: a fresh clone needs only `docker compose up`.
 services:
+  qwen:
+    build:
+      context: .
+      dockerfile: demo/Dockerfile.vllm
+      network: host
+      entitlements:
+        - network.host
+      args:
+        MARC_BUILD_MODE: "${MARC_BUILD_MODE:-baked}"
+    image: marc-qwen-vllm:local
+    network_mode: host
+    runtime: nvidia
+    ipc: host
+    environment:
+      MARC_BUILD_MODE: "${MARC_BUILD_MODE:-baked}"
+      VLLM_API_KEY: "marc-qwen-secret"
+      VLLM_MODEL_NAME: "qwen3-vl-8b"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import os, urllib.request; request = urllib.request.Request('http://127.0.0.1:8004/v1/models', headers={'Authorization': 'Bearer ' + os.environ['VLLM_API_KEY']}); urllib.request.urlopen(request, timeout=5)"
+      interval: 10s
+      timeout: 6s
+      retries: 60
+      start_period: 5m
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   agent:
+    depends_on:
+      qwen:
+        condition: service_healthy
     build:
       context: .
       dockerfile: demo/Dockerfile
       target: agent
       network: host
+      entitlements:
+        - network.host
       args:
-        # Submission is self-contained: always bake Qwen into the image.
-        MARC_QWEN_BACKEND: local
+        MARC_BUILD_MODE: "${MARC_BUILD_MODE:-baked}"
+        MARC_QWEN_BACKEND: remote
     image: marc-agent:local
     network_mode: host
+    runtime: nvidia
     environment:
       MARC_TEAM_ID: "${MARC_TEAM_ID:-robust}"
       MARC_TOKEN: "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
@@ -20,15 +63,20 @@ services:
       PYTHONUNBUFFERED: "1"
       MARC_EXPERIMENTS_DIR: "/agent/experiments"
       MARC_RUN_MODE: "submission"
-      MARC_SAR_DETECTOR: "qwen"
-      MARC_QWEN_BACKEND: "local"
-      MARC_QWEN_MODEL_DIR: "/agent/models/runtime/stage1-sar-qwen/model"
+      MARC_SAR_DETECTOR: "qwen-remote"
+      MARC_QWEN_BACKEND: "remote"
+      MARC_QWEN_BASE_URL: "http://127.0.0.1:8004/v1"
+      MARC_QWEN_API_KEY: "marc-qwen-secret"
+      MARC_QWEN_MODEL: "qwen3-vl-8b"
+      MARC_QWEN_WALL_TIMEOUT_S: "${MARC_QWEN_WALL_TIMEOUT_S:-90}"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
       MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"
       MARC_GRASPGENX_WEIGHTS: "/agent/models/runtime/graspgenx"
       GRASPGENX_CHECKPOINT_DIR: "/agent/models/runtime/graspgenx"
       GRASPGENX_GRIPPER_CFG_DIR: "/agent/models/runtime/graspgenx/grippers"
       MARC_GRASPGENX_GRIPPER: "${MARC_GRASPGENX_GRIPPER:-robotiq_2f_140}"
+      MARC_YOLO_WEIGHTS: "/agent/models/runtime/stage2-nearfield-detector/model.pt"
+      MARC_PICK_POLICY: "${MARC_PICK_POLICY:-graspgenx}"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       YOLO_OFFLINE: "1"

@@ -18,12 +18,18 @@ simulation-platform/.env
 /demo/weights/*.onnx
 
 # Hub snapshots baked into the agent image at docker build, not git.
+/models/runtime/stage1-cctv-detector/model.pt
+/models/runtime/stage2-nearfield-detector/model.pt
 /models/runtime/stage1-sar-qwen/model/**
 !/models/runtime/stage1-sar-qwen/model/.gitkeep
 /models/runtime/graspgenx/gen/
 /models/runtime/graspgenx/dis/
 /models/runtime/graspgenx/grippers/
 /models/runtime/graspgenx/release/
+/models/runtime/openvla/*
+!/models/runtime/openvla/.gitkeep
+!/models/runtime/openvla/SOURCE.md
+!/models/runtime/openvla/chat_template.jinja
 
 # submission: omit these
 /datasets/**
