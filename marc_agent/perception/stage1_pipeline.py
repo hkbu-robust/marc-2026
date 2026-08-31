@@ -168,6 +168,8 @@ class Stage1CandidateResult:
     failure_reason: Optional[str]
     total_ms: float
     object_selection: Optional[ObjectSelection] = None
+    parse_ms: float = 0.0
+    selection_ms: float = 0.0
 
     @property
     def selected_candidate_id(self) -> Optional[str]:
@@ -190,6 +192,17 @@ class Stage1CandidateResult:
             "frames_loaded": sorted(self.detections.frames),
             "object_candidates": len(self.detections.objects),
             "person_candidates": len(self.detections.people),
+            "candidates": [
+                {
+                    "candidate_id": item.candidate_id,
+                    "class_name": getattr(item, "class_name", None)
+                    or getattr(item, "pose_class", None),
+                    "camera_id": item.camera_id,
+                    "confidence": item.confidence,
+                    "bbox_xyxy": item.bbox_xyxy,
+                }
+                for item in (*self.detections.objects, *self.detections.people)
+            ],
             "selected_candidate_id": self.selected_candidate_id,
             "selection_status": (
                 self.sar_selection.status.value if self.sar_selection else None
@@ -200,6 +213,18 @@ class Stage1CandidateResult:
                 else (self.object_selection.method if self.object_selection else None)
             ),
             "selection_reason": self.sar_selection.reason if self.sar_selection else None,
+            "selection_score": (
+                self.object_selection.score if self.object_selection is not None else None
+            ),
+            "validated_output": (
+                self.sar_selection.raw_output
+                if self.sar_selection is not None
+                else (
+                    self.object_selection.raw_output
+                    if self.object_selection is not None
+                    else None
+                )
+            ),
             "verifier_metrics": (
                 asdict(self.sar_selection.verifier_metrics)
                 if self.sar_selection and self.sar_selection.verifier_metrics
@@ -208,6 +233,8 @@ class Stage1CandidateResult:
             "failure_reason": self.failure_reason,
             "candidate_recall": recall,
             "metrics": asdict(self.detections.metrics),
+            "parse_ms": self.parse_ms,
+            "selection_ms": self.selection_ms,
             "total_ms": self.total_ms,
         }
 
@@ -355,6 +382,7 @@ def run_stage1_candidate_pipeline(
 ) -> Stage1CandidateResult:
     """Parse one request, collect all-camera candidates, and select SAR or objects."""
     started = time.perf_counter()
+    parse_started = time.perf_counter()
     try:
         parsed = parse_command(command_text, expected_intent=expected_intent)
     except CommandParseError as exc:
@@ -368,7 +396,9 @@ def run_stage1_candidate_pipeline(
                 None,
                 f"command_parse:{exc.code.value}",
                 (time.perf_counter() - started) * 1000.0,
+                parse_ms=(time.perf_counter() - parse_started) * 1000.0,
             )
+    parse_ms = (time.perf_counter() - parse_started) * 1000.0
 
     log.info(
         "[stage1-pipeline] parsed target_type=%s situation=%s landmark=%s relation=%s",
@@ -394,6 +424,7 @@ def run_stage1_candidate_pipeline(
         )
 
     detections = refine_detection_round(parsed, detections)
+    selection_started = time.perf_counter()
     selected_verifier = _select_verifier(verifier, clock, client)
     prepare_scene = getattr(selected_verifier, "prepare_scene", None)
     if callable(prepare_scene):
@@ -492,6 +523,8 @@ def run_stage1_candidate_pipeline(
         failure_reason,
         (time.perf_counter() - started) * 1000.0,
         object_selection=object_selection,
+        parse_ms=parse_ms,
+        selection_ms=(time.perf_counter() - selection_started) * 1000.0,
     )
 
 
@@ -553,6 +586,16 @@ class Stage1RoundResult:
     failure_reason: Optional[str]
     target_id: Optional[str] = None
     anchor_id: Optional[str] = None
+    projection_ms: float = 0.0
+
+    def record(self) -> dict:
+        return {
+            **self.candidates.record(),
+            "duration_ms": self.candidates.total_ms + self.projection_ms,
+            "projection_ms": self.projection_ms,
+            "grounding_method": self.method,
+            "grounding_failure_reason": self.failure_reason,
+        }
 
 
 def static_scene_key(parsed: Optional[ParsedCommand]) -> Optional[tuple]:
@@ -1003,7 +1046,12 @@ def run_stage1_round(
         clock=clock,
     )
     candidates = _refresh_selected_candidates(candidates)
-    return compose_stage1_grounding(candidates, projector)
+    projection_started = time.perf_counter()
+    result = compose_stage1_grounding(candidates, projector)
+    return replace(
+        result,
+        projection_ms=(time.perf_counter() - projection_started) * 1000.0,
+    )
 
 
 def append_stage1_record(

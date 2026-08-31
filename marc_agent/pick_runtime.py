@@ -15,6 +15,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from marc_agent.experiment_log import current_experiment
+
 from marc_agent.graspgenx_policy import (
     MIN_CLOUD_POINTS,
     best_grasp,
@@ -57,6 +59,7 @@ REASON_DROP = "drop"
 REASON_NO_BASKET = "no_basket"
 REASON_LOST_TARGET = "lost_target"
 REASON_TIMEOUT = "timeout"
+REASON_RETRY_CUTOFF = "retry_cutoff"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -179,6 +182,8 @@ class PickRuntime:
     def _past_deadline(self, deadline) -> bool:
         if deadline is None:
             return False
+        if callable(deadline):
+            deadline = deadline()
         now = getattr(self.client, "now_s", None)
         if callable(now):
             return float(now()) >= float(deadline)
@@ -523,7 +528,7 @@ class PickRuntime:
             return None
         return nxt
 
-    def run(self, target, deadline=None, reveal=None) -> PickResult:
+    def run(self, target, deadline=None, reveal=None, retry_allowed=None) -> PickResult:
         """Pick ``target`` into the basket. ``ok`` only if the basket is occupied."""
         del reveal  # reserved for callers that close over reveal in reacquire_fn
         policy = self.policy
@@ -537,7 +542,23 @@ class PickRuntime:
         grasped_any = False
         attempts = 0
         for attempt in range(1, self.max_attempts + 1):
+            if attempt > 1 and callable(retry_allowed) and not retry_allowed():
+                return PickResult(
+                    ok=False,
+                    reason=REASON_RETRY_CUTOFF,
+                    attempts=attempts,
+                    grasped=grasped_any,
+                    basket_occupied=False,
+                    policy=policy,
+                )
             attempts = attempt
+            self._current_attempt = attempt
+            experiment = current_experiment()
+            if experiment is not None:
+                experiment.event(
+                    "stage2.manipulation.attempt.started", stage="stage2",
+                    status="started", attempt=attempt, policy=policy,
+                )
             if self._past_deadline(deadline):
                 return PickResult(
                     ok=False, reason=REASON_TIMEOUT, attempts=attempts,
@@ -556,6 +577,12 @@ class PickRuntime:
                 except Exception as exc:
                     self._emit("[pick] grasp raised: %s" % exc)
                 held = self.poll_grasping()
+                if experiment is not None:
+                    experiment.event(
+                        "stage2.manipulation.grasp_feedback", stage="stage2",
+                        status="ok" if held is True else "failed",
+                        attempt=attempt, is_grasping=held,
+                    )
                 if held is not True:
                     last_reason = REASON_NO_GRASP
                     self._emit("[pick] no positive is_grasping (got %s)" % held)
@@ -576,6 +603,12 @@ class PickRuntime:
             except Exception as exc:
                 self._emit("[pick] place raised: %s" % exc)
             basket = self.poll_basket()
+            if experiment is not None:
+                experiment.event(
+                    "stage2.manipulation.basket_feedback", stage="stage2",
+                    status="ok" if basket is True else "failed",
+                    attempt=attempt, basket_occupied=basket,
+                )
             if basket is True:
                 self._emit("[pick] basket occupied after attempt %d" % attempt)
                 return PickResult(

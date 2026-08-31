@@ -231,6 +231,7 @@ def test_candidate_selection_needs_depth_and_prefers_hint_distance():
 def test_no_depth_never_commands_linear_motion():
     acq = NearFieldAcquire.__new__(NearFieldAcquire)
     acq._phase, acq._phase_t0, acq._align_ok, acq._scan_sign = "align", 0.0, 1, 1.0
+    acq._phase_history = []
     linear, _ = acq._command(1.0, n_obj=1, err=0.0, fwd_obj=None)
     _check(linear == 0.0, "missing depth must never command positive linear motion")
 

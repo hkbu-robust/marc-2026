@@ -296,6 +296,53 @@ class NavigationRuntimeTests(unittest.TestCase):
         self.assertEqual("no_path", result.status.value)
         self.assertLessEqual(result.replan_count, 1)
 
+    def test_plan_to_measures_live_route_without_driving(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([2.0, 5.0, 0.0], occ=occ)
+        nav = Stage2Navigator(client, inflation_m=0.0)
+
+        route = nav.plan_to((8.0, 5.0))
+
+        self.assertTrue(route.available)
+        self.assertGreater(route.length_m, 5.0)
+        self.assertLess(route.length_m, 7.0)
+        self.assertEqual((8.0, 5.0), route.requested_goal_xy)
+        self.assertTrue(route.waypoints)
+        self.assertEqual([], client.cmds)
+        self.assertEqual(0.0, client.now_s())
+
+    def test_plan_to_reports_effective_snapped_goal(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        grid[10, 16] = 100
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        nav = Stage2Navigator(FakeClient([2.0, 5.0, 0.0], occ=occ), inflation_m=0.0)
+
+        route = nav.plan_to((8.0, 5.0))
+
+        self.assertTrue(route.available)
+        self.assertEqual((8.0, 5.0), route.requested_goal_xy)
+        self.assertNotEqual(route.requested_goal_xy, route.effective_goal_xy)
+
+    def test_observe_fn_can_stop_navigation_without_reporting_reached(self):
+        grid = np.zeros((20, 40), dtype=np.int8)
+        occ = _Occ(grid, 0.5, 0.0, 0.0)
+        client = FakeClient([2.0, 5.0, 0.0], occ=occ)
+        calls = []
+
+        def observe(_pose):
+            calls.append(True)
+            return "basket_drop_recovery"
+
+        result = Stage2Navigator(client, inflation_m=0.0).navigate_to(
+            (8.0, 5.0), 5.0, observe_fn=observe,
+        )
+
+        self.assertEqual(NavStatus.ABORTED, result.status)
+        self.assertEqual("basket_drop_recovery", result.reason)
+        self.assertEqual([True], calls)
+        self.assertEqual((0.0, 0.0), client.cmds[-1])
+
     def test_plan_attempts_prefer_clearance_then_fall_back(self):
         attempts = _plan_attempts(0.25)
         self.assertEqual([0.45] * 3 + [0.25] * 3, [infl for infl, _ in attempts])
