@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import logging
 import os
+import time
 from types import SimpleNamespace
 from typing import Callable, Optional
 
@@ -26,6 +27,7 @@ from marc_agent.graspgenx_policy import (
     points_from_target,
 )
 from marc_agent.pick_runtime import PickRuntime
+from marc_agent.experiment_log import current_experiment
 
 from .grasp_profiles import bbox_is_upright, resolve_grasp_profile
 from .openvla_pick import target_moved_with_gripper
@@ -622,14 +624,39 @@ def load_local_graspgenx(path: Optional[str] = None):
 
     def generate(points: np.ndarray):
         planner = (os.environ.get("MARC_GRASPGENX_PLANNER") or "graspmoe").strip()
-        grasps, conf, _tags, _obb = run_planner_on_object(
-            np.asarray(points, dtype=np.float32),
-            sampler,
-            planner=planner,
-            grasp_threshold=_env_float("MARC_GRASPGENX_THRESHOLD", -1.0),
-            num_grasps=max(16, int(_env_float("MARC_GRASPGENX_NUM_GRASPS", 64))),
-            topk_num_grasps=-1,
-        )
+        started = time.perf_counter()
+        try:
+            grasps, conf, _tags, _obb = run_planner_on_object(
+                np.asarray(points, dtype=np.float32),
+                sampler,
+                planner=planner,
+                grasp_threshold=_env_float("MARC_GRASPGENX_THRESHOLD", -1.0),
+                num_grasps=max(16, int(_env_float("MARC_GRASPGENX_NUM_GRASPS", 64))),
+                topk_num_grasps=-1,
+            )
+        except Exception as exc:
+            experiment = current_experiment()
+            if experiment is not None:
+                experiment.event(
+                    "stage2.graspgenx.generation.completed",
+                    stage="stage2",
+                    status="error",
+                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    planner=planner,
+                    point_count=len(points),
+                    error_type=type(exc).__name__,
+                )
+            raise
+        experiment = current_experiment()
+        if experiment is not None:
+            experiment.event(
+                "stage2.graspgenx.generation.completed",
+                stage="stage2",
+                duration_ms=(time.perf_counter() - started) * 1000.0,
+                planner=planner,
+                point_count=len(points),
+                grasp_count=len(grasps),
+            )
         return grasps, conf
 
     _generator = generate

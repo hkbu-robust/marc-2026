@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -454,6 +455,8 @@ class YoloDetector:
 
     def __init__(self, tracker):
         self._yolo = tracker
+        self._inference_calls = 0
+        self._inference_ms = 0.0
 
     def load(self) -> bool:
         return bool(self._yolo.load())
@@ -462,10 +465,27 @@ class YoloDetector:
         self._yolo.set_target(name)
 
     def detect_candidates(self, rgb: np.ndarray, target_type: str) -> dict:
-        return self._yolo.detect_candidates(rgb, target_type)
+        started = time.perf_counter()
+        try:
+            return self._yolo.detect_candidates(rgb, target_type)
+        finally:
+            self._inference_calls += 1
+            self._inference_ms += (time.perf_counter() - started) * 1000.0
 
     def detect(self, rgb: np.ndarray) -> Optional[dict]:
-        return self._yolo.detect(rgb)
+        started = time.perf_counter()
+        try:
+            return self._yolo.detect(rgb)
+        finally:
+            self._inference_calls += 1
+            self._inference_ms += (time.perf_counter() - started) * 1000.0
+
+    @property
+    def metrics(self) -> dict:
+        return {
+            "inference_calls": self._inference_calls,
+            "inference_ms": self._inference_ms,
+        }
 
     def unload(self) -> None:
         unload = getattr(self._yolo, "unload", None)

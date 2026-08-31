@@ -30,11 +30,12 @@ def round_dir(name: str) -> Path:
 
 
 def stage1_dir(round_num: int) -> Path:
-    return round_dir(f"stage1_{int(round_num):03d}")
+    return round_dir("stage1") / f"round-{int(round_num):03d}"
 
 
-def stage2_dir() -> Path:
-    return round_dir("stage2")
+def stage2_dir(concern: Optional[str] = None) -> Path:
+    root = round_dir("stage2")
+    return root / concern if concern else root
 
 
 def _write_text(path: Path, text: str) -> None:

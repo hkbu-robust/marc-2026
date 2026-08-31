@@ -31,6 +31,8 @@ simulation-platform/.env
 /checkpoints/
 /runs/
 /artifacts/
+/experiments/
+/.env
 /.cache/
 
 # luka: workstation specific & personal
