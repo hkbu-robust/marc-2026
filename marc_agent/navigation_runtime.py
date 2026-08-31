@@ -52,6 +52,10 @@ RAM_REPLAN_OFFSET_M = 0.45
 WIDE_PATH_EXTRA_M = 0.20
 
 
+def _deadline_value(deadline) -> float:
+    return float(deadline() if callable(deadline) else deadline)
+
+
 class NavStatus(str, Enum):
     REACHED = "reached"
     TIMEOUT = "timeout"
@@ -242,6 +246,22 @@ class NavigationResult:
         return self.status == NavStatus.REACHED
 
 
+@dataclass(frozen=True)
+class RoutePlan:
+    status: NavStatus
+    reason: str
+    start_xy: Optional[tuple]
+    requested_goal_xy: Optional[tuple]
+    effective_goal_xy: Optional[tuple]
+    waypoints: tuple = ()
+    length_m: Optional[float] = None
+    method: Optional[str] = None
+
+    @property
+    def available(self) -> bool:
+        return self.status == NavStatus.REACHED and self.length_m is not None
+
+
 class Stage2Navigator:
     """Drive to a (possibly live) goal on the runtime occupancy grid."""
 
@@ -273,13 +293,16 @@ class Stage2Navigator:
         client = self.client
         if client.get_lidar() is not None:
             return
-        until = min(client.now_s() + self.dt * max(0, int(ticks)), float(deadline_s) - self.dt)
+        until = min(
+            client.now_s() + self.dt * max(0, int(ticks)),
+            _deadline_value(deadline_s) - self.dt,
+        )
         while client.now_s() < until:
             client.sleep(self.dt)
             if client.get_lidar() is not None:
                 return
 
-    def _plan_path(self, planner, start_xy, goal_xy, allow_thin: bool = True):
+    def _plan_route(self, planner, start_xy, goal_xy, allow_thin: bool = True):
         """Plan with inflation then crop-margin fallbacks.
 
         Snap an occupied/unknown goal onto the nearest free inflated cell.
@@ -329,13 +352,63 @@ class Stage2Navigator:
                     margin,
                     planner.last_method or "dstar",
                 )
-            return path
-        return None
+            return path, plan_goal
+        return None, plan_goal
+
+    def _plan_path(self, planner, start_xy, goal_xy, allow_thin: bool = True):
+        path, _effective_goal = self._plan_route(
+            planner, start_xy, goal_xy, allow_thin=allow_thin,
+        )
+        return path
+
+    def plan_to(self, goal_xy) -> RoutePlan:
+        """Measure the current live route without commanding or sleeping."""
+        requested = resolve_xy(goal_xy)
+        pose = self.client.get_world_pose()
+        start = None if pose is None else (float(pose[0]), float(pose[1]))
+        if requested is None or start is None:
+            return RoutePlan(
+                NavStatus.ABORTED, "missing_pose_or_goal", start, requested, requested,
+            )
+        occ = self.client.get_occupancy_map()
+        if occ is None:
+            return RoutePlan(NavStatus.NO_MAP, ReplanReason.NO_MAP, start, requested, requested)
+        planner = OccupancyGridPlanner()
+        if not planner.update_from_msg(occ):
+            return RoutePlan(NavStatus.NO_MAP, ReplanReason.NO_MAP, start, requested, requested)
+        pose3 = (float(pose[0]), float(pose[1]), float(pose[2]))
+        cloud = self.client.get_lidar()
+        xyz = pointcloud2_xyz(cloud) if cloud is not None else None
+        now_s = self.client.now_s()
+        planner.stamp_overlay(overlay_discs(xyz, pose3), now_s=now_s)
+        planner.clear_start_hole(start, exclude_m=0.20)
+        path, effective = self._plan_route(planner, start, requested, allow_thin=True)
+        if not path:
+            return RoutePlan(
+                NavStatus.NO_PATH, ReplanReason.NO_PATH, start, requested, effective,
+                method=planner.last_method,
+            )
+        waypoints = tuple((float(x), float(y)) for x, y in path)
+        points = (start,) + waypoints
+        length_m = sum(
+            math.hypot(b[0] - a[0], b[1] - a[1])
+            for a, b in zip(points, points[1:])
+        )
+        return RoutePlan(
+            NavStatus.REACHED,
+            "planned",
+            start,
+            requested,
+            (float(effective[0]), float(effective[1])),
+            waypoints,
+            length_m,
+            planner.last_method,
+        )
 
     def navigate_to(self, goal_xy, deadline_s, *, leg: str = "search",
                     tol=DEFAULT_GOAL_TOLERANCE, extra_obstacles=None,
                     search_xy=None, search_radius=0.0,
-                    handoff_fn=None) -> NavigationResult:
+                    handoff_fn=None, observe_fn=None) -> NavigationResult:
         """Follow occupancy D* Lite until inside ``tol`` of ``goal_xy``.
 
         ``goal_xy`` and ``tol`` may be callables so a late Stage 2 reveal can retarget.
@@ -369,8 +442,9 @@ class Stage2Navigator:
         stop_latched = False
         last_cmd_linear = 0.0
         handoff_warned = False
+        observe_warned = False
 
-        while client.is_running and client.now_s() < deadline_s:
+        while client.is_running and client.now_s() < _deadline_value(deadline_s):
             pose = client.get_world_pose()
             if pose is None:
                 client.sleep(self.dt)
@@ -386,6 +460,26 @@ class Stage2Navigator:
                 client.sleep(self.dt)
                 continue
             dist = math.hypot(cur_goal[0] - x, cur_goal[1] - y)
+            if callable(observe_fn):
+                try:
+                    stop_reason = observe_fn((x, y, yaw))
+                except Exception:
+                    stop_reason = None
+                    if not observe_warned:
+                        log.warning("[Stage2] %s observe_fn failed", leg, exc_info=True)
+                        observe_warned = True
+                if stop_reason:
+                    client.send_cmd_vel(0.0, 0.0)
+                    return NavigationResult(
+                        NavStatus.ABORTED,
+                        reason=str(stop_reason),
+                        replan_count=n_replan,
+                        goal_xy=cur_goal,
+                        pose_xy=(x, y),
+                        leg=leg,
+                        path=self.last_path,
+                        last_method=self.last_method,
+                    )
             if dist < cur_tol:
                 client.send_cmd_vel(0.0, 0.0)
                 log.info("[STAGE2] %s reached at (%.2f, %.2f) d=%.2f tol=%.2f",
@@ -630,7 +724,7 @@ class Stage2Navigator:
         elif last_reason == ReplanReason.NO_PATH or (had_map and not had_path):
             status = NavStatus.NO_PATH
             reason = ReplanReason.NO_PATH
-        elif client.now_s() >= deadline_s:
+        elif client.now_s() >= _deadline_value(deadline_s):
             status = NavStatus.TIMEOUT
             reason = "timeout"
         client.send_cmd_vel(0.0, 0.0)

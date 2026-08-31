@@ -57,6 +57,7 @@ REASON_DROP = "drop"
 REASON_NO_BASKET = "no_basket"
 REASON_LOST_TARGET = "lost_target"
 REASON_TIMEOUT = "timeout"
+REASON_RETRY_CUTOFF = "retry_cutoff"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -179,6 +180,8 @@ class PickRuntime:
     def _past_deadline(self, deadline) -> bool:
         if deadline is None:
             return False
+        if callable(deadline):
+            deadline = deadline()
         now = getattr(self.client, "now_s", None)
         if callable(now):
             return float(now()) >= float(deadline)
@@ -523,7 +526,7 @@ class PickRuntime:
             return None
         return nxt
 
-    def run(self, target, deadline=None, reveal=None) -> PickResult:
+    def run(self, target, deadline=None, reveal=None, retry_allowed=None) -> PickResult:
         """Pick ``target`` into the basket. ``ok`` only if the basket is occupied."""
         del reveal  # reserved for callers that close over reveal in reacquire_fn
         policy = self.policy
@@ -537,6 +540,15 @@ class PickRuntime:
         grasped_any = False
         attempts = 0
         for attempt in range(1, self.max_attempts + 1):
+            if attempt > 1 and callable(retry_allowed) and not retry_allowed():
+                return PickResult(
+                    ok=False,
+                    reason=REASON_RETRY_CUTOFF,
+                    attempts=attempts,
+                    grasped=grasped_any,
+                    basket_occupied=False,
+                    policy=policy,
+                )
             attempts = attempt
             if self._past_deadline(deadline):
                 return PickResult(
