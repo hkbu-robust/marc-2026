@@ -16,6 +16,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("marc_agent.cctv_round")
 
+# ROS graph discovery exposed the final camera topics about three seconds after
+# the first usable subset during restart testing.  A stable subset is not a
+# complete set, so leave enough time for late publishers without assuming a
+# fixed organizer camera count.
+DEFAULT_DISCOVERY_SETTLE_S = 3.5
+
 
 def _timeout_s(discovery_timeout_s: Optional[float]) -> float:
     if discovery_timeout_s is not None:
@@ -77,7 +83,7 @@ def fetch_cctv_round(
     client: "MARCClient",
     *,
     discovery_timeout_s: float | None = None,
-    discovery_settle_s: float = 0.25,
+    discovery_settle_s: float = DEFAULT_DISCOVERY_SETTLE_S,
     poll_interval_s: float = 0.05,
 ) -> tuple[dict[str, CctvFrame], list[str]]:
     """Discover cameras and decode each frame at most once for this round.

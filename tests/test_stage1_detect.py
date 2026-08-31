@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from marc_agent.perception.cctv_round import (
+    DEFAULT_DISCOVERY_SETTLE_S,
     discovery_timeout_from_limit,
     fetch_cctv_round,
 )
@@ -39,6 +40,9 @@ class _FakeClient:
 
 
 class FetchCctvRoundTests(unittest.TestCase):
+    def test_default_settle_covers_late_ros_graph_publishers(self):
+        self.assertGreater(DEFAULT_DISCOVERY_SETTLE_S, 3.0)
+
     def test_discovery_wait_reserves_selection_time(self):
         self.assertEqual(15.0, discovery_timeout_from_limit(30.0))
         self.assertEqual(10.0, discovery_timeout_from_limit(25.0))
@@ -46,7 +50,7 @@ class FetchCctvRoundTests(unittest.TestCase):
 
     def test_fetches_each_camera_once(self):
         client = _FakeClient()
-        frames, camera_ids = fetch_cctv_round(client)
+        frames, camera_ids = fetch_cctv_round(client, discovery_settle_s=0.0)
         self.assertEqual(["rig_1_a", "rig_2_c"], camera_ids)
         self.assertEqual(set(camera_ids), set(frames))
         self.assertEqual((480, 640, 3), frames["rig_2_c"].rgb.shape)
