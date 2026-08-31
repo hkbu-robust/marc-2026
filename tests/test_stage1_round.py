@@ -10,8 +10,14 @@ from marc_agent.perception.cctv_project import (
     CctvProjector,
     static_lookup,
 )
-from marc_agent.perception.stage1_pipeline import run_stage1_round, IGNORED_CLASS_DUMMY_XYZ
-from marc_agent.command_parser import Intent, Relation
+from marc_agent.perception.stage1_pipeline import (
+    IGNORED_CLASS_DUMMY_XYZ,
+    _project_selection,
+    run_stage1_round,
+    static_scene_key,
+)
+from marc_agent.perception.object_selection import ObjectSelection
+from marc_agent.command_parser import Intent, Relation, parse_command
 from marc_agent.types import (
     CctvDetectionRound,
     ObjectCandidate,
@@ -24,6 +30,43 @@ IDENTITY = (
     (0.0, 1.0, 0.0),
     (0.0, 0.0, 1.0),
 )
+
+
+def test_paraphrased_static_scene_requests_share_a_key():
+    first = parse_command("Find the umbrella next to the trash can.")
+    second = parse_command(
+        "I left my umbrella leaning against the trash can.",
+        expected_intent=Intent.FIND,
+    )
+    assert static_scene_key(first) == static_scene_key(second)
+
+
+def test_low_confidence_umbrella_at_trash_uses_occluder_geometry():
+    target = ObjectCandidate(
+        "rig_a:umbrella:0", "umbrella", (10, 10, 20, 20), 0.019,
+        "rig_a", (1280, 720),
+    )
+    anchor = ObjectCandidate(
+        "rig_a:trash_can:0", "trash_can", (100, 100, 200, 300), 0.9,
+        "rig_a", (1280, 720),
+    )
+
+    class Projector:
+        def __init__(self):
+            self.boxes = []
+
+        def project_contact(self, _camera_id, box, **_kwargs):
+            self.boxes.append(box)
+            return (0.0, 0.0, 0.0)
+
+    projector = Projector()
+    _project_selection(
+        projector,
+        parse_command("Find the umbrella next to the trash can."),
+        ObjectSelection(target, anchor, 1.0),
+        [target, anchor],
+    )
+    assert projector.boxes[0] == anchor.bbox_xyxy
 
 
 def _geometry(camera_id: str = "rig_a") -> CctvProjector:
@@ -730,6 +773,111 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertIsNone(result.grounding.relation)
         self.assertEqual("vending_machine", result.grounding.landmark)
         self.assertEqual("rig_a:person_sitting:0", result.target_id)
+
+    def test_clipped_low_confidence_target_projects_nearby_visible_proxy(self):
+        table_box = (200.0, 220.0, 500.0, 420.0)
+        proxy_box = (380.0, 150.0, 440.0, 260.0)
+
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:pencilcase:0", "pencilcase",
+                        (635.0, 300.0, 640.0, 340.0), 0.006,
+                        "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:picnic_table:0", "picnic_table", table_box,
+                        0.9, "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:trash_can:0", "trash_can", proxy_box,
+                        0.9, "rig_a", (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        projector = _geometry()
+        result = run_stage1_round(
+            object(),
+            "Find the pencil case near the picnic table.",
+            detector=detector,
+            projector=projector,
+        )
+
+        expected = projector.project_contact(
+            "rig_a", (proxy_box[0], proxy_box[1], proxy_box[0], proxy_box[3])
+        )
+        self.assertEqual(list(expected), result.grounding.target_coord)
+
+    def test_tiny_target_inside_other_object_projects_occluder(self):
+        scooter_box = (200.0, 120.0, 320.0, 260.0)
+
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:umbrella:0", "umbrella",
+                        (215.0, 240.0, 226.0, 264.0), 0.9,
+                        "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:taxi:0", "taxi", (300.0, 280.0, 600.0, 470.0),
+                        0.9, "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:kick_scooter:0", "kick_scooter", scooter_box,
+                        0.9, "rig_a", (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        projector = _geometry()
+        result = run_stage1_round(
+            object(),
+            "Find the umbrella near the taxi.",
+            detector=detector,
+            projector=projector,
+        )
+
+        expected = projector.project_contact("rig_a", scooter_box)
+        self.assertEqual(list(expected), result.grounding.target_coord)
+
+    def test_tiny_tumbler_keeps_its_own_detection(self):
+        tiny_box = (215.0, 240.0, 226.0, 264.0)
+        scooter_box = (200.0, 120.0, 320.0, 260.0)
+
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:tumbler:0", "tumbler", tiny_box, 0.9,
+                        "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:hydrant:0", "hydrant", (100, 200, 180, 400),
+                        0.9, "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:kick_scooter:0", "kick_scooter", scooter_box,
+                        0.9, "rig_a", (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        projector = _geometry()
+        result = run_stage1_round(
+            object(),
+            "Find the tumbler near the fire hydrant in the parking lot.",
+            detector=detector,
+            projector=projector,
+        )
+
+        expected = projector.project_contact("rig_a", tiny_box)
+        self.assertEqual(list(expected), result.grounding.target_coord)
 
 
 if __name__ == "__main__":

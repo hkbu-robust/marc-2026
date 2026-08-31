@@ -21,6 +21,7 @@ import logging
 import math
 import os
 import threading
+from dataclasses import replace
 
 from marc_sdk import MARCClient
 
@@ -47,6 +48,7 @@ from marc_agent.perception.stage1_pipeline import (
     get_default_verifier,
     log_qwen_startup_status,
     run_stage1_round,
+    static_scene_key,
 )
 from marc_agent.pick_runtime import PickRuntime, pick_policy_name
 from marc_agent.retrieval_state import (
@@ -67,6 +69,7 @@ from nearfield import (
 )
 from manip_dataset.base_hold import StationaryBase
 from manip_dataset.graspgenx_pick import StagedGraspGenXPickRuntime
+from manip_dataset.pick_target import stable_pick_target
 
 log = logging.getLogger("participant_app")
 
@@ -105,6 +108,7 @@ class DemoParticipant:
         self._reveal = None
         self._last_detections = None
         self._last_stage1_candidates = None
+        self._stage1_grounding_cache = {}
         self._stage1_lock = threading.Lock()
         self._stage1_projector = None
         self._nearfield_detector = None
@@ -159,6 +163,19 @@ class DemoParticipant:
             clock=self._round_clock,
             verifier=self._qwen_verifier,
         )
+        key = static_scene_key(round_result.candidates.parsed)
+        cached = self._stage1_grounding_cache.get(key)
+        if cached is not None:
+            round_result = replace(
+                round_result,
+                grounding=cached.grounding,
+                method="static_scene_cache",
+                target_id=cached.target_id,
+                anchor_id=cached.anchor_id,
+            )
+            log.info("[Stage1] reused static-scene grounding key=%s", key)
+        elif key is not None and round_result.grounding is not None:
+            self._stage1_grounding_cache[key] = round_result
         self._last_stage1_candidates = round_result.candidates
         self._last_detections = round_result.candidates.detections
         dump_path = dump_stage_round(stage1_dir(mission.round), round_result)
@@ -418,12 +435,24 @@ class DemoParticipant:
         else:
             log.info("[Stage2] starting near-field YOLO (%s)", handoff)
             reveal = self._reveal if self._reveal is not None else c.stage2_reveal
-            target = NearFieldAcquire(
+            nearfield = NearFieldAcquire(
                 c, detector, dump_dir=dump, people_xy=self._state.people_xy,
-            ).acquire(reveal, deadline)
+            )
+            target = nearfield.acquire(reveal, deadline)
             for _ in range(5):
                 c.send_cmd_vel(0.0, 0.0)
                 c.sleep(0.1)
+            if target.valid:
+                stable = stable_pick_target(
+                    nearfield,
+                    target.name or self._state.target_type or "",
+                    log=log.info,
+                )
+                if stable is None:
+                    target.valid = False
+                    target.reason = "unstable_localization"
+                else:
+                    target = stable
             if not target.valid:
                 log.warning("[Stage2] near-field acquire failed (%s) -- skip pick (fail closed)",
                             target.reason)
@@ -442,26 +471,37 @@ class DemoParticipant:
                 else:
                     pick_rt = PickRuntime(c, log, policy=policy)
 
-                def _observe_after_lift():
+                def _observe_target():
                     before_reacquire(pick_rt, detector)
-                    observer = NearFieldAcquire(
-                        c, detector, dump_dir=dump, people_xy=self._state.people_xy,
+                    return stable_pick_target(
+                        nearfield,
+                        target.name or self._state.target_type or "",
+                        log=log.info,
                     )
-                    return observer.snapshot(target.name or self._state.target_type or "")
 
                 if isinstance(pick_rt, StagedGraspGenXPickRuntime):
-                    pick_rt._target_observer = _observe_after_lift
+                    pick_rt._target_observer = _observe_target
+
+                    def _observe_visual_target():
+                        before_reacquire(pick_rt, detector)
+                        return stable_pick_target(
+                            nearfield,
+                            target.name or self._state.target_type or "",
+                            log=log.info,
+                            visual=True,
+                            require_reach=False,
+                        )
+
+                    pick_rt._visual_target_observer = _observe_visual_target
 
                 def _reacquire():
                     before_reacquire(pick_rt, detector)
-                    nxt = NearFieldAcquire(
-                        c, detector, dump_dir=dump, people_xy=self._state.people_xy,
-                    ).acquire(
-                        reveal, deadline)
-                    for _ in range(3):
-                        c.send_cmd_vel(0.0, 0.0)
-                        c.sleep(0.05)
-                    if nxt is not None and getattr(nxt, "valid", False):
+                    nxt = stable_pick_target(
+                        nearfield,
+                        target.name or self._state.target_type or "",
+                        log=log.info,
+                    )
+                    if nxt is not None:
                         before_graspgenx(detector)
                     return nxt
 

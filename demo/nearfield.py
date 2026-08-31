@@ -65,8 +65,9 @@ RADIUS_SLACK_M = 0.20
 FWD_MIN_M = 0.15
 FWD_MAX_M = 1.00
 LAT_MAX_M = 0.45
-# Calibrated chassis depth on the multiplexed base topic (not a 480 gripper-like frame).
+# Calibrated chassis depth on the multiplexed base topic.
 CHASSIS_DEPTH_HW = (360, 640)
+MULTIPLEXED_CLOSEUP_DEPTH_HW = (480, 640)
 MIN_CONF = 0.12
 STALE_STOP_S = 0.8
 PEEK_RANGE_PAD_M = 4.0
@@ -297,8 +298,8 @@ def car_to_world_xy(pose, fwd, lat):
 def choose_lock_depth(depth_shapes, lock_rgb=None):
     """Pick the chassis depth shape, not a taller multiplexed close-up.
 
-    Prefer the calibrated 360×640 base depth when it appeared in the lock
-    window. Otherwise match the locked RGB, then same height, then tallest.
+    Prefer the calibrated 360×640 base depth and reject the known 480×640
+    gripper-like stream. Preserve matched resolutions on other camera setups.
     """
     shapes = []
     for raw in depth_shapes or ():
@@ -310,14 +311,12 @@ def choose_lock_depth(depth_shapes, lock_rgb=None):
     unique = list(dict.fromkeys(shapes))
     if CHASSIS_DEPTH_HW in unique:
         return CHASSIS_DEPTH_HW
+    usable = [shape for shape in unique if shape != MULTIPLEXED_CLOSEUP_DEPTH_HW]
     if lock_rgb is not None and len(lock_rgb) >= 2:
         rgb = (int(lock_rgb[0]), int(lock_rgb[1]))
-        if rgb in unique:
+        if rgb in usable:
             return rgb
-        same_h = [s for s in unique if s[0] == rgb[0]]
-        if same_h:
-            return max(same_h, key=lambda s: (s[1], s[0]))
-    return max(unique, key=lambda s: (s[0], s[1]))
+    return max(usable, key=lambda shape: (shape[0], shape[1]), default=None)
 
 
 def k_from_info(info, rgb_shape):
@@ -617,6 +616,7 @@ class NearFieldAcquire:
         self._dumped_phases: set[str] = set()
         self._lock_rgb = None
         self._lock_depth = None
+        self._lock_frame = None
         self._phase = "scan"
         self._phase_t0 = 0.0
         self._align_ok = 0
@@ -852,8 +852,9 @@ class NearFieldAcquire:
             pass
 
     def _lock_streams(self) -> bool:
-        """Lock the taller chassis RGB (480x640) and a matching depth."""
+        """Lock chassis depth and RGB from the same optical-frame publisher."""
         c = self.client
+        self._lock_frame = None
         try:
             c.send_cmd_vel(0.0, 0.0)
         except Exception:
@@ -877,13 +878,33 @@ class NearFieldAcquire:
             c.sleep(0.05)
         if not rgb_shapes:
             return False
-        # Prefer the taller frame (chassis 480x640 over 360x640 close-up).
+        # Shape is only a fallback until the selected depth identifies its frame.
         self._lock_rgb = max(rgb_shapes, key=lambda s: (int(s[0]), int(s[1])))
         self._lock_depth = choose_lock_depth(depth_shapes, self._lock_rgb)
+        if depth_shapes and self._lock_depth is None:
+            log.warning(
+                "[nearfield] calibrated chassis depth unavailable candidates=%s",
+                sorted(set(depth_shapes)),
+            )
+            return False
+        depth_by_shape = getattr(c, "get_robot_depth_hw", None)
+        if depth_by_shape is not None and self._lock_depth is not None:
+            selected_depth = depth_by_shape(DEPTH_WHICH, self._lock_depth)
+            self._lock_frame = str(
+                getattr(getattr(selected_depth, "header", None), "frame_id", "") or ""
+            ) or None
+        rgb_by_frame = getattr(c, "get_robot_image_frame", None)
+        if rgb_by_frame is not None and self._lock_frame is not None:
+            selected_rgb = _image_to_rgb(rgb_by_frame(CAMERA, self._lock_frame))
+            if selected_rgb is None:
+                log.warning("[nearfield] no RGB matching depth frame=%s", self._lock_frame)
+                return False
+            self._lock_rgb = tuple(selected_rgb.shape[:2])
         log.info(
-            "[nearfield] locked rgb=%s depth=%s candidates=%s",
+            "[nearfield] locked rgb=%s depth=%s frame=%s candidates=%s",
             self._lock_rgb,
             self._lock_depth,
+            self._lock_frame,
             sorted(set(depth_shapes)),
         )
         return True
@@ -891,8 +912,11 @@ class NearFieldAcquire:
     def _read_locked(self):
         c = self.client
         rgb_msg = None
+        frame_getter = getattr(c, "get_robot_image_frame", None)
+        if frame_getter is not None and self._lock_frame is not None:
+            rgb_msg = frame_getter(CAMERA, self._lock_frame)
         hw = getattr(c, "get_robot_image_hw", None)
-        if hw is not None and self._lock_rgb is not None:
+        if rgb_msg is None and hw is not None and self._lock_rgb is not None:
             rgb_msg = hw(CAMERA, self._lock_rgb)
         if rgb_msg is None:
             rgb_msg = c.get_robot_image(CAMERA)

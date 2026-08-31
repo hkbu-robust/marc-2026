@@ -1032,6 +1032,35 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertIsNotNone(ranked[0].anchor)
         self.assertIn(ranked[0].anchor.class_name, {"police_car", "normal_car_1"})
 
+    def test_parking_keeps_target_rank_but_uses_preferred_police_anchor(self):
+        text = "Find the tumbler dropped in the empty parking space."
+        parsed = parse_command(text)
+        target = (300.0, 200.0, 320.0, 240.0)
+        police = (10.0, 100.0, 200.0, 300.0)
+        suv = (330.0, 100.0, 600.0, 300.0)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam:tumbler:0", "tumbler", target, "cam"),
+                _object("cam:police_car:0", "police_car", police, "cam"),
+                _object("cam:suv:0", "suv", suv, "cam"),
+            ],
+            camera_ids=["cam"],
+        )
+
+        class Projector:
+            def project_contact(self, _camera_id, box, **_kwargs):
+                return {
+                    target: (0.0, 0.0, 0.0),
+                    police: (10.0, 0.0, 0.0),
+                    suv: (1.0, 0.0, 0.0),
+                }[tuple(box)]
+
+        ranked = rank_object_candidates(
+            parsed, round_, command_text=text, projector=Projector()
+        )
+        self.assertEqual("cam:tumbler:0", ranked[0].target.candidate_id)
+        self.assertEqual("cam:police_car:0", ranked[0].anchor.candidate_id)
+
     def test_same_camera_floor_drop_prefers_lower_box(self):
         text = (
             "Pick up the tumbler dropped on the parking lot floor "
@@ -1421,7 +1450,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual(2, len(calls[0].ranked))
 
-    def test_remote_scene_request_keeps_all_classes_for_final_choice(self):
+    def test_remote_empty_parking_request_keeps_geometry_choice(self):
         text = "Find the umbrella dropped in the empty parking space."
         parsed = parse_command(text)
         round_ = CctvDetectionRound(
@@ -1454,9 +1483,102 @@ class ObjectSelectionTests(unittest.TestCase):
         selected = select_object_candidate(
             parsed, round_, command_text=text, verifier=Verifier()
         )
-        self.assertEqual("cam_b:tumbler:0", selected.target.candidate_id)
+        self.assertEqual("cam_b:umbrella:0", selected.target.candidate_id)
+        self.assertEqual([], calls)
+        self.assertEqual("object_relation", selected.method)
+
+    def test_remote_parking_lot_request_keeps_visual_choice(self):
+        text = "Find the tumbler I dropped as I got out of my car in the parking lot."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam:tumbler:0", "tumbler", (20, 100, 60, 160), "cam"),
+                _object("cam:tumbler:1", "tumbler", (150, 100, 190, 160), "cam"),
+                _object("cam:police_car:0", "police_car", (10, 50, 200, 200), "cam"),
+            ],
+            camera_ids=["cam"],
+        )
+        calls = []
+
+        class Verifier:
+            method = "qwen_remote"
+
+            def __call__(self, board):
+                calls.append(board)
+                if "TARGET_ID|ANCHOR_ID" in board.prompt:
+                    return "cam:tumbler:1|cam:police_car:0"
+                return "cam:tumbler:1"
+
+        selected = select_object_candidate(
+            parsed, round_, command_text=text, verifier=Verifier()
+        )
+        self.assertEqual("cam:tumbler:1", selected.target.candidate_id)
         self.assertEqual(1, len(calls))
-        self.assertEqual(3, len(calls[0].ranked))
+
+    def test_remote_on_request_keeps_strict_support_over_copresence(self):
+        text = "Find the tumbler on the bench."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam_a:tumbler:0", "tumbler", (80, 80, 120, 100), "cam_a", 0.4),
+                _object("cam_a:bench:0", "bench", (40, 100, 200, 220), "cam_a"),
+                _object("cam_b:tumbler:0", "tumbler", (20, 300, 60, 340), "cam_b", 0.9),
+                _object("cam_b:bench:0", "bench", (300, 100, 500, 220), "cam_b"),
+            ],
+            camera_ids=["cam_a", "cam_b"],
+        )
+
+        class Verifier:
+            method = "qwen_remote"
+
+            def __call__(self, _board):
+                return "cam_b:tumbler:0"
+
+        selected = select_object_candidate(
+            parsed, round_, command_text=text, verifier=Verifier()
+        )
+        self.assertEqual("cam_a:tumbler:0", selected.target.candidate_id)
+        self.assertEqual("strict", selected.match)
+
+    def test_reserved_occlusion_proxy_beats_false_visible_target(self):
+        text = "Find the umbrella near the trash can."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam_bad:umbrella:0", "umbrella", (210, 180, 240, 240), "cam_bad", 0.9),
+                _object("cam_bad:trash_can:0", "trash_can", (200, 200, 300, 400), "cam_bad"),
+                _object("cam_good:umbrella:0", "umbrella", (400, 200, 500, 400), "cam_good", 0.0025),
+                _object("cam_good:trash_can:0", "trash_can", (400, 200, 500, 400), "cam_good"),
+            ],
+            camera_ids=["cam_bad", "cam_good"],
+        )
+        selected = select_object_candidate(
+            parsed,
+            round_,
+            command_text=text,
+            verifier=lambda _board: "cam_bad:umbrella:0|cam_bad:trash_can:0",
+        )
+        self.assertEqual("cam_good:umbrella:0", selected.target.candidate_id)
+
+    def test_tiny_umbrella_contained_by_trash_beats_visible_false_positive(self):
+        text = "Find the umbrella near the trash can."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam_bad:umbrella:0", "umbrella", (10, 10, 50, 60), "cam_bad", 0.9),
+                _object("cam_bad:trash_can:0", "trash_can", (200, 100, 300, 350), "cam_bad"),
+                _object("cam_good:umbrella:0", "umbrella", (420, 150, 435, 160), "cam_good", 0.031),
+                _object("cam_good:trash_can:0", "trash_can", (400, 100, 500, 350), "cam_good"),
+            ],
+            camera_ids=["cam_bad", "cam_good"],
+        )
+        selected = select_object_candidate(
+            parsed,
+            round_,
+            command_text=text,
+            verifier=lambda _board: "cam_bad:umbrella:0|cam_bad:trash_can:0",
+        )
+        self.assertEqual("cam_good:umbrella:0", selected.target.candidate_id)
 
     def test_remote_verifier_can_choose_alternate_implicit_anchor(self):
         text = "Pick up the tumbler dropped on the parking lot floor."

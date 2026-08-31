@@ -86,7 +86,7 @@ class ManipPickAppTests(unittest.TestCase):
         )
         app.phase = Phase.MANUAL_BASE
         app.handle_key("G")
-        self.assertEqual(1, app.nearfield.calls)
+        self.assertEqual(2, app.nearfield.calls)
         self.assertEqual([target], seen)
         self.assertEqual(target, runtime._reacquire_fn())
 
@@ -103,6 +103,42 @@ class ManipPickAppTests(unittest.TestCase):
         )
         app.handle_key("G")
         self.assertEqual([], seen)
+
+    def test_g_retries_until_localization_is_safe(self):
+        low = SimpleNamespace(
+            valid=True, fwd=0.36, lat=0.11, z=-0.44, conf=0.21,
+            name="tumbler", reason="ok",
+        )
+        high = SimpleNamespace(
+            valid=True, fwd=0.44, lat=0.01, z=-0.42, conf=0.70,
+            name="tumbler", reason="ok",
+        )
+        high2 = SimpleNamespace(
+            valid=True, fwd=0.45, lat=0.01, z=-0.41, conf=0.69,
+            name="tumbler", reason="ok",
+        )
+        far = SimpleNamespace(
+            valid=True, fwd=0.66, lat=0.01, z=-0.42, conf=0.97,
+            name="tumbler", reason="ok",
+        )
+        nearfield = _Nearfield(low)
+        samples = iter((low, far, high, high2))
+        nearfield.snapshot = lambda _name: next(samples, far)
+        seen = []
+        runtime = SimpleNamespace(
+            run=lambda target: seen.append(target) or PickResult(ok=True),
+            _reacquire_fn=None,
+        )
+        app = PickTestApp(
+            SimpleNamespace(send_cmd_vel=lambda **_k: None), "u1",
+            arm=SimpleNamespace(), approach=_Approach(), nearfield=nearfield,
+            pick_runtime=runtime,
+        )
+
+        app.handle_key("G")
+
+        self.assertEqual([high2], seen)
+        self.assertIsNone(runtime._reacquire_fn())
 
     def test_snapshot_fail_prints_xyz(self):
         target = SimpleNamespace(

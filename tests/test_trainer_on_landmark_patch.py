@@ -62,6 +62,8 @@ class OnLandmarkPatchTests(unittest.TestCase):
         self.assertIn("_marc_beside_face_yaw", patch.BESIDE_HELPER)
         self.assertIn("_marc_yaw_keep_root", patch.BESIDE_HELPER)
         self.assertIn("_marc_recipe_seat_yaw", patch.SEAT_HELPER)
+        self.assertIn("_marc_recipe_visual_center", patch.SEAT_HELPER)
+        self.assertIn("_seat_ok", patch.NEW_SAVE)
         self.assertIn("_marc_yaw_keep_root", patch.SEAT_HELPER)
         self.assertIn("def _long_axis_yaw", patch.SEAT_HELPER)
         self.assertIn("_marc_above_trash_sit_yaw", patch.ABOVE_HELPER)

@@ -254,7 +254,7 @@ class AboveModePatchTests(unittest.TestCase):
         old = dict(os.environ)
         try:
             os.environ["TRAINER_SAR_RECIPES"] = "1"
-            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "10"
             os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
             os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
             os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
@@ -689,7 +689,7 @@ class AboveModePatchTests(unittest.TestCase):
         dump_path = "/tmp/marc_sar_recipe.json"
         try:
             os.environ["TRAINER_SAR_RECIPES"] = "1"
-            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "0"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "10"
             os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
             os.environ["TRAINER_PEOPLE_ON_LANDMARK_PROB"] = "0"
             os.environ["TRAINER_FORCE_CLIMB_LANDMARK_PROB"] = "0"
@@ -698,7 +698,7 @@ class AboveModePatchTests(unittest.TestCase):
             )
             with open(dump_path, encoding="utf-8") as f:
                 dumped = json.load(f)
-            self.assertEqual(dumped.get("recipe_id"), "sar01_trash_sit")
+            self.assertEqual(dumped.get("recipe_id"), "sarH3_climbed_machine")
             self.assertTrue(dumped.get("above"))
         finally:
             os.environ.clear()
@@ -809,6 +809,40 @@ class AboveModePatchTests(unittest.TestCase):
                 (targets[0].get("placement") or {}).get("recipe_id"),
                 "sarH6_most_critical",
             )
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_recipe_ids_filter_cycle(self):
+        patch = _load_patch()
+        source = (
+            "def build(landmarks, all_chars, all_poses):\n"
+            "    catalog = {'persons': [], 'poses': []}\n"
+            "    selected_keys = set()\n"
+            "    people_state = {'enabled': True}\n"
+            "    objects = []\n"
+            "    char_by_key = {}\n"
+            "    pose_by_key = {}\n"
+            + patch.NEW_COMBOS
+            + "    return landmarks, objects\n"
+        )
+        namespace = {"os": os, "random": random}
+        exec(compile(source, "<sar-filter>", "exec"), namespace)
+        old = dict(os.environ)
+        try:
+            os.environ["TRAINER_SAR_RECIPES"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_CURSOR"] = "1"
+            os.environ["TRAINER_SAR_RECIPE_IDS"] = (
+                "sar01_trash_sit,sarH4_parking_trashsit")
+            os.environ["TRAINER_PEOPLE_ABOVE"] = "0"
+            _, specs = namespace["build"](
+                [{"name": "bench_0"}], ["male_student_01"],
+                ["person_sitting", "person_walking"],
+            )
+            target = next(
+                o for o in specs if (o.get("placement") or {}).get("recipe_id"))
+            self.assertEqual(
+                target["placement"]["recipe_id"], "sarH4_parking_trashsit")
         finally:
             os.environ.clear()
             os.environ.update(old)

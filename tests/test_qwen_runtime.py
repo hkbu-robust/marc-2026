@@ -56,11 +56,11 @@ class QwenRuntimeTests(unittest.TestCase):
     def test_remote_config_defaults_local_streams_remote_and_requires_key(self):
         common = {"MARC_QWEN_API_KEY": "secret"}
         self.assertEqual(
-            "http://127.0.0.1:8000/v1",
+            "http://127.0.0.1:8004/v1",
             QwenRemoteConfig.load(environ=common).base_url,
         )
         self.assertEqual(
-            "http://10.0.0.200:8000/v1",
+            "http://10.0.0.200:8004/v1",
             QwenRemoteConfig.load(environ={**common, "STREAM": "true"}).base_url,
         )
         with self.assertRaisesRegex(QwenConfigurationError, "API_KEY"):

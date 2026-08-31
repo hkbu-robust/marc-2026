@@ -37,6 +37,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from marc_agent.command_parser import (  # noqa: E402
+    CommandParseError,
     LANDMARK_TYPES,
     MISSION_OBJECT_TYPES,
     parse_command,
@@ -48,8 +49,10 @@ from marc_agent.perception.object_selection import (  # noqa: E402
 from marc_agent.perception.candidate_ids import person_candidate_id  # noqa: E402
 from marc_agent.perception.pose_to_situation import situation_for_pose  # noqa: E402
 from marc_agent.perception.sar_selection import (  # noqa: E402
-    build_candidate_board,
+    _assemble_board,
+    candidate_evidence,
     format_sar_verifier_prompt,
+    shortlist_for_verifier,
 )
 from marc_agent.perception.situation_rules import (  # noqa: E402
     RULES_VERSION,
@@ -100,10 +103,10 @@ DISPLAY = {
     "trash_can": "trash can",
     "kick_scooter": "kick scooter",
     "police_car": "police car",
-    "normal_car_1": "car",
-    "normal_car_2": "car",
+    "normal_car_1": "normal car one",
+    "normal_car_2": "normal car two",
     "sports_car": "sports car",
-    "sports_car_2": "sports car",
+    "sports_car_2": "sports car two",
 }
 
 TEMPLATES = {
@@ -621,6 +624,11 @@ def _world_or_pixel_relation(obj: dict, lm: dict, pixel_rel: str,
         return "on"
     specific = _camera_relative_rel(obj, lm, payload)
     if specific and pixel_rel == "beside":
+        p = _xyz(obj)
+        l = _xyz(lm)
+        if p is not None and l is not None and math.hypot(
+                p[0] - l[0], p[1] - l[1]) <= 0.75:
+            return "beside"
         return specific
     return pixel_rel
 
@@ -886,7 +894,7 @@ def _pairs_for_payload(payload: dict, rng: random.Random, max_per_image: int):
         hard = counts.get(obj["class"], 1) > 1
         scored.append((hard, rng.random(), obj, best, rel))
 
-    scored.sort(key=lambda t: (not t[0], t[1]))  # hard (same-class) first
+    scored.sort(key=lambda t: (t[4] != "beside", not t[0], t[1]))
     picked = scored[: max(1, max_per_image)]
     rows = []
     for hard, _, obj, lm, rel in picked:
@@ -900,8 +908,7 @@ def _payload_landmarks(dets, objects):
     object_classes = {o.get("class") for o in objects}
     landmarks = [
         d for d in dets
-        if (d.get("kind") == "landmark" or str(d.get("class") or "") in DISPLAY)
-        and d.get("class")
+        if str(d.get("class") or "") in LANDMARK_TYPES
         and not _is_long_umbrella(str(d.get("class") or ""))
         and not _is_person(str(d.get("class") or ""))
         and _bbox_center(d.get("bbox"))
@@ -910,7 +917,9 @@ def _payload_landmarks(dets, objects):
     if not landmarks:
         landmarks = [
             d for d in dets
-            if d not in objects and d.get("class") and _bbox_center(d.get("bbox"))
+            if d not in objects
+            and str(d.get("class") or "") in LANDMARK_TYPES
+            and _bbox_center(d.get("bbox"))
             and not _is_person(str(d.get("class") or ""))
             and not _is_long_umbrella(str(d.get("class") or ""))
         ]
@@ -1145,22 +1154,74 @@ def _runtime_round(png_path: str, payload: dict, camera_id: str):
     return round_, object_by_det, person_by_det
 
 
+def _runtime_scene_round(cameras):
+    """Combine camera GT into the all-camera board used in production."""
+    objects = []
+    people = []
+    frames = {}
+    object_by_det = {}
+    person_by_det = {}
+    for png_path, payload, camera_id in cameras:
+        round_, camera_objects, camera_people = _runtime_round(
+            png_path, payload, camera_id
+        )
+        objects.extend(round_.objects)
+        people.extend(round_.people)
+        frames.update(round_.frames)
+        object_by_det.update(camera_objects)
+        person_by_det.update(camera_people)
+    return (
+        CctvDetectionRound(
+            objects=objects,
+            people=people,
+            frames=frames,
+            camera_ids=sorted(frames),
+        ),
+        object_by_det,
+        person_by_det,
+    )
+
+
+def _answer_at(items, answer_id: str, slot: int, get_id):
+    """Move the labelled answer without changing the candidate set."""
+    ordered = list(items)
+    index = next((i for i, item in enumerate(ordered) if get_id(item) == answer_id), None)
+    if index is None:
+        return tuple(ordered)
+    answer = ordered.pop(index)
+    ordered.insert(slot % (len(ordered) + 1), answer)
+    return tuple(ordered)
+
+
 def _runtime_sample(
         png_path: str, payload: dict, camera_id: str, instruction: str,
         target: dict, fmt: str, out_dir: str, asset_key: str,
-        *, situation: Optional[str] = None) -> Optional[dict]:
+        *, situation: Optional[str] = None, answer_slot: Optional[int] = None,
+        runtime=None) -> Optional[dict]:
     """Build and persist the production Qwen board, prompt, and finite answer."""
-    round_, objects, people = _runtime_round(png_path, payload, camera_id)
-    command = parse_command(instruction)
+    round_, objects, people = runtime or _runtime_round(png_path, payload, camera_id)
+    if answer_slot is None:
+        answer_slot = int(hashlib.sha1(asset_key.encode("utf-8")).hexdigest()[:8], 16)
+    try:
+        command = parse_command(instruction)
+    except CommandParseError:
+        return None
     if situation is not None:
         chosen = people.get(id(target))
-        board = build_candidate_board(
-            instruction, command, round_, max_crops=len(round_.people),
+        ranked = candidate_evidence(command, round_, instruction)
+        evidence = shortlist_for_verifier(ranked, command, instruction)
+        if chosen is None or chosen.candidate_id not in {
+                item.person.candidate_id for item in evidence}:
+            return None
+        evidence = _answer_at(
+            evidence, chosen.candidate_id, answer_slot,
+            lambda item: item.person.candidate_id,
+        )
+        board = _assemble_board(
+            instruction, command, round_, evidence, len(round_.people),
             pack_cameras=True,
         )
         ids = board.candidate_ids
-        if chosen is None or chosen.candidate_id not in ids:
-            return None
         answer = f"P{ids.index(chosen.candidate_id) + 1:02d}"
     else:
         chosen = objects.get(id(target))
@@ -1171,6 +1232,10 @@ def _runtime_sample(
         if chosen is None or chosen.candidate_id not in {
                 item.target.candidate_id for item in ranked}:
             return None
+        ranked = _answer_at(
+            ranked, chosen.candidate_id, answer_slot,
+            lambda item: item.target.candidate_id,
+        )
         board = build_object_board(
             instruction, command, round_, ranked,
             max_crops=len(ranked), pack_cameras=True,
@@ -1231,9 +1296,50 @@ def _coverage_missing(
     return missing
 
 
+def _camera_groups(scenes):
+    """Keep real multi-camera scenes; bundle one-camera captures by camera ID."""
+    loaded = []
+    skipped = 0
+    for scene_id, scene_dir in scenes:
+        cameras = []
+        for name in sorted(os.listdir(scene_dir)):
+            if not name.endswith(".json") or name.endswith("_overlay.json"):
+                continue
+            stem = os.path.splitext(name)[0]
+            pair = _load_pair(scene_dir, stem)
+            if pair is None:
+                skipped += 1
+                continue
+            png_path, payload = pair
+            cameras.append((
+                png_path, payload, str(payload.get("frame_id") or stem)
+            ))
+        if cameras:
+            loaded.append((scene_id, cameras))
+    if not loaded or any(len(cameras) != 1 for _, cameras in loaded):
+        return loaded, skipped
+
+    by_camera = defaultdict(list)
+    for scene_id, cameras in loaded:
+        by_camera[cameras[0][2]].append((scene_id, cameras[0]))
+    if len(by_camera) < 2:
+        return loaded, skipped
+    bundle_count = min(len(items) for items in by_camera.values())
+    groups = []
+    camera_ids = sorted(by_camera)
+    for index in range(bundle_count):
+        groups.append((
+            f"bundle_{index:05d}",
+            [by_camera[camera_id][index][1] for camera_id in camera_ids],
+        ))
+    skipped += len(loaded) - bundle_count * len(camera_ids)
+    return groups, skipped
+
+
 def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
             seed: int, fmt: str, max_sar_per_image: int = 2,
-            require_complete: bool = False, min_cameras: int = 6) -> None:
+            require_complete: bool = False, min_cameras: int = 6,
+            max_groups: int = 0) -> None:
     rng = random.Random(seed)
     os.makedirs(out_dir, exist_ok=True)
     scenes = list(_iter_scenes(in_dir))
@@ -1251,7 +1357,6 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
     if not scenes:
         raise SystemExit(f"no scene_* directories under {in_dir}")
 
-    n_cut = max(1, int(round(len(scenes) * (1.0 - val_frac)))) if len(scenes) > 1 else len(scenes)
     train_sar: List[dict] = []
     val_sar: List[dict] = []
     train_obj: List[dict] = []
@@ -1265,31 +1370,25 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
     rel_counts: Counter = Counter()
     recipe_counts: Counter = Counter()
     camera_counts: Counter = Counter()
+    scene_groups, load_skips = _camera_groups(scenes)
+    if max_groups > 0:
+        scene_groups = scene_groups[:max_groups]
+    n_skip += load_skips
+    n_cut = (
+        max(1, int(round(len(scene_groups) * (1.0 - val_frac))))
+        if len(scene_groups) > 1 else len(scene_groups)
+    )
 
-    for idx, (scene_id, scene_dir) in enumerate(scenes):
-        stems = [
-            os.path.splitext(n)[0]
-            for n in os.listdir(scene_dir)
-            if n.endswith(".json") and not n.endswith("_overlay.json")
-        ]
-        recipe_scene = False
-        for stem in stems:
-            pair = _load_pair(scene_dir, stem)
-            if pair is None:
-                continue
-            _, pl = pair
-            if any(d.get("recipe_id") for d in (pl.get("detections") or [])):
-                recipe_scene = True
-                break
+    for idx, (scene_id, cameras) in enumerate(scene_groups):
+        recipe_scene = any(
+            det.get("recipe_id")
+            for _, payload, _ in cameras
+            for det in (payload.get("detections") or [])
+        )
+        scene_runtime = _runtime_scene_round(cameras)
         obj_bucket = train_obj if idx < n_cut else val_obj
         sar_bucket = train_sar if idx < n_cut else val_sar
-        for stem in sorted(stems):
-            pair = _load_pair(scene_dir, stem)
-            if pair is None:
-                n_skip += 1
-                continue
-            png_path, payload = pair
-            camera_id = str(payload.get("frame_id") or stem)
+        for png_path, payload, camera_id in cameras:
             camera_counts[camera_id] += 1
             obj_rows = _pairs_for_payload(payload, rng, max_per_image)
             sar_rows = _sar_pairs_for_payload(
@@ -1303,6 +1402,7 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 row = _runtime_sample(
                     png_path, payload, camera_id, instruction, obj, fmt,
                     out_dir, f"s{scene_id}_{camera_id}_obj_{box_key}",
+                    runtime=scene_runtime,
                 )
                 if row is None:
                     n_skip += 1
@@ -1318,7 +1418,7 @@ def convert(in_dir: str, out_dir: str, val_frac: float, max_per_image: int,
                 row = _runtime_sample(
                     png_path, payload, camera_id, instruction, person, fmt,
                     out_dir, f"s{scene_id}_{camera_id}_sar_{box_key}",
-                    situation=sit,
+                    situation=sit, runtime=scene_runtime,
                 )
                 if row is None:
                     n_skip += 1
@@ -1466,13 +1566,16 @@ def main():
                     help="fail after export if a task category has no examples")
     ap.add_argument("--min-cameras", type=int, default=6,
                     help="minimum distinct viewpoints required by --require-complete")
+    ap.add_argument("--max-groups", type=int, default=0,
+                    help="optional cap after one-camera captures are bundled")
     args = ap.parse_args()
     if not os.path.isdir(args.in_dir):
         raise SystemExit(f"input dir not found: {args.in_dir}")
     convert(args.in_dir, args.out_dir, args.val_frac, args.max_per_image,
             args.seed, args.format, max_sar_per_image=args.max_sar_per_image,
             require_complete=args.require_complete,
-            min_cameras=max(1, args.min_cameras))
+            min_cameras=max(1, args.min_cameras),
+            max_groups=max(0, args.max_groups))
 
 
 if __name__ == "__main__":

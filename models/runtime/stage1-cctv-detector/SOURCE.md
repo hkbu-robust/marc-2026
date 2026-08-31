@@ -5,6 +5,13 @@ The human approver explicitly waived the optional blind-review workflow. No comp
 blind-review JSON was fabricated. The superseded 33-class release remains immutable
 at Hugging Face revision `9227ecd11069d103c7dabdd287c6fc20a83eb6c1`.
 
+On 2026-08-31 it received a 10-epoch low-rate continuation from that umbrella-capable
+checkpoint using 1,098 generated tiny-object training images plus 308 replay images.
+The mixed 262-image validation reached 0.96698 mAP50 / 0.88334 mAP50-95. Revalidation
+on the original 343-image split reached 0.977 mAP50 / 0.899 mAP50-95, showing no
+material forgetting. The deployed checkpoint SHA-256 is
+`64296e4b479855ed23b280ab3ce118e5adc7347e0241a21d6f365f8fe8d28cf2`.
+
 ## Lineage
 
 - Selected run: `/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62`

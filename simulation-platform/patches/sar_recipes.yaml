@@ -9,7 +9,7 @@ recipes:
     support_landmark: trash_can
     support_class: trash_can
     relation: "on"
-    above: true
+    above: false
     distractor_poses: [person_walking, person_walking_away]
     command: Find the person sitting on top of the trash can in the parking lot.
     situation: abnormal
@@ -141,7 +141,7 @@ recipes:
     support_class: trash_can
     surface_class: parking
     relation: "on"
-    above: true
+    above: false
     distractor_poses: [person_walking]
     command: In the parking lot, find the person who climbed up and is sitting on top of the trash can.
     situation: abnormal

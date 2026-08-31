@@ -35,8 +35,7 @@ _FACE_DOWN_POSES = frozenset(
     {"person_prone", "person_lying_down", "person_bending"}
 )
 _SEATING_LYING_POSES = (
-    (POSE_GROUPS["prostrate"] - frozenset({"person_bending"}))
-    | frozenset({"person_reclining"})
+    POSE_GROUPS["prostrate"] | frozenset({"person_reclining"})
 )
 log = logging.getLogger("marc_agent.sar_selection")
 
@@ -365,7 +364,8 @@ _POSE_CUE_CLASSES = (
         frozenset({"person_sitting"}),
     ),
     (re.compile(r"\b(?:lying)\b"), frozenset({"person_lying_down"})),
-    (re.compile(r"\b(?:collapsed|fell|fallen)\b"), POSE_GROUPS["prostrate"]),
+    (re.compile(r"\bcollapsed\b"), frozenset({"person_lying_down"})),
+    (re.compile(r"\b(?:fell|fallen)\b"), POSE_GROUPS["prostrate"]),
     (re.compile(r"\b(?:face[\s-]*down|prone)\b"), frozenset({"person_prone"})),
 )
 
@@ -572,9 +572,10 @@ def format_sar_verifier_prompt(
         "these constraints beat list order. world_dist_m is metres on the ground to the "
         "parsed landmark when known; it is geometry, not the answer by itself. The "
         "request is language to satisfy, not visual ground truth. Use the images and "
-        "detector metadata together. The middle token of each CANDIDATE_ID is the detector "
-        "pose (person_sitting, person_lying_down, person_prone, …); prefer the pose that "
-        "matches the request. Every listed candidate is eligible; detail_crop=no means "
+        "detector metadata together. The middle token of each CANDIDATE_ID is only a "
+        "fallible detector pose (person_sitting, person_lying_down, person_prone, …); "
+        "verify the body configuration visually. Visible support and place constraints "
+        "override a literal pose label. Every listed candidate is eligible; detail_crop=no means "
         "the candidate appears only in its annotated camera view. Each visual= field maps "
         "the row to an exact IMAGE and, when present, its yellow crop tile. Reply with "
         "exactly CANDIDATE_ID and nothing else.\n"
@@ -969,6 +970,167 @@ def select_sar_candidate(
                 for item in contenders
                 if item.person.candidate_id == candidate_id
             )
+            selected_item = next(
+                item
+                for item in contenders
+                if item.person.candidate_id == candidate_id
+            )
+            reason = "valid_model_output"
+            if poses:
+                pose_matches = tuple(
+                    item for item in contenders if item.person.pose_class in poses
+                )
+                pose_choice = (
+                    _fallback_pick(pose_matches, pose_matches)
+                    if pose_matches
+                    else None
+                )
+                if pose_choice is not None and (
+                    selected.pose_class not in poses
+                    or (
+                        command.landmark is None
+                        and len(selected_item.camera_evidence)
+                        < len(pose_choice.camera_evidence)
+                    )
+                ):
+                    selected_item = pose_choice
+                    selected = selected_item.person
+                    evidence_situation = situation_for_pose(
+                        selected.pose_class,
+                        support=(
+                            selected_item.anchor.class_name
+                            if selected_item.anchor is not None
+                            else None
+                        ),
+                        surface=command.scene_hint,
+                    )
+                    reason = "pose_geometry_override"
+                    log.info(
+                        "[vlm] pose guard replaced=%s with=%s",
+                        candidate_id,
+                        selected.candidate_id,
+                    )
+            requires_support = (
+                projection_relation(command, command_text, selected.pose_class)
+                is Relation.ON
+            )
+            if (
+                requires_support
+                and selected_item.horizontal_overlap < 0.25
+            ):
+                supported = tuple(
+                    item
+                    for item in contenders
+                    if item.horizontal_overlap >= 0.5
+                    and (not poses or item.person.pose_class in poses)
+                )
+                if supported:
+                    replacement = min(
+                        supported,
+                        key=lambda item: (
+                            -sum(
+                                cue.startswith("scene:")
+                                for cue in item.camera_evidence
+                            ),
+                            -item.deterministic_score,
+                            item.person.candidate_id,
+                        ),
+                    )
+                    selected_item = replacement
+                    selected = replacement.person
+                    evidence_situation = situation_for_pose(
+                        selected.pose_class,
+                        support=(
+                            replacement.anchor.class_name
+                            if replacement.anchor is not None
+                            else None
+                        ),
+                    )
+                    reason = "support_geometry_override"
+                    log.info(
+                        "[vlm] support guard replaced=%s with=%s",
+                        candidate_id,
+                        selected.candidate_id,
+                    )
+            place_matches = tuple(
+                item
+                for item in contenders
+                if any(cue.startswith("place:") for cue in item.camera_evidence)
+            )
+            if place_matches and not any(
+                cue.startswith("place:") for cue in selected_item.camera_evidence
+            ):
+                selected_item = _fallback_pick(place_matches, place_matches)
+                selected = selected_item.person
+                evidence_situation = situation_for_pose(
+                    selected.pose_class,
+                    support=(
+                        selected_item.anchor.class_name
+                        if selected_item.anchor is not None
+                        else None
+                    ),
+                    surface=command.scene_hint,
+                )
+                reason = "place_geometry_override"
+                log.info(
+                    "[vlm] place guard replaced=%s with=%s",
+                    candidate_id,
+                    selected.candidate_id,
+                )
+            if (
+                command.landmark
+                and not requires_support
+                and selected_item.world_dist_m is not None
+                and reason != "support_geometry_override"
+            ):
+                nearby = tuple(
+                    item
+                    for item in contenders
+                    if item.world_dist_m is not None
+                    and (not poses or item.person.pose_class in poses)
+                    and (not requires_support or item.horizontal_overlap >= 0.5)
+                    and situation_for_pose(
+                        item.person.pose_class,
+                        support=(
+                            item.anchor.class_name
+                            if item.anchor is not None
+                            else None
+                        ),
+                        surface=command.scene_hint,
+                    )
+                    == requested
+                )
+                if nearby:
+                    closest = min(
+                        nearby,
+                        key=lambda item: (
+                            item.world_dist_m,
+                            -item.deterministic_score,
+                            item.person.candidate_id,
+                        ),
+                    )
+                    if (
+                        closest.world_dist_m <= 3.0
+                        and selected_item.world_dist_m
+                        > closest.world_dist_m + 1.0
+                    ):
+                        selected_item = closest
+                        selected = closest.person
+                        evidence_situation = situation_for_pose(
+                            selected.pose_class,
+                            support=(
+                                closest.anchor.class_name
+                                if closest.anchor is not None
+                                else None
+                            ),
+                            surface=command.scene_hint,
+                        )
+                        reason = "landmark_geometry_override"
+                        log.info(
+                            "[vlm] landmark guard replaced=%s with=%s",
+                            candidate_id,
+                            selected.candidate_id,
+                        )
             log.info(
                 "[vlm] validated output candidate=%s situation=%s backend=%s output=%s",
                 candidate_id,
@@ -982,7 +1144,7 @@ def select_sar_candidate(
                 requested,
                 evidence_situation,
                 str(getattr(verifier, "method", "qwen")),
-                "valid_model_output",
+                reason,
                 raw_output,
                 metrics,
                 getattr(verifier, "last_prompt", board.prompt),

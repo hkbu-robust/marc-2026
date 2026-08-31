@@ -25,7 +25,7 @@ from marc_agent.graspgenx_policy import (
     has_checkpoint,
     points_from_target,
 )
-from marc_agent.pick_runtime import PickRuntime, _grasp_floor_z, grasp_xyz_in_reach
+from marc_agent.pick_runtime import PickRuntime
 
 from .openvla_pick import target_moved_with_gripper
 
@@ -35,11 +35,18 @@ DEFAULT_SUPPORT_BAND_M = 0.015
 DEFAULT_TOPDOWN_TILT_DEG = 35.0
 DEFAULT_TCP_DEPTH_M = 0.195
 DEFAULT_FINAL_APPROACH_M = 0.06
+DEFAULT_MIN_INSERTION_FRACTION = 0.30
+DEFAULT_CONTACT_DEPTH_FRACTION = 0.85
+DEFAULT_CONTACT_IK_BIAS_M = 0.01
+DEFAULT_CONTACT_FWD_BIAS_M = -0.02
+DEFAULT_CONTACT_LAT_BIAS_M = 0.12
 DEFAULT_MIN_FWD_M = 0.32
 DEFAULT_MAX_FWD_M = 0.58
+DEFAULT_MAX_ABS_LAT_M = 0.45
 DEFAULT_VERIFY_MIN_RISE_M = 0.035
-DEFAULT_VERIFY_MAX_XY_DRIFT_M = 0.12
-DEFAULT_SNAP_CLOSE = 0.68
+DEFAULT_VERIFY_MAX_RISE_M = 0.12
+DEFAULT_VERIFY_MAX_XY_DRIFT_M = 0.15
+DEFAULT_RETENTION_CLOSE = 0.703
 
 _generator: Optional[Callable[[np.ndarray], object]] = None
 log = logging.getLogger("participant_app")
@@ -127,6 +134,28 @@ def _score_at(scores, index: int) -> float:
     return value if math.isfinite(value) else 0.0
 
 
+def object_contact_z(points, target_z: float) -> float:
+    """Scale finger-pad depth to this object's observed vertical extent."""
+    z_values = np.asarray(points, dtype=np.float64)[:, 2]
+    top = float(np.percentile(z_values, 95.0))
+    bottom = min(float(np.percentile(z_values, 5.0)), float(target_z))
+    height = max(0.02, top - bottom)
+    fraction = min(
+        0.90,
+        max(
+            0.25,
+            _env_float(
+                "MARC_GRASPGENX_CONTACT_DEPTH_FRACTION",
+                DEFAULT_CONTACT_DEPTH_FRACTION,
+            ),
+        ),
+    )
+    contact = top - fraction * height - _env_float(
+        "MARC_GRASPGENX_CONTACT_IK_BIAS_M", DEFAULT_CONTACT_IK_BIAS_M
+    )
+    return min(top - 0.005, max(bottom + 0.005, contact))
+
+
 def select_topdown_contact_pose(
     raw,
     points,
@@ -150,8 +179,14 @@ def select_topdown_contact_pose(
     if cloud.ndim != 2 or cloud.shape[0] < MIN_CLOUD_POINTS:
         return None
     tx, ty = float(target_xyz[0]), float(target_xyz[1])
-    z_lo = float(np.min(cloud[:, 2])) - 0.04
-    z_hi = float(np.max(cloud[:, 2])) + 0.12
+    top_z = float(np.percentile(cloud[:, 2], 95.0))
+    bottom_z = min(float(np.percentile(cloud[:, 2], 5.0)), float(target_xyz[2]))
+    height = max(0.02, top_z - bottom_z)
+    z_lo = bottom_z - 0.01
+    z_hi = top_z - height * _env_float(
+        "MARC_GRASPGENX_MIN_INSERTION_FRACTION",
+        DEFAULT_MIN_INSERTION_FRACTION,
+    )
     min_down = math.cos(math.radians(float(max_tilt_deg)))
     candidates = []
     for index, raw_pose in enumerate(grasps):
@@ -233,7 +268,7 @@ def load_local_graspgenx(path: Optional[str] = None):
             planner=planner,
             grasp_threshold=_env_float("MARC_GRASPGENX_THRESHOLD", -1.0),
             num_grasps=max(16, int(_env_float("MARC_GRASPGENX_NUM_GRASPS", 64))),
-            topk_num_grasps=max(8, int(_env_float("MARC_GRASPGENX_TOPK", 32))),
+            topk_num_grasps=-1,
         )
         return grasps, conf
 
@@ -256,17 +291,26 @@ def unload_local_graspgenx() -> None:
 class StagedGraspGenXPickRuntime(PickRuntime):
     """Deterministic stage, GraspGen-X pose/yaw, short approach, snap, lift."""
 
-    def __init__(self, *args, target_observer=None, points_fn=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        target_observer=None,
+        visual_target_observer=None,
+        points_fn=None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._target_observer = target_observer
+        self._visual_target_observer = visual_target_observer or target_observer
         self._points_fn = points_fn or segmented_object_points
         self._visual_grasp_verified = False
 
-    def _observe_target(self):
-        if not callable(self._target_observer):
+    def _observe_target(self, observer=None):
+        observer = observer or self._target_observer
+        if not callable(observer):
             return None
         try:
-            return self._target_observer()
+            return observer()
         except Exception as exc:
             self._emit("[pick] GraspGen-X visual verification failed (%s)" % exc)
             return None
@@ -331,11 +375,31 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             )
             return
 
-        fwd, lat, z = selected["xyz"]
-        z = max(float(z), float(_grasp_floor_z()))
+        fresh = self._observe_target()
+        if fresh is None or getattr(fresh, "valid", False) is not True:
+            self._emit("[pick] GraspGen-X lost target before final approach")
+            return
+        localized_before = SimpleNamespace(
+            fwd=float(fresh.fwd),
+            lat=float(fresh.lat),
+            z=float(fresh.z),
+            valid=True,
+        )
+        # The eye-to-hand camera has a repeatable physical XY offset; GraspGen-X
+        # still supplies the closing yaw and filters unsafe contact candidates.
+        fwd = localized_before.fwd + _env_float(
+            "MARC_GRASPGENX_CONTACT_FWD_BIAS_M", DEFAULT_CONTACT_FWD_BIAS_M
+        )
+        lat = localized_before.lat + _env_float(
+            "MARC_GRASPGENX_CONTACT_LAT_BIAS_M", DEFAULT_CONTACT_LAT_BIAS_M
+        )
+        z = object_contact_z(points, localized_before.z)
         min_fwd = _env_float("MARC_GRASPGENX_MIN_FWD_M", DEFAULT_MIN_FWD_M)
         max_fwd = _env_float("MARC_GRASPGENX_MAX_FWD_M", DEFAULT_MAX_FWD_M)
-        if not grasp_xyz_in_reach((fwd, lat, z)) or not (min_fwd <= fwd <= max_fwd):
+        max_abs_lat = _env_float(
+            "MARC_GRASPGENX_MAX_ABS_LAT_M", DEFAULT_MAX_ABS_LAT_M
+        )
+        if not (min_fwd <= fwd <= max_fwd and abs(lat) <= max_abs_lat):
             self._emit(
                 "[pick] GraspGen-X contact out of safe reach "
                 "fwd=%.3f lat=%.3f z=%.3f" % (fwd, lat, z)
@@ -362,13 +426,13 @@ class StagedGraspGenXPickRuntime(PickRuntime):
         if not arm.move_grasp_pose((fwd, lat, z), yaw, "ggx-contact"):
             return
         # Runtime calibration is deliberately a primitive, not a learned output.
-        if not arm.set_grip(DEFAULT_SNAP_CLOSE):
+        if not arm.set_grip(float(arm.cfg.grip_close)):
             return
         if not arm.lift_for_grasp_verification():
             self._emit("[pick] GraspGen-X verification lift failed")
             return
 
-        after = self._observe_target()
+        after = self._observe_target(self._visual_target_observer)
         if after is None or getattr(after, "valid", False) is not True:
             self._emit("[pick] GraspGen-X grasp rejected: target not visible after lift")
             return
@@ -384,10 +448,25 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             ),
         )
         rise = float(after.z) - float(localized_before.z)
+        valid = valid and rise <= _env_float(
+            "MARC_GRASPGENX_VERIFY_MAX_RISE_M", DEFAULT_VERIFY_MAX_RISE_M
+        )
         drift = math.hypot(
             float(after.fwd) - float(localized_before.fwd),
             float(after.lat) - float(localized_before.lat),
         )
+        if valid:
+            retention = min(
+                DEFAULT_RETENTION_CLOSE,
+                max(
+                    float(arm.cfg.grip_close),
+                    _env_float(
+                        "MARC_GRASPGENX_RETENTION_CLOSE", DEFAULT_RETENTION_CLOSE
+                    ),
+                ),
+            )
+            if retention > float(arm.grip_cmd) and not arm.set_grip(retention):
+                valid = False
         self._visual_grasp_verified = bool(valid)
         self._emit(
             "[pick] GraspGen-X visual grasp %s rise=%.3fm xy_drift=%.3fm"

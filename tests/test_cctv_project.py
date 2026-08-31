@@ -73,6 +73,45 @@ class CctvProjectTests(unittest.TestCase):
         self.assertLess(prone[1], upright[1])
         self.assertAlmostEqual(280.0, prone[1])
 
+    def test_bending_contact_samples_near_the_feet(self):
+        self.assertEqual(
+            (320.0, 415.0),
+            contact_pixel((280.0, 100.0, 360.0, 400.0), "person_bending"),
+        )
+
+    def test_ground_lying_uses_feet_but_supported_lying_uses_torso(self):
+        projector = CctvProjector(static_lookup({"cam": _looking_along_z()}))
+        box = (280.0, 100.0, 360.0, 400.0)
+        with patch(
+            "marc_agent.perception.cctv_project.intersect_ray_plane",
+            return_value=(0.0, 0.0, 0.0),
+        ) as intersect:
+            projector.project_contact("cam", box, pose_class="person_lying_down")
+            self.assertEqual(385.0, intersect.call_args.args[2])
+            projector.project_contact(
+                "cam",
+                box,
+                pose_class="person_lying_down",
+                relation=Relation.ON,
+                support_class="bench",
+            )
+            self.assertEqual(280.0, intersect.call_args.args[2])
+
+    def test_ground_bending_contact_pulls_slightly_toward_named_anchor(self):
+        projector = CctvProjector(static_lookup({"cam": _looking_along_z()}))
+        box = (280.0, 100.0, 360.0, 400.0)
+        raw = projector.project_contact("cam", box, pose_class="person_bending")
+        pulled = projector.project_contact(
+            "cam",
+            box,
+            pose_class="person_bending",
+            relation=Relation.NEAR,
+            support_class="trash_can",
+            support_box=(40.0, 100.0, 120.0, 400.0),
+        )
+        self.assertLess(pulled[0], raw[0])
+        self.assertAlmostEqual(0.18, pulled[2])
+
     def test_ray_behind_camera_is_rejected(self):
         lookup = static_lookup({"cam": _looking_along_z(z=10.0, ground=0.0)})
         self.assertIsNone(project_pixel("cam", 320.0, 240.0, lookup=lookup))

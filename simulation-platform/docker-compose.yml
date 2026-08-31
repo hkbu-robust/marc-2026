@@ -71,6 +71,8 @@ services:
       MARC_AUTO_START: "${MARC_AUTO_START:-1}"
       MARC_AUTO_STAGE1: "${MARC_AUTO_STAGE1:-all}"
       MARC_AUTO_STAGE2: "${MARC_AUTO_STAGE2:-auto}"
+      # Let lazily-created CCTV streams render before the first scored round.
+      MARC_AUTO_START_DELAY_S: "${MARC_AUTO_START_DELAY_S:-50}"
       # Problem selection is automatic: the mounted problems.yaml is used when present (pose only
       # its enabled items). No env var needed. MARC_AUTO_STAGE1/STAGE2 above apply only when the
       # file is absent/invalid. Optional: MARC_PROBLEM_SELECTION overrides the file path.
@@ -206,6 +208,7 @@ services:
       TRAINER_YOLO_MODE: "0"
       TRAINER_PEOPLE_ABOVE: "0"
       TRAINER_SAR_RECIPE_CURSOR: "${QWEN_DATASET_RECIPE_CURSOR:-}"
+      TRAINER_SAR_RECIPE_IDS: "${QWEN_DATASET_RECIPE_IDS:-}"
     command: ["/marc-patches/run_qwen_dataset_gen.py"]
     volumes:
       - ./patches:/marc-patches:ro

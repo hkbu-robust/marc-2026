@@ -6,6 +6,7 @@ patience: 20
 amp: true
 cls_remap: true
 optimizer: auto
+cls_pw: 0.25
 scale: 0.2
 mosaic: 0.0
 mixup: 0.0

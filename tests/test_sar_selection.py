@@ -200,7 +200,7 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual(2, len(board.images))  # one annotated camera + one crop
         self.assertIn("rig_a:person_walking:0", board.prompt)
         self.assertIn("detail_crop=no", board.prompt)
-        self.assertIn("middle token of each CANDIDATE_ID is the detector pose", board.prompt)
+        self.assertIn("middle token of each CANDIDATE_ID is only a fallible detector pose", board.prompt)
         self.assertIn("ordered by weak detector and scene evidence", board.prompt)
 
     def test_verifier_can_select_a_candidate_outside_the_crop_budget(self):
@@ -1115,6 +1115,141 @@ class SarSelectionTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual("rig_a:person_prone:1", result.selected.candidate_id)
         self.assertNotEqual("unique_shortlist", result.reason)
+
+    def test_on_support_geometry_rejects_model_choice_off_the_support(self):
+        text = "Find the person lying on top of the picnic table."
+        command = parse_command(text)
+        table = (200.0, 200.0, 500.0, 400.0)
+        off_table = (20.0, 100.0, 100.0, 180.0)
+        on_table = (240.0, 130.0, 420.0, 240.0)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object(
+                    "rig_a:picnic_table:0",
+                    "picnic_table",
+                    table,
+                    "rig_a",
+                ),
+            ],
+            people=[
+                _person(
+                    "rig_a:person_lying_down:0",
+                    "person_lying_down",
+                    off_table,
+                    0.99,
+                ),
+                _person(
+                    "rig_a:person_lying_down:1",
+                    "person_lying_down",
+                    on_table,
+                    0.8,
+                ),
+            ],
+            frames={"rig_a": _frame("rig_a")},
+            camera_ids=["rig_a"],
+        )
+
+        result = select_sar_candidate(
+            text,
+            command,
+            round_,
+            verifier=lambda _board: "rig_a:person_lying_down:0",
+            projector=_BoxProjector({
+                ("rig_a", table): (0.0, 0.0),
+                ("rig_a", off_table): (0.5, 0.0),
+                ("rig_a", on_table): (2.0, 0.0),
+            }),
+        )
+
+        self.assertEqual("rig_a:person_lying_down:1", result.selected.candidate_id)
+        self.assertEqual("support_geometry_override", result.reason)
+
+    def test_on_support_model_choice_is_not_replaced_by_ground_distance(self):
+        text = "Find the person sitting on top of the trash can in the parking lot."
+        command = parse_command(text)
+        trash = (200.0, 200.0, 500.0, 400.0)
+        seated = (240.0, 130.0, 420.0, 240.0)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("rig_a:trash_can:0", "trash_can", trash, "rig_a"),
+                _object("rig_b:trash_can:0", "trash_can", trash, "rig_b"),
+            ],
+            people=[
+                _person("rig_a:person_sitting:0", "person_sitting", seated, 0.8, "rig_a"),
+                _person("rig_b:person_sitting:0", "person_sitting", seated, 0.9, "rig_b"),
+            ],
+            frames={"rig_a": _frame("rig_a"), "rig_b": _frame("rig_b")},
+            camera_ids=["rig_a", "rig_b"],
+        )
+
+        result = select_sar_candidate(
+            text,
+            command,
+            round_,
+            verifier=lambda _board: "rig_a:person_sitting:0",
+            projector=_BoxProjector({
+                ("rig_a", trash): (0.0, 0.0),
+                ("rig_a", seated): (2.0, 0.0),
+                ("rig_b", trash): (0.0, 0.0),
+                ("rig_b", seated): (0.1, 0.0),
+            }),
+        )
+
+        self.assertEqual("rig_a:person_sitting:0", result.selected.candidate_id)
+        self.assertEqual("valid_model_output", result.reason)
+
+    def test_explicit_pose_rejects_model_pose_swap_without_landmark(self):
+        text = "Find the person collapsed on the parking lot floor."
+        command = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("rig_b:suv:0", "suv", (20.0, 20.0, 120.0, 120.0), "rig_b"),
+            ],
+            people=[
+                _person("rig_b:person_lying_down:0", "person_lying_down", (200, 200, 320, 280), 0.8, "rig_b"),
+                _person("rig_b:person_prone:0", "person_prone", (330, 200, 450, 280), 0.9, "rig_b"),
+            ],
+            frames={"rig_b": _frame("rig_b")},
+            camera_ids=["rig_b"],
+        )
+
+        result = select_sar_candidate(
+            text,
+            command,
+            round_,
+            verifier=lambda _board: "rig_b:person_prone:0",
+        )
+
+        self.assertEqual("rig_b:person_lying_down:0", result.selected.candidate_id)
+        self.assertEqual("pose_geometry_override", result.reason)
+
+    def test_named_place_rejects_model_choice_from_other_camera(self):
+        text = "Near the taxi, find the person lying down on top of the bench."
+        command = parse_command(text)
+        bench = (200.0, 200.0, 500.0, 400.0)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("rig_a:bench:0", "bench", bench, "rig_a"),
+                _object("rig_b:bench:0", "bench", bench, "rig_b"),
+                _object("rig_b:taxi:0", "taxi", (10.0, 10.0, 100.0, 100.0), "rig_b"),
+            ],
+            people=[
+                _person("rig_a:person_lying_down:0", "person_lying_down", (240, 130, 420, 240), 0.99, "rig_a"),
+                _person("rig_b:person_bending:0", "person_bending", (240, 130, 420, 240), 0.8, "rig_b"),
+            ],
+            frames={"rig_a": _frame("rig_a"), "rig_b": _frame("rig_b")},
+            camera_ids=["rig_a", "rig_b"],
+        )
+
+        result = select_sar_candidate(
+            text,
+            command,
+            round_,
+            verifier=lambda _board: "rig_a:person_lying_down:0",
+        )
+
+        self.assertEqual("rig_b:person_bending:0", result.selected.candidate_id)
+        self.assertEqual("place_geometry_override", result.reason)
 
     def test_fallen_by_bicycle_ranks_prostrate_before_walking(self):
         text = "Find the person fallen on the ground next to the toppled bicycle."

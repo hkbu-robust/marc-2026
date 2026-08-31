@@ -10,6 +10,7 @@ import numpy as np
 from manip_dataset.graspgenx_pick import (
     StagedGraspGenXPickRuntime,
     filter_object_points,
+    object_contact_z,
     select_topdown_contact_pose,
 )
 
@@ -47,6 +48,8 @@ class _Client:
 class _Arm:
     def __init__(self, events):
         self.events = events
+        self.cfg = SimpleNamespace(grip_close=0.58, grip_extra=0.04)
+        self.grip_cmd = 0.0
 
     def stage_for_openvla(self, _target):
         self.events.append("stage")
@@ -57,6 +60,7 @@ class _Arm:
         return True
 
     def set_grip(self, value):
+        self.grip_cmd = float(value)
         self.events.append(("grip", float(value)))
         return True
 
@@ -103,10 +107,10 @@ class GraspGenXStagingTests(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(filtered[:, 1]))), 0.14)
 
     def test_selector_converts_gripper_base_to_fingertip_and_rejects_side_pose(self):
-        good = _topdown_pose((0.40, 0.01, -0.28))
+        good = _topdown_pose((0.40, 0.01, -0.34))
         side = good.copy()
         side[:3, :3] = np.eye(3)
-        far = _topdown_pose((0.70, 0.0, -0.28))
+        far = _topdown_pose((0.70, 0.0, -0.34))
 
         selected = select_topdown_contact_pose(
             (np.stack([side, far, good]), np.array([0.99, 0.95, 0.80])),
@@ -116,8 +120,35 @@ class GraspGenXStagingTests(unittest.TestCase):
 
         self.assertIsNotNone(selected)
         self.assertEqual(2, selected["index"])
-        np.testing.assert_allclose(selected["xyz"], (0.40, 0.01, -0.28), atol=1e-6)
+        np.testing.assert_allclose(selected["xyz"], (0.40, 0.01, -0.34), atol=1e-6)
         self.assertAlmostEqual(0.0, selected["yaw"])
+
+    def test_selector_rejects_a_surface_close_above_the_object_body(self):
+        surface = _topdown_pose((0.40, 0.0, -0.26))
+        inserted = _topdown_pose((0.40, 0.0, -0.34))
+        cloud = _cloud()
+        cloud[:, 2] = np.linspace(-0.29, -0.26, len(cloud))
+
+        selected = select_topdown_contact_pose(
+            (np.stack([surface, inserted]), np.array([0.99, 0.80])),
+            cloud,
+            (0.40, 0.0, -0.40),
+        )
+
+        self.assertEqual(1, selected["index"])
+
+    def test_contact_depth_scales_with_object_height(self):
+        short = _cloud()
+        short[:, 2] = np.linspace(-0.31, -0.26, len(short))
+        tall = _cloud()
+        tall[:, 2] = np.linspace(-0.46, -0.26, len(tall))
+
+        short_z = object_contact_z(short, -0.31)
+        tall_z = object_contact_z(tall, -0.46)
+
+        self.assertGreater(short_z, tall_z)
+        self.assertGreater(short_z, -0.31)
+        self.assertGreater(tall_z, -0.46)
 
     def test_runtime_stages_before_inference_then_short_approach_snap_and_lift(self):
         events = []
@@ -132,11 +163,18 @@ class GraspGenXStagingTests(unittest.TestCase):
 
         def generate(_points):
             events.append("infer")
-            return np.stack([_topdown_pose((0.40, 0.0, -0.28))]), np.array([0.9])
+            return np.stack([_topdown_pose((0.37, 0.03, -0.34))]), np.array([0.9])
+
+        observations = iter(
+            (
+                SimpleNamespace(fwd=0.41, lat=-0.01, z=-0.40, valid=True),
+                SimpleNamespace(fwd=0.41, lat=-0.01, z=-0.34, valid=True),
+            )
+        )
 
         def observe():
             events.append("observe")
-            return SimpleNamespace(fwd=0.40, lat=0.0, z=-0.34, valid=True)
+            return next(observations)
 
         runtime = StagedGraspGenXPickRuntime(
             client,
@@ -153,15 +191,18 @@ class GraspGenXStagingTests(unittest.TestCase):
 
         self.assertEqual("stage", events[0])
         self.assertEqual("infer", events[1])
-        self.assertEqual("ggx-pregrasp", events[2][0])
-        self.assertEqual("ggx-contact", events[3][0])
-        self.assertEqual(("grip", 0.68), events[4])
-        self.assertEqual("lift", events[5])
-        self.assertEqual("observe", events[6])
+        self.assertEqual("observe", events[2])
+        self.assertEqual("ggx-pregrasp", events[3][0])
+        self.assertEqual("ggx-contact", events[4][0])
+        np.testing.assert_allclose((0.39, 0.11), events[4][1][:2], atol=1e-9)
+        self.assertAlmostEqual(object_contact_z(_cloud(), -0.40), events[4][1][2])
+        self.assertEqual(("grip", 0.58), events[5])
+        self.assertEqual("lift", events[6])
+        self.assertEqual("observe", events[7])
+        self.assertEqual(("grip", 0.703), events[8])
         self.assertTrue(runtime.poll_grasping())
 
-    def test_hold_sensor_is_rejected_when_object_did_not_rise(self):
-        events = []
+    def test_hold_sensor_is_rejected_when_lift_motion_is_implausible(self):
         target = SimpleNamespace(
             fwd=0.40,
             lat=0.0,
@@ -169,25 +210,30 @@ class GraspGenXStagingTests(unittest.TestCase):
             valid=True,
             name="tumbler",
         )
-        runtime = StagedGraspGenXPickRuntime(
-            _Client(),
-            log=lambda _msg: None,
-            policy="graspgenx",
-            grasp_generator=lambda _points: (
-                np.stack([_topdown_pose((0.40, 0.0, -0.28))]),
-                np.array([0.9]),
-            ),
-            target_observer=lambda: SimpleNamespace(
-                fwd=0.40, lat=0.0, z=-0.40, valid=True
-            ),
-            points_fn=lambda _target, client=None: _cloud(),
-            grasp_poll=1,
-        )
-        runtime._teleop = _Arm(events)
+        for after_z in (-0.40, -0.15):
+            observations = iter(
+                (
+                    SimpleNamespace(fwd=0.40, lat=0.0, z=-0.40, valid=True),
+                    SimpleNamespace(fwd=0.40, lat=0.0, z=after_z, valid=True),
+                )
+            )
+            runtime = StagedGraspGenXPickRuntime(
+                _Client(),
+                log=lambda _msg: None,
+                policy="graspgenx",
+                grasp_generator=lambda _points: (
+                    np.stack([_topdown_pose((0.40, 0.0, -0.34))]),
+                    np.array([0.9]),
+                ),
+                target_observer=lambda: next(observations),
+                points_fn=lambda _target, client=None: _cloud(),
+                grasp_poll=1,
+            )
+            runtime._teleop = _Arm([])
 
-        runtime._grasp(target)
+            runtime._grasp(target)
 
-        self.assertFalse(runtime.poll_grasping())
+            self.assertFalse(runtime.poll_grasping())
 
 
 if __name__ == "__main__":

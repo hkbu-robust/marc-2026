@@ -199,6 +199,7 @@ class _PeekDetector:
 
     def detect_candidates(self, rgb, _ttype):
         self.calls += 1
+        self.last_rgb = rgb
         if self.boom:
             raise AssertionError("detect must not run when pose is out of peek range")
         return {
@@ -266,6 +267,25 @@ class NearFieldSnapshotTests(unittest.TestCase):
         self.assertEqual(1, det.calls)
         self.assertTrue(all(lin == 0.0 for lin, _ang in client.cmds))
 
+    def test_snapshot_pairs_rgb_with_the_selected_depth_frame(self):
+        correct = _RgbMsg(np.full((48, 64, 3), 255, dtype=np.uint8))
+        wrong = _RgbMsg(np.zeros((48, 64, 3), dtype=np.uint8))
+        depth = _DepthMsg(np.full((48, 64), 0.40, dtype=np.float32))
+        correct.header = type("Header", (), {"frame_id": "chassis"})()
+        wrong.header = type("Header", (), {"frame_id": "closeup"})()
+        depth.header = type("Header", (), {"frame_id": "chassis"})()
+        client = _PeekClient(wrong, depth)
+        client.get_robot_depth_hw = lambda _which, _shape: depth
+        client.get_robot_image_frame = lambda _which, frame: (
+            correct if frame == "chassis" else None
+        )
+        det = _PeekDetector([])
+
+        NearFieldAcquire(client, detector=det).snapshot("tumbler")
+
+        self.assertEqual(1, det.calls)
+        self.assertEqual(255.0, float(det.last_rgb.mean()))
+
     def test_snapshot_fail_closed_without_box(self):
         det = _PeekDetector([])
         target = NearFieldAcquire(self._client(), detector=det).snapshot("tumbler")
@@ -312,7 +332,7 @@ class NearFieldSnapshotTests(unittest.TestCase):
             (360, 640),
             choose_lock_depth([(480, 640), (360, 640), (480, 640)], rgb),
         )
-        self.assertEqual((480, 640), choose_lock_depth([(480, 640)], rgb))
+        self.assertIsNone(choose_lock_depth([(480, 640)], rgb))
         self.assertIsNone(choose_lock_depth([], rgb))
 
 

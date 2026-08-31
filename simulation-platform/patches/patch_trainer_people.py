@@ -449,6 +449,12 @@ NEW_COMBOS = '''    combos = []
                 with open(path, encoding="utf-8") as _rf:
                     _data = _yaml_rec.safe_load(_rf) or {}
                 _recs = list(_data.get("recipes") or [])
+                _wanted = {
+                    x.strip() for x in os.environ.get(
+                        "TRAINER_SAR_RECIPE_IDS", "").split(",") if x.strip()
+                }
+                if _wanted:
+                    _recs = [r for r in _recs if r.get("id") in _wanted]
                 if _recs:
                     return _recs
                 print("[people-patch] ERROR: %s has no recipes" % path)
