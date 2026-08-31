@@ -767,13 +767,7 @@ class DepthApproachController:
 
         at_boundary = self._too_near(m) or self._frame_bottom_limit(m)
         if at_boundary:
-            # Range/frame limits prohibit more forward travel, not final yaw.
-            # Finish centering on the arm axis before declaring arrival.
-            if not has_obj or err is None or abs(err) <= self.cfg.center_tol:
-                return 0.0, 0.0
-            if self._phase != "align":
-                self._enter("align", f"range reached; final arm-center err={err:+.2f}")
-            return (0.0, self._yaw(err)) if may_turn else (0.0, 0.0)
+            return 0.0, 0.0
         lock_drive_tol = min(
             float(self.cfg.realign),
             max(float(self.cfg.center_tol), float(self.cfg.target_lock_drive_tol)),
@@ -986,14 +980,12 @@ class DepthApproachController:
         m0 = self._measure()
         frame_limited = self._frame_bottom_limit(m0)
         range_limited = self._too_near(m0)
-        if (frame_limited or range_limited) and self._is_centered(m0):
+        if frame_limited or range_limited:
             reason = "object at frame margin" if frame_limited else "already near"
             self._enter("drive", reason)
             self._arrive_now = True
             self._skip_overrun = True
             self._detect_reason = reason
-        elif frame_limited or range_limited:
-            self._enter("align", "range reached; final arm-center")
         elif self._obj_stop(m0) and self._is_centered(m0):
             self._enter("drive", "already in range")
             self._arrive_now = True
@@ -1180,10 +1172,7 @@ class DepthApproachController:
 
         lin, ang = self._command(m)
         frame_limit = self._frame_bottom_limit(m)
-        centered = self._is_centered(m)
-        near = centered and (
-            self._obj_stop(m) or self._too_near(m) or frame_limit
-        )
+        near = self._obj_stop(m) or self._too_near(m) or frame_limit
         if near and m.get("is_new"):
             self._hit_count += 1
         elif not near:
