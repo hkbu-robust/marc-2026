@@ -7,6 +7,7 @@ import os
 import random
 import sys
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -29,6 +30,20 @@ def _payload(dets):
 
 
 class SarLabelTests(unittest.TestCase):
+    def test_answer_position_rotation_is_balanced(self):
+        items = ("wrong-a", "answer", "wrong-b", "wrong-c")
+        for slot in range(len(items)):
+            ordered = q._answer_at(items, "answer", slot, lambda item: item)
+            self.assertEqual("answer", ordered[slot])
+            self.assertCountEqual(items, ordered)
+
+    def test_runtime_sample_skips_unparseable_instruction(self):
+        with mock.patch.object(q, "_runtime_round", return_value=(None, None, None)):
+            self.assertIsNone(q._runtime_sample(
+                "/tmp/unused.png", {}, "cam", "Find the person.", {},
+                "llama-factory", "/tmp", "unused", situation="normal",
+            ))
+
     def test_sitting_on_vending_is_not_normal(self):
         person = _det("person_sitting", "object", [600, 200, 700, 420],
                       xyz=(-62.77, 135.78, 17.94))
@@ -196,6 +211,31 @@ class SarLabelTests(unittest.TestCase):
         self.assertEqual(lm["class"], "bench")
         self.assertEqual(rel, "on")
         self.assertIn(" on ", instruction.lower())
+
+    def test_close_object_keeps_beside_relation(self):
+        cup = _det("disposable_cup", "object", [400, 300, 440, 360],
+                   xyz=(1.0, 2.0, 16.2))
+        bench = _det("bench", "landmark", [450, 300, 560, 420],
+                     xyz=(1.5, 2.1, 16.2))
+        payload = _payload([cup, bench])
+        payload["camera"] = {"position": [0.0, 0.0, 20.0]}
+        rows = q._pairs_for_payload(payload, random.Random(10), 1)
+        self.assertEqual(rows[0][3], "beside")
+
+    def test_unsupported_landmark_is_not_exported(self):
+        cup = _det("disposable_cup", "object", [400, 300, 440, 360])
+        cone = _det("parking_cone", "landmark", [360, 320, 500, 420])
+        self.assertEqual(
+            q._pairs_for_payload(_payload([cup, cone]), random.Random(0), 2),
+            [],
+        )
+
+    def test_exported_landmark_names_parse(self):
+        for landmark in q.LANDMARK_TYPES:
+            command = q.parse_command(
+                f"Find the disposable cup near the {q._display(landmark)}."
+            )
+            self.assertEqual(command.landmark, landmark)
 
     def test_hanging_leg_vending_sitter_is_on(self):
         # Full-frame crop: person box shares the vending ground line, so the

@@ -237,6 +237,7 @@ class PickRuntimeTests(unittest.TestCase):
         self.assertIn("unload_cctv_yolo", src)
         self.assertIn("unload_qwen", src)
         self.assertIn("after_successful_pick", src)
+        self.assertIn("stable_pick_target", src)
 
     def test_graspgenx_generator_pose_feeds_ik(self):
         client = ScriptClient()

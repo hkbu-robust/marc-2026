@@ -79,6 +79,10 @@ def k_from_camera_info(info) -> Optional[tuple[float, float, float, float]]:
 PROSTRATE_CONTACT_INSET = 0.2
 LOWER_HALF_CENTER = 0.75
 PROSTRATE_HALF_CENTER = 0.60
+BENDING_CONTACT_CENTER = 1.05
+BENDING_ANCHOR_PULL = 0.45
+BENDING_CENTER_HEIGHT_M = 0.18
+GROUND_LYING_CONTACT_CENTER = 0.95
 
 
 def contact_pixel(
@@ -94,11 +98,12 @@ def contact_pixel(
     x1, y1, x2, y2 = bbox_xyxy
     height = max(0.0, float(y2) - float(y1))
     pose = (pose_class or "").strip().lower()
-    frac = (
-        PROSTRATE_HALF_CENTER
-        if pose in POSE_GROUPS["prostrate"]
-        else LOWER_HALF_CENTER
-    )
+    if pose == "person_bending":
+        frac = BENDING_CONTACT_CENTER
+    elif pose in POSE_GROUPS["prostrate"]:
+        frac = PROSTRATE_HALF_CENTER
+    else:
+        frac = LOWER_HALF_CENTER
     return ((float(x1) + float(x2)) / 2.0, float(y1) + frac * height)
 
 
@@ -395,15 +400,29 @@ class CctvProjector:
         geometry = self.lookup(camera_id)
         if geometry is None:
             return None
-        u, v = contact_pixel(bbox_xyxy, pose_class=pose_class)
         rel = relation
         if raised and rel is None:
             rel = Relation.ON
+        rel_name = rel.value if isinstance(rel, Relation) else rel
+        if pose_class == "person_lying_down" and rel_name not in {"on", "above"}:
+            x1, y1, x2, y2 = bbox_xyxy
+            u = (float(x1) + float(x2)) / 2.0
+            v = float(y1) + GROUND_LYING_CONTACT_CENTER * (float(y2) - float(y1))
+        else:
+            u, v = contact_pixel(bbox_xyxy, pose_class=pose_class)
+        if (
+            pose_class == "person_bending"
+            and support_box is not None
+            and rel_name not in {"on", "above"}
+        ):
+            support_u = (float(support_box[0]) + float(support_box[2])) / 2.0
+            u += BENDING_ANCHOR_PULL * (support_u - u)
         z_plane = raised_plane_z(geometry.ground_height, support_class, rel)
         xyz = intersect_ray_plane(geometry, u, v, z_plane)
         if xyz is None:
             return None
-        rel_name = rel.value if isinstance(rel, Relation) else rel
+        if pose_class == "person_bending" and rel_name not in {"on", "above"}:
+            xyz = (xyz[0], xyz[1], xyz[2] + BENDING_CENTER_HEIGHT_M)
         if rel_name in {"on", "above"} and support_box is not None:
             footprint = _support_footprint_xy(self, camera_id, support_box, z_plane)
             if footprint is not None:

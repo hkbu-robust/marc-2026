@@ -1,9 +1,19 @@
 {
   "checkpoint": "model.pt",
-  "checkpoint_sha256": "d799aacb8df1dce3372f5ec29495e7bb467898e453fc8d8fa32bdc7ecaff738e",
+  "checkpoint_sha256": "64296e4b479855ed23b280ab3ce118e5adc7347e0241a21d6f365f8fe8d28cf2",
   "selected_training_checkpoint": {
-    "name": "last.pt",
-    "sha256": "12712d12e3321dffeb49296285a7d99f8fab12b46aa99a808b5d3cd1da80da22"
+    "name": "stage1-yolo-tiny-v1/best.pt",
+    "sha256": "64296e4b479855ed23b280ab3ce118e5adc7347e0241a21d6f365f8fe8d28cf2"
+  },
+  "continuation": {
+    "base_checkpoint_sha256": "12712d12e3321dffeb49296285a7d99f8fab12b46aa99a808b5d3cd1da80da22",
+    "epochs": 10,
+    "train_images": 1406,
+    "validation_images": 262,
+    "hard_generated_images": 1292,
+    "replay_images": 376,
+    "validation_map50": 0.96698,
+    "validation_map50_95": 0.88334
   },
   "dataset": {
     "path": "/home/marc2026/marc-2026-work/datasets/processed/robust-stage1-yolo34-ceccc62/data.yaml",

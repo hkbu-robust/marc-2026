@@ -12,7 +12,11 @@ from typing import Optional
 
 import numpy as np
 
-from marc_agent.command_parser import MISSION_OBJECT_TYPES
+from marc_agent.command_parser import (
+    MISSION_OBJECT_TYPES,
+    PARKED_VEHICLE_LANDMARKS,
+    PARKING_SCENES,
+)
 from marc_agent.perception.bundle_paths import (
     STAGE1_CCTV_CONTRACT,
     STAGE1_CCTV_WEIGHTS,
@@ -33,9 +37,12 @@ from marc_agent.types import (
 log = logging.getLogger("marc_agent.cctv_yolo")
 
 REFINE_CONF = 0.05
+OBJECT_REFINE_CONF = 0.005
 CROP_PAD_FRAC = 0.15
+OBJECT_CROP_PAD_FRAC = 1.0
 REFINE_DEDUP_IOU = 0.45
 REFINE_IMGSZ = 320
+OBJECT_REFINE_IMGSZ = 1600
 REFINE_CROP_CAP = 8
 POST_SELECT_IOU = 0.25
 
@@ -346,7 +353,7 @@ class CctvYoloDetector:
         target_type: str,
         landmark_classes: frozenset[str],
     ) -> list[ObjectCandidate]:
-        """Re-run YOLO on padded landmark crops when the requested class is missing."""
+        """Re-run YOLO on landmark-context crops to recover missed tiny objects."""
         if not landmark_classes or not target_type:
             return []
         if target_type in self.contract.ignored_classes:
@@ -360,14 +367,67 @@ class CctvYoloDetector:
             counts[(item.camera_id, item.class_name)] += 1
             if item.class_name == target_type:
                 occupied[item.camera_id].append(item.bbox_xyxy)
-        missing = self._landmarks_missing_target(
-            objects, landmark_classes, target_type
+        refine_imgsz = {"umbrella": 1600, "pencilcase": 1280}.get(
+            target_type, 960
         )
-        for camera_id, class_name, confidence, mapped, image_size in (
-            self._predict_around_landmarks(
-                frames, objects, landmark_classes, landmarks=missing
+        refine_confidence = (
+            OBJECT_REFINE_CONF
+            if target_type in {"umbrella", "pencilcase"}
+            else REFINE_CONF
+        )
+        if target_type in {"umbrella", "pencilcase"}:
+            detections = []
+            for camera_id in sorted(frames):
+                frame = frames[camera_id]
+                if frame.rgb is None:
+                    continue
+                try:
+                    predicted = self._predict_frame(
+                        np.asarray(frame.rgb),
+                        imgsz=refine_imgsz,
+                        confidence=refine_confidence,
+                    )
+                except Exception as exc:
+                    if not _is_cuda_oom(exc):
+                        raise
+                    log.warning(
+                        "[cctv-yolo] full-frame refine OOM camera=%s; skipping",
+                        camera_id,
+                    )
+                    predicted = []
+                _release_cuda()
+                detections.extend(
+                    (camera_id, class_name, confidence, bbox, (frame.width, frame.height))
+                    for class_name, confidence, bbox in predicted
+                    if class_name == target_type
+                )
+            detections.extend(
+                item
+                for item in self._predict_around_landmarks(
+                    frames,
+                    objects,
+                    landmark_classes,
+                    landmarks=self._all_landmarks_for_refine(
+                        objects, landmark_classes
+                    ),
+                    pad_frac=OBJECT_CROP_PAD_FRAC,
+                    imgsz=refine_imgsz,
+                    confidence=refine_confidence,
+                )
+                if item[1] == target_type
             )
-        ):
+        else:
+            landmarks = self._all_landmarks_for_refine(objects, landmark_classes)
+            detections = self._predict_around_landmarks(
+                frames,
+                objects,
+                landmark_classes,
+                landmarks=landmarks,
+                pad_frac=OBJECT_CROP_PAD_FRAC,
+                imgsz=refine_imgsz,
+                confidence=refine_confidence,
+            )
+        for camera_id, class_name, confidence, mapped, image_size in detections:
             # Crop inference is deliberately proposal-oriented: tiny mission items
             # are often classified as a visually similar mission class. Qwen sees
             # the crop and resolves the final identity.
@@ -392,6 +452,32 @@ class CctvYoloDetector:
                 )
             )
             occupied[camera_id].append(mapped)
+        if target_type in {"umbrella", "pencilcase"}:
+            landmarks = self._landmarks_for_refine(objects, landmark_classes)
+            missing = [
+                item for item in landmarks if item.camera_id not in occupied
+            ]
+            if len(missing) == 1:
+                # ponytail: a uniquely occluded tiny target uses its landmark as
+                # a projection proxy; replace if invisible-target data becomes available.
+                landmark = missing[0]
+                key = (landmark.camera_id, target_type)
+                proxy = ObjectCandidate(
+                    candidate_id=object_candidate_id(
+                        landmark.camera_id, target_type, counts[key]
+                    ),
+                    class_name=target_type,
+                    bbox_xyxy=landmark.bbox_xyxy,
+                    confidence=OBJECT_REFINE_CONF / 2.0,
+                    camera_id=landmark.camera_id,
+                    image_size=landmark.image_size,
+                )
+                extra.append(proxy)
+                log.info(
+                    "[cctv-yolo] unique-occlusion proxy target=%s landmark=%s",
+                    proxy.candidate_id,
+                    landmark.candidate_id,
+                )
         return extra
 
     def _landmarks_for_refine(
@@ -399,36 +485,27 @@ class CctvYoloDetector:
         objects: list[ObjectCandidate],
         landmark_classes: frozenset[str],
     ) -> list[ObjectCandidate]:
-        """One highest-confidence landmark per camera to bound refine VRAM."""
+        """One highest-confidence landmark per camera to bound person refinement."""
         best: dict[str, ObjectCandidate] = {}
         for item in objects:
             if item.class_name not in landmark_classes:
                 continue
             current = best.get(item.camera_id)
-            if current is None or item.confidence > current.confidence:
-                best[item.camera_id] = item
-                continue
-            if (
-                item.confidence == current.confidence
-                and item.candidate_id < current.candidate_id
+            if current is None or (-item.confidence, item.candidate_id) < (
+                -current.confidence, current.candidate_id
             ):
                 best[item.camera_id] = item
         return [best[camera_id] for camera_id in sorted(best)]
 
-    def _landmarks_missing_target(
+    def _all_landmarks_for_refine(
         self,
         objects: list[ObjectCandidate],
         landmark_classes: frozenset[str],
-        target_type: str,
     ) -> list[ObjectCandidate]:
-        """Every matching landmark on cameras that still lack the target class."""
-        have_target = {
-            item.camera_id for item in objects if item.class_name == target_type
-        }
+        """Matching object landmarks across all cameras, bounded by confidence."""
         picked = [
             item for item in objects
             if item.class_name in landmark_classes
-            and item.camera_id not in have_target
         ]
         picked.sort(key=lambda item: (-float(item.confidence), item.candidate_id))
         return picked[:REFINE_CROP_CAP]
@@ -439,6 +516,9 @@ class CctvYoloDetector:
         objects: list[ObjectCandidate],
         landmark_classes: frozenset[str],
         landmarks: Optional[list[ObjectCandidate]] = None,
+        pad_frac: float = CROP_PAD_FRAC,
+        imgsz: int = REFINE_IMGSZ,
+        confidence: float = REFINE_CONF,
     ) -> list[
         tuple[
             str,
@@ -462,7 +542,9 @@ class CctvYoloDetector:
                 continue
             array = np.asarray(rgb)
             height, width = array.shape[:2]
-            x1, y1, x2, y2 = _pad_box(landmark.bbox_xyxy, (width, height))
+            x1, y1, x2, y2 = _pad_box(
+                landmark.bbox_xyxy, (width, height), pad_frac=pad_frac
+            )
             ix1, iy1 = int(x1), int(y1)
             ix2 = int(max(x1 + 1, x2))
             iy2 = int(max(y1 + 1, y2))
@@ -473,8 +555,8 @@ class CctvYoloDetector:
             try:
                 detections = self._predict_frame(
                     crop,
-                    confidence=REFINE_CONF,
-                    imgsz=min(REFINE_IMGSZ, self.contract.imgsz),
+                    confidence=confidence,
+                    imgsz=min(imgsz, self.contract.imgsz),
                 )
             except Exception as exc:
                 if not _is_cuda_oom(exc):
@@ -716,6 +798,8 @@ def _refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetection
     names = set()
     if parsed.landmark:
         names.add(parsed.landmark)
+    elif parsed.scene_hint in PARKING_SCENES:
+        names.update(PARKED_VEHICLE_LANDMARKS)
     elif parsed.scene_hint == "park":
         names.update({"picnic_table", "bench"})
     if not names:

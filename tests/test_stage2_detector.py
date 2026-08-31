@@ -93,6 +93,7 @@ class Stage2DatasetTests(unittest.TestCase):
         self.assertEqual(20, config["patience"])
         self.assertEqual(10, config["save_period"])
         self.assertTrue(config["cls_remap"])
+        self.assertEqual(0.25, config["cls_pw"])
         self.assertEqual(0.0, config["mosaic"])
         self.assertEqual(0.0, config["mixup"])
         self.assertEqual(0.0, config["cutmix"])

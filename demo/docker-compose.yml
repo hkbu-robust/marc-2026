@@ -41,11 +41,11 @@ services:
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent:/agent/demo"
       PYTHONUNBUFFERED: "1"
-      # Local host by default; STREAM=true selects http://10.0.0.200:8000/v1.
+      # Local host by default; STREAM=true selects http://10.0.0.200:8004/v1.
       MARC_SAR_DETECTOR: "qwen-remote"
       MARC_QWEN_BACKEND: "remote"
       STREAM: "${STREAM:-false}"
-      MARC_QWEN_BASE_URL: "http://127.0.0.1:8000/v1"
+      MARC_QWEN_BASE_URL: "http://127.0.0.1:8004/v1"
       MARC_QWEN_API_KEY: "marc-qwen-secret"
       MARC_QWEN_MODEL: "qwen3-vl-8b"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"

@@ -163,9 +163,10 @@ class MARCClient:
         self._cctv_ground_height = {}   # camera_id -> float (ground-plane world z, m)
         self._cctv_subs = set()   # already-subscribed camera_id
         self._robot_msgs = {}     # suffix -> latest message
-        # (suffix, height, width) -> latest message. Two publishers can share
-        # base_left; the majority 360x640 stream must not erase the chassis 480x640 view.
+        # Multiplexed robot topics are cached by shape and optical frame so
+        # consumers can pair RGB with the corresponding depth publisher.
         self._robot_msgs_by_shape = {}
+        self._robot_msgs_by_frame = {}
         self._robot_subs = set()  # robot suffix already lazily subscribed
         self._world_pose = None   # (x, y, yaw)
         self._occupancy = None    # OccupancyGrid
@@ -504,6 +505,9 @@ class MARCClient:
             w = int(getattr(msg, "width", 0) or 0)
             if h > 0 and w > 0:
                 self._robot_msgs_by_shape[(suffix, h, w)] = msg
+            frame = str(getattr(getattr(msg, "header", None), "frame_id", "") or "")
+            if frame:
+                self._robot_msgs_by_frame[(suffix, frame)] = msg
 
     def _ensure_robot_sub(self, suffix, msg_type, qos):
         """Lazily subscribe to a robot topic (once, on the first getter call)."""
@@ -626,11 +630,7 @@ class MARCClient:
         return self._get_robot(f"{suffix}/image")
 
     def get_robot_image_hw(self, which: str, shape):
-        """Latest RGB frame matching ``(height, width)``, or None.
-
-        Two publishers can share ``base_left``; lock the chassis 480x640 view so
-        the majority 360x640 stream does not starve near-field search.
-        """
+        """Latest RGB frame matching ``(height, width)``, or None."""
         cam = P.ROBOT_CAMERA_SUFFIX.get(which)
         if cam is None:
             raise ValueError(f"Unknown camera '{which}'. Choose one of {list(P.ROBOT_CAMERA_SUFFIX)}.")
@@ -639,6 +639,16 @@ class MARCClient:
         h, w = int(shape[0]), int(shape[1])
         with self._lock:
             return self._robot_msgs_by_shape.get((suffix, h, w))
+
+    def get_robot_image_frame(self, which: str, frame_id: str):
+        """Latest RGB frame from the named optical frame, or None."""
+        cam = P.ROBOT_CAMERA_SUFFIX.get(which)
+        if cam is None:
+            raise ValueError(f"Unknown camera '{which}'. Choose one of {list(P.ROBOT_CAMERA_SUFFIX)}.")
+        suffix = f"{cam}/image"
+        self._ensure_robot_sub(suffix, Image, P.QOS_IMAGE)
+        with self._lock:
+            return self._robot_msgs_by_frame.get((suffix, str(frame_id)))
 
     def get_robot_info(self, which: str = "base_left"):
         """Robot camera intrinsics (sensor_msgs/CameraInfo) or None.

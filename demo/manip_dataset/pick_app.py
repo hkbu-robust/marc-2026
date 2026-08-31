@@ -19,7 +19,7 @@ from .depth_approach import ApproachConfig, DepthApproachController
 from .graspgenx_pick import StagedGraspGenXPickRuntime
 from .keyboard import Keyboard
 from .openvla_pick import StagedOpenVLAPickRuntime, openvla_target_is_safe
-from .pick_target import nearfield_for_approach, snapshot_pick_target
+from .pick_target import nearfield_for_approach, snapshot_pick_target, stable_pick_target
 
 
 class Phase(enum.Enum):
@@ -217,7 +217,7 @@ class PickTestApp:
             self._openvla_pick()
 
     def _snapshot_target(self):
-        return snapshot_pick_target(self.nearfield, self.target_object)
+        return snapshot_pick_target(self.nearfield, self.target_object, log=print)
 
     def _print_pick_result(self, result):
         print(
@@ -234,25 +234,49 @@ class PickTestApp:
 
     def _graspgenx_pick(self):
         self._set_base(0.0, 0.0)
-        with self._base_hold:
-            target = self._snapshot_target()
+        # The shared pose feedback holder can chase chassis reaction to arm motion;
+        # GraspGen-X instead re-localizes late and keeps a zero wheel command latched.
+        grasp_hold = StationaryBase(
+            self.client, log=print, position_kp=0.0, yaw_kp=0.0
+        )
+        with grasp_hold:
+            target = stable_pick_target(
+                self.nearfield, self.target_object, log=print
+            )
             if target is None:
+                print("[pick] GraspGen-X found no safe high-confidence localization")
                 return
             detector = getattr(self.nearfield, "detector", None)
             before_graspgenx(detector)
             runtime = self._ensure_pick("graspgenx")
 
-            def _observe_after_lift():
+            def _observe_target():
                 before_reacquire(runtime, detector)
-                return self.nearfield.snapshot(self.target_object)
+                return stable_pick_target(
+                    self.nearfield, self.target_object, log=print
+                )
 
             if isinstance(runtime, StagedGraspGenXPickRuntime):
-                runtime._target_observer = _observe_after_lift
+                runtime._target_observer = _observe_target
+
+                def _observe_visual_target():
+                    before_reacquire(runtime, detector)
+                    return stable_pick_target(
+                        self.nearfield,
+                        self.target_object,
+                        log=print,
+                        visual=True,
+                        require_reach=False,
+                    )
+
+                runtime._visual_target_observer = _observe_visual_target
 
             def _reacquire():
                 before_reacquire(runtime, detector)
-                nxt = self.nearfield.snapshot(self.target_object)
-                if nxt is not None and getattr(nxt, "valid", False):
+                nxt = stable_pick_target(
+                    self.nearfield, self.target_object, log=print
+                )
+                if nxt is not None:
                     before_graspgenx(detector)
                 return nxt
 

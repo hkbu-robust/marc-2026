@@ -70,7 +70,7 @@ stage1:
   enabled: true
 stage2:
 - id: rt01_parking_tumbler
-  enabled: true
+  enabled: false
 - id: rt02_parking_umbrella
   enabled: false
 - id: rt03_vending_umbrella

@@ -28,6 +28,7 @@ PATCHES = [
     "patch_trainer_people.py",
     "patch_trainer_on_landmark.py",
     "patch_gt_world_xyz.py",
+    "patch_runtime_auto_start_delay.py",
 ]
 
 

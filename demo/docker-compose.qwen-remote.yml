@@ -1,5 +1,5 @@
 # Practice override: send bounded candidate boards to a workstation vLLM server.
-# MARC_QWEN_BASE_URL should include /v1, for example http://192.168.1.20:8000/v1.
+# MARC_QWEN_BASE_URL should include /v1, for example http://192.168.1.20:8004/v1.
 # Build skips the 17.5 GB Qwen Hub pull; the workstation already has the weights.
 services:
   agent:

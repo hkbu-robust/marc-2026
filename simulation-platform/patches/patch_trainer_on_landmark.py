@@ -737,10 +737,22 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                 _stack_ok = any(
                     str(d.get("class") or "").startswith("person_")
                     for d in _dets)
+            # A seated body can overlap the cabinet in projection instead of
+            # appearing strictly above it; the helper already verified 3D contact.
+            _seat_ok = False
+            try:
+                import json as _json_seat
+                _seat_rec = _json_seat.load(
+                    open("/tmp/marc_sar_recipe.json")) or {}
+                _seat_ok = "sitting" in str(
+                    _seat_rec.get("target_pose") or "")
+            except Exception:
+                pass
             # Skip save if the climb landmark is off camera, or if the
             # roof / climber is cropped at the top of the CCTV frame.
             _active_valid = (
-                _n_placed > 0 and _target_in_view and _headroom and _stack_ok)
+                _n_placed > 0 and _target_in_view and _headroom
+                and (_stack_ok or _seat_ok))
             if _n_placed <= 0:
                 log.warning(
                     f"Above scene {scene_id}: constructed stack invariant "
@@ -754,7 +766,7 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                 log.warning(
                     f"Above scene {scene_id}: target={_target or '-'} "
                     f"roof/climber top-clipped; skip save")
-            elif not _stack_ok:
+            elif not (_stack_ok or _seat_ok):
                 log.warning(
                     f"Above scene {scene_id}: target={_target or '-'} "
                     f"climber not visible on support; skip save")
@@ -824,7 +836,7 @@ NEW_SAVE = '''        active_payload = gt_by_mission.get(active_mission_id)
                             _max = min(_max, 1.4)
                     if _dxy > _max:
                         _pair_ok = False
-            if (_rel in ("on", "above")
+            if (bool(rec.get("above")) and _rel in ("on", "above")
                     and _tgt is not None and _sup_d is not None):
                 # _marc_recipe_climb_visible: no same-pose distractor
                 # fallback; person must be stacked on the support in-frame.
@@ -3894,6 +3906,7 @@ def _marc_place_seat_people(mission_id, objects, configurations=None):
         person = _find_person(spec)
         if lm is None or person is None:
             continue
+        _freeze(lm)
         top = _top_xyz(lm)
         if top is None:
             continue
@@ -3905,6 +3918,20 @@ def _marc_place_seat_people(mission_id, objects, configurations=None):
         if "sitting" in pose:
             deg = deg + 90.0
         _yaw_person(person, deg)
+        # _marc_recipe_visual_center: animation meshes are offset from their
+        # USD roots; center the rendered body over the support after yaw.
+        try:
+            box = UsdGeom.Imageable(person).ComputeWorldBound(
+                Usd.TimeCode.Default(), UsdGeom.Tokens.default_).ComputeAlignedBox()
+            lo, hi = box.GetMin(), box.GetMax()
+            pxyz = _world_xyz(person)
+            _set_xyz(person, [
+                pxyz[0] + top[0] - 0.5 * (float(lo[0]) + float(hi[0])),
+                pxyz[1] + top[1] - 0.5 * (float(lo[1]) + float(hi[1])),
+                pxyz[2],
+            ])
+        except Exception:
+            pass
         _freeze(person)
         n += 1
         print(

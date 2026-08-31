@@ -247,7 +247,7 @@ class FetchRuntimeWeightsTests(unittest.TestCase):
         text = Path("demo/docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn('MARC_SAR_DETECTOR: "qwen-remote"', text)
         self.assertIn("MARC_QWEN_BACKEND: remote", text)
-        self.assertIn("http://127.0.0.1:8000/v1", text)
+        self.assertIn("http://127.0.0.1:8004/v1", text)
         self.assertIn("qwen3-vl-8b", text)
         self.assertIn("runtime: nvidia", text)
         self.assertIn('NVIDIA_VISIBLE_DEVICES: "all"', text)
