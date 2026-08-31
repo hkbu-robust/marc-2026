@@ -70,10 +70,19 @@ DEFAULT_LAT_MIN_M = 0.05
 DEFAULT_LAT_MAX_M = 20.0
 # Stop once arm-base forward (same metric as pick localize) is this close (m).
 DEFAULT_STOP_M = 0.56
-# Closer than this: already at pick range — stop with no overrun.
+# Hard range fallback: never drive closer even if the box-edge signal is bad.
 DEFAULT_ALREADY_NEAR_M = 0.44
-INTERMITTENT_LOCK_TARGETS = frozenset(("tissue", "sunblock"))
-TARGET_LOCK_RANGE_PAD_M = 0.10
+# A tall/upright object fills the lower camera view sooner and needs more room
+# for the deterministic overhead stage than the same object lying flat.
+DEFAULT_UPRIGHT_BBOX_ASPECT = 1.20
+DEFAULT_UPRIGHT_ALREADY_NEAR_M = DEFAULT_ALREADY_NEAR_M
+# Preserve this fraction of the image below the YOLO box during final crawl.
+DEFAULT_FRAME_BOTTOM_MARGIN = 0.10
+# Any exact target class may flicker in the base-camera view. A lock is still
+# acquired only after RGB-D localizes that class nearby and roughly centered.
+DEFAULT_TARGET_LOCK_ACQUIRE_PAD_M = 0.25
+DEFAULT_TARGET_LOCK_DRIVE_TOL = 0.10
+TARGET_LOCK_MATCH_RANGE_PAD_M = 0.10
 TARGET_LOCK_WORLD_RADIUS_M = 0.15
 TARGET_LOCK_LAT_RADIUS_M = 0.10
 TARGET_LOCK_Z_RADIUS_M = 0.12
@@ -113,6 +122,11 @@ class ApproachConfig:
     lat_max_m: float = DEFAULT_LAT_MAX_M
     stop_m: float = DEFAULT_STOP_M
     already_near_m: float = DEFAULT_ALREADY_NEAR_M
+    upright_bbox_aspect: float = DEFAULT_UPRIGHT_BBOX_ASPECT
+    upright_already_near_m: float = DEFAULT_UPRIGHT_ALREADY_NEAR_M
+    frame_bottom_margin: float = DEFAULT_FRAME_BOTTOM_MARGIN
+    target_lock_acquire_pad_m: float = DEFAULT_TARGET_LOCK_ACQUIRE_PAD_M
+    target_lock_drive_tol: float = DEFAULT_TARGET_LOCK_DRIVE_TOL
 
     @classmethod
     def from_env(cls) -> "ApproachConfig":
@@ -140,6 +154,24 @@ class ApproachConfig:
             lat_max_m=_env_float("MARC_APPROACH_LAT_MAX_M", DEFAULT_LAT_MAX_M),
             stop_m=_env_float("MARC_APPROACH_STOP_M", DEFAULT_STOP_M),
             already_near_m=_env_float("MARC_APPROACH_ALREADY_NEAR", DEFAULT_ALREADY_NEAR_M),
+            upright_bbox_aspect=_env_float(
+                "MARC_APPROACH_UPRIGHT_BBOX_ASPECT", DEFAULT_UPRIGHT_BBOX_ASPECT
+            ),
+            upright_already_near_m=_env_float(
+                "MARC_APPROACH_UPRIGHT_ALREADY_NEAR",
+                DEFAULT_UPRIGHT_ALREADY_NEAR_M,
+            ),
+            frame_bottom_margin=_env_float(
+                "MARC_APPROACH_FRAME_BOTTOM_MARGIN", DEFAULT_FRAME_BOTTOM_MARGIN
+            ),
+            target_lock_acquire_pad_m=_env_float(
+                "MARC_APPROACH_LOCK_ACQUIRE_PAD_M",
+                DEFAULT_TARGET_LOCK_ACQUIRE_PAD_M,
+            ),
+            target_lock_drive_tol=_env_float(
+                "MARC_APPROACH_LOCK_DRIVE_TOL",
+                DEFAULT_TARGET_LOCK_DRIVE_TOL,
+            ),
         )
 
 
@@ -236,9 +268,9 @@ class DepthApproachController:
         self._near_lock_target = None
 
     def locked_target(self, name: Optional[str]):
-        """Return a maintained near-range intermittent-target localization, if any."""
+        """Return the selected class's maintained near-range localization."""
         target = None if not name else str(name).strip()
-        if target not in INTERMITTENT_LOCK_TARGETS or target != self._target_name:
+        if not target or target != self._target_name:
             return None
         locked = self._near_lock_target
         return locked if locked is not None and getattr(locked, "valid", False) else None
@@ -338,17 +370,26 @@ class DepthApproachController:
         return (
             abs(float(candidate.lat) - float(locked.lat)) <= TARGET_LOCK_LAT_RADIUS_M
             and abs(float(candidate.z) - float(locked.z)) <= TARGET_LOCK_Z_RADIUS_M
-            and float(candidate.fwd) <= float(locked.fwd) + TARGET_LOCK_RANGE_PAD_M
+            and float(candidate.fwd)
+            <= float(locked.fwd) + TARGET_LOCK_MATCH_RANGE_PAD_M
         )
 
     def _reuse_near_lock(self, depth, rgb_shape):
         """Project the locked world coordinate into the robot's current arm frame."""
         if (
-            self._target_name not in INTERMITTENT_LOCK_TARGETS
+            not self._target_name
             or self._near_lock_det is None
+            or str(self._near_lock_det.get("name") or "").strip()
+            != self._target_name
         ):
             return None
         locked = self._near_lock_target
+        if (
+            locked is None
+            or str(getattr(locked, "name", "") or "").strip()
+            != self._target_name
+        ):
+            return None
         world_xy = None if locked is None else getattr(locked, "world_xy", None)
         getter = getattr(self._client, "get_world_pose", None)
         pose = getter() if callable(getter) else None
@@ -384,18 +425,29 @@ class DepthApproachController:
 
     def _maybe_lock_near_target(self, det, localized):
         if (
-            self._target_name not in INTERMITTENT_LOCK_TARGETS
+            not self._target_name
             or det is None
             or localized is None
             or not getattr(localized, "valid", False)
+            or str(det.get("name") or "").strip() != self._target_name
+            or str(getattr(localized, "name", "") or "").strip()
+            != self._target_name
+            or getattr(localized, "world_xy", None) is None
         ):
             return
         max_fwd = max(float(self.cfg.stop_m), float(self.cfg.already_near_m))
-        max_fwd += TARGET_LOCK_RANGE_PAD_M
+        max_fwd += max(0.0, float(self.cfg.target_lock_acquire_pad_m))
         if float(localized.fwd) > max_fwd or abs(float(localized.lat)) > self.cfg.realign:
             return
         if self._near_lock_target is not None and not self._matches_near_lock(localized):
-            return
+            old = self._near_lock_target
+            print(
+                f"[approach] {self._target_name} lock reset: fresh detection "
+                f"conflicts with locked position "
+                f"old=({old.fwd:.3f},{old.lat:.3f}) "
+                f"new=({localized.fwd:.3f},{localized.lat:.3f})"
+            )
+            self._clear_near_lock()
         first = self._near_lock_target is None
         self._near_lock_det = dict(det)
         self._near_lock_det.pop("near_lock_reused", None)
@@ -542,8 +594,9 @@ class DepthApproachController:
             "bbox": None if det is None else det.get("bbox"),
             "area": None if det is None else det.get("area"),
             "target_locked": bool(det is not None and det.get("near_lock_reused")),
+            "target_lock_active": self._near_lock_target is not None,
             "is_new": bool(rgb_new),
-            "rgb_shape": rgb_shape,
+            "rgb_shape": None if det is None else (det.get("rgb_shape") or rgb_shape),
             "depth_shape": depth_shape,
             "stamp": rgb_stamp,
         }
@@ -586,9 +639,37 @@ class DepthApproachController:
     def _too_near(self, m: Optional[dict]) -> bool:
         """YOLO box is already at pick range — do not yaw or keep crawling."""
         d = self._range_m(m)
-        lim = float(self.cfg.already_near_m)
+        lim = self._near_limit(m)
         n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
         return n_obj > 0 and d is not None and lim > 0.0 and d <= lim
+
+    def _near_limit(self, m: Optional[dict]) -> float:
+        """Use a farther hard stop when the current target box is upright."""
+        base = float(self.cfg.already_near_m)
+        if m is None:
+            return base
+        bbox = m.get("bbox")
+        if bbox is None or len(bbox) < 4:
+            return base
+        width = float(bbox[2]) - float(bbox[0])
+        height = float(bbox[3]) - float(bbox[1])
+        if width <= 1.0 or height / width < float(self.cfg.upright_bbox_aspect):
+            return base
+        return max(base, float(self.cfg.upright_already_near_m))
+
+    def _frame_bottom_limit(self, m: Optional[dict]) -> bool:
+        """True before forward motion would crop the object's lower edge."""
+        if m is None or int(m.get("lat_n_obj") or 0) <= 0:
+            return False
+        bbox = m.get("bbox")
+        shape = m.get("rgb_shape")
+        if bbox is None or shape is None or len(bbox) < 4 or len(shape) < 2:
+            return False
+        height = float(shape[0])
+        margin = min(0.45, max(0.0, float(self.cfg.frame_bottom_margin)))
+        if height <= 0.0 or margin <= 0.0:
+            return False
+        return float(bbox[3]) >= height * (1.0 - margin)
 
     def _obj_stop(self, m: Optional[dict]) -> bool:
         """Arm-base forward is close enough to stop, and not far off-axis."""
@@ -619,14 +700,27 @@ class DepthApproachController:
         n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
         is_new = bool(m is not None and m.get("is_new"))
         has_obj = lat is not None and n_obj > 0
+        lock_active = bool(m is not None and m.get("target_lock_active"))
         if has_obj:
             self._lat_err = float(lat)
         err = self._lat_err
         speed = self._speed()
         since = now - (self._phase_t0 or now)
 
-        if self._too_near(m):
+        if self._too_near(m) or self._frame_bottom_limit(m):
             return 0.0, 0.0
+        lock_drive_tol = min(
+            float(self.cfg.realign),
+            max(float(self.cfg.center_tol), float(self.cfg.target_lock_drive_tol)),
+        )
+        if lock_active and has_obj and abs(float(lat)) <= lock_drive_tol:
+            if self._phase != "drive":
+                self._enter(
+                    "drive",
+                    f"spatial lock err={float(lat):+.2f} "
+                    f"tol={lock_drive_tol:.2f}",
+                )
+            return speed, 0.0
         if self._is_centered(m):
             if self._phase != "drive":
                 self._enter("drive", f"already centered err={err:+.2f}")
@@ -823,7 +917,12 @@ class DepthApproachController:
         self._hit_count = 0
         self._timeout_logged = False
         m0 = self._measure()
-        if self._too_near(m0):
+        if self._frame_bottom_limit(m0):
+            self._enter("drive", "object at frame margin")
+            self._arrive_now = True
+            self._skip_overrun = True
+            self._detect_reason = "object at frame margin"
+        elif self._too_near(m0):
             self._enter("drive", "already near")
             self._arrive_now = True
             self._skip_overrun = True
@@ -852,13 +951,18 @@ class DepthApproachController:
             f"yaw=[{self.cfg.yaw_min},{self.cfg.yaw_max}]  "
             f"center_tol={self.cfg.center_tol} realign={self.cfg.realign} "
             f"hold={self.cfg.align_hold}  burst={self.cfg.burst_m:.3f}m  "
-            f"stop={self.cfg.stop_m:.2f}m  already_near={self.cfg.already_near_m:.2f}m"
+            f"stop={self.cfg.stop_m:.2f}m  already_near={self.cfg.already_near_m:.2f}m  "
+            f"upright_near={self.cfg.upright_already_near_m:.2f}m  "
+            f"bottom_margin={self.cfg.frame_bottom_margin:.0%}  "
+            f"lock≤{max(self.cfg.stop_m, self.cfg.already_near_m) + self.cfg.target_lock_acquire_pad_m:.2f}m "
+            f"lock_err≤{self.cfg.target_lock_drive_tol:.2f}"
         )
         print(
             "[approach] live: err from YOLO box vs image center; "
             "fwd=arm-base forward (pick localize); d=bbox depth. "
-            "obj=used/raw. ALIGN waits for a detection "
-            "(does not drive blind). Lost box → re-ALIGN, not stop."
+            "obj=used/raw. A nearby centered detection establishes a "
+            "class-specific world lock; flicker then follows that lock. "
+            "Without a valid lock, ALIGN waits and never drives blind."
         )
         return True
 
@@ -918,6 +1022,8 @@ class DepthApproachController:
                 f"[approach] t={t_s:5.2f}s  OVERRUN {elapsed:.2f}/{need:.2f}s "
                 f"fwd={d_s} d={b_s}  pick≤{self.cfg.already_near_m:.2f}m"
             )
+        if self._frame_bottom_limit(m):
+            return self._stop_approach("object at frame margin", t_s)
         if self._too_near(m):
             d_s = "--" if d is None else f"{d:.3f}"
             return self._stop_approach(f"overrun pick range fwd={d_s}", t_s)
@@ -996,7 +1102,8 @@ class DepthApproachController:
             return False
 
         lin, ang = self._command(m)
-        near = self._obj_stop(m) or self._too_near(m)
+        frame_limit = self._frame_bottom_limit(m)
+        near = self._obj_stop(m) or self._too_near(m) or frame_limit
         if near and m.get("is_new"):
             self._hit_count += 1
         elif not near:
@@ -1008,6 +1115,8 @@ class DepthApproachController:
                 flags.append("NEAR")
             if self._obj_stop(m):
                 flags.append("STOPD")
+            if frame_limit:
+                flags.append("FRAME")
             if m.get("target_locked"):
                 flags.append("TARGET_LOCK")
             fps = None if not self._frame_dt else 1.0 / self._frame_dt
@@ -1034,11 +1143,13 @@ class DepthApproachController:
 
         if self._hit_count >= self.cfg.persist_k:
             rng = self._range_m(m)
-            if self._too_near(m):
+            if frame_limit:
+                reason = "object at frame margin"
+            elif self._too_near(m):
                 reason = "already near"
             else:
                 reason = f"fwd={rng:.3f}" if rng is not None else "in range"
-            if self._too_near(m) or self._overrun_duration_s() <= 0.0:
+            if frame_limit or self._too_near(m) or self._overrun_duration_s() <= 0.0:
                 return self._stop_approach(f"{reason} (no overrun)", t_s)
             self._begin_overrun(reason, rng)
             return False

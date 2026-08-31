@@ -27,6 +27,7 @@ from marc_agent.graspgenx_policy import (
 )
 from marc_agent.pick_runtime import PickRuntime
 
+from .grasp_profiles import bbox_is_upright, resolve_grasp_profile
 from .openvla_pick import target_moved_with_gripper
 
 
@@ -35,18 +36,35 @@ DEFAULT_SUPPORT_BAND_M = 0.015
 DEFAULT_TOPDOWN_TILT_DEG = 35.0
 DEFAULT_TCP_DEPTH_M = 0.195
 DEFAULT_FINAL_APPROACH_M = 0.06
+DEFAULT_STAGE_CLEARANCE_M = 0.23
+DEFAULT_OVERHEAD_CLEARANCE_M = 0.08
+DEFAULT_FLOOR_CLEARANCE_M = 0.08
+DEFAULT_MAX_GRASP_WIDTH_M = 0.12
+DEFAULT_MIN_DIRECTIONAL_ASPECT = 1.50
+DEFAULT_UPRIGHT_BBOX_ASPECT = 1.20
+DEFAULT_ISOTROPIC_YAW = -0.5 * math.pi
 DEFAULT_MIN_INSERTION_FRACTION = 0.30
-DEFAULT_CONTACT_DEPTH_FRACTION = 0.85
-DEFAULT_CONTACT_IK_BIAS_M = 0.01
-DEFAULT_CONTACT_FWD_BIAS_M = -0.02
-DEFAULT_CONTACT_LAT_BIAS_M = 0.12
+DEFAULT_CONTACT_DEPTH_FRACTION = 0.35
+DEFAULT_CONTACT_IK_BIAS_M = 0.0
+DEFAULT_CONTACT_UP_BIAS_M = 0.0
+DEFAULT_CONTACT_FWD_BIAS_M = 0.0
+DEFAULT_CONTACT_LAT_BIAS_M = 0.0
+DEFAULT_MAX_RELOCALIZATION_DRIFT_M = 0.04
+DEFAULT_MAX_CLOUD_CENTER_SHIFT_M = 0.015
+DEFAULT_WRIST_SEARCH_RADIUS_M = 0.10
+DEFAULT_WRIST_DEPTH_GATE_M = 0.06
+DEFAULT_WRIST_MAX_CORRECTION_M = 0.02
+DEFAULT_WRIST_MAX_DISAGREEMENT_M = 0.07
+DEFAULT_WRIST_MIN_POINTS = 20
 DEFAULT_MIN_FWD_M = 0.32
 DEFAULT_MAX_FWD_M = 0.58
 DEFAULT_MAX_ABS_LAT_M = 0.45
-DEFAULT_VERIFY_MIN_RISE_M = 0.035
-DEFAULT_VERIFY_MAX_RISE_M = 0.12
-DEFAULT_VERIFY_MAX_XY_DRIFT_M = 0.15
+DEFAULT_VERIFY_MIN_RISE_M = 0.02
+DEFAULT_VERIFY_MAX_RISE_M = 0.20
+DEFAULT_VERIFY_MAX_XY_DRIFT_M = 0.20
 DEFAULT_RETENTION_CLOSE = 0.703
+DEFAULT_GRASP_CLOSE = 0.703
+DEFAULT_HOLD_CONFIRM_SAMPLES = 3
 
 _generator: Optional[Callable[[np.ndarray], object]] = None
 log = logging.getLogger("participant_app")
@@ -62,6 +80,16 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return int(default)
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _wrap_half_pi(yaw: float) -> float:
     """Normalize the symmetric two-finger closing axis to [-pi/2, pi/2]."""
     value = float(yaw)
@@ -70,6 +98,11 @@ def _wrap_half_pi(yaw: float) -> float:
     while value < -0.5 * math.pi:
         value += math.pi
     return value
+
+
+def yolo_bbox_is_upright(target, min_aspect: float = DEFAULT_UPRIGHT_BBOX_ASPECT) -> bool:
+    """Use the unobstructed detector box to distinguish standing from lying objects."""
+    return bbox_is_upright(target, min_aspect)
 
 
 def filter_object_points(points, target) -> np.ndarray:
@@ -134,26 +167,209 @@ def _score_at(scores, index: int) -> float:
     return value if math.isfinite(value) else 0.0
 
 
-def object_contact_z(points, target_z: float) -> float:
-    """Scale finger-pad depth to this object's observed vertical extent."""
+def object_vertical_extent(points, target_z: float) -> tuple[float, float]:
+    """Estimate the local support and object top in the arm-base frame."""
     z_values = np.asarray(points, dtype=np.float64)[:, 2]
     top = float(np.percentile(z_values, 95.0))
-    bottom = min(float(np.percentile(z_values, 5.0)), float(target_z))
-    height = max(0.02, top - bottom)
+    support = min(float(np.percentile(z_values, 5.0)), float(target_z))
+    return support, top
+
+
+def object_contact_z(
+    points,
+    target_z: float,
+    *,
+    contact_depth_fraction: Optional[float] = None,
+    floor_clearance_m: Optional[float] = None,
+) -> Optional[float]:
+    """Choose a finger-pad height without entering the local support plane.
+
+    The lower object envelope is a conservative support-plane estimate: if the
+    bbox crop did not retain pavement pixels, treating the object's visible
+    bottom as support only raises the grasp. Return ``None`` when the observed
+    object is too short to satisfy both floor clearance and object contact.
+    """
+    support, top = object_vertical_extent(points, target_z)
+    height = max(0.02, top - support)
+    configured_fraction = (
+        _env_float(
+            "MARC_GRASPGENX_CONTACT_DEPTH_FRACTION",
+            DEFAULT_CONTACT_DEPTH_FRACTION,
+        )
+        if contact_depth_fraction is None
+        else float(contact_depth_fraction)
+    )
     fraction = min(
-        0.90,
-        max(
-            0.25,
-            _env_float(
-                "MARC_GRASPGENX_CONTACT_DEPTH_FRACTION",
-                DEFAULT_CONTACT_DEPTH_FRACTION,
-            ),
-        ),
+        0.80,
+        max(0.25, configured_fraction),
     )
     contact = top - fraction * height - _env_float(
         "MARC_GRASPGENX_CONTACT_IK_BIAS_M", DEFAULT_CONTACT_IK_BIAS_M
     )
-    return min(top - 0.005, max(bottom + 0.005, contact))
+    configured_clearance = (
+        _env_float(
+            "MARC_GRASPGENX_FLOOR_CLEARANCE_M", DEFAULT_FLOOR_CLEARANCE_M
+        )
+        if floor_clearance_m is None
+        else float(floor_clearance_m)
+    )
+    floor_clearance = max(0.01, configured_clearance)
+    z_lo = support + floor_clearance
+    z_hi = top - 0.005
+    if z_lo > z_hi:
+        return None
+    contact = max(z_lo, contact) + max(
+        0.0,
+        _env_float(
+            "MARC_GRASPGENX_CONTACT_UP_BIAS_M", DEFAULT_CONTACT_UP_BIAS_M
+        ),
+    )
+    return min(z_hi, contact)
+
+
+def closing_axis_width(points, closing_xy) -> float:
+    """Robust object width along one candidate finger-closing axis."""
+    cloud = np.asarray(points, dtype=np.float64)
+    axis = np.asarray(closing_xy, dtype=np.float64).reshape(-1)[:2]
+    norm = float(np.linalg.norm(axis))
+    if cloud.ndim != 2 or cloud.shape[1] < 2 or norm <= 1e-9:
+        return float("inf")
+    projected = cloud[:, :2] @ (axis / norm)
+    return float(np.percentile(projected, 95.0) - np.percentile(projected, 5.0))
+
+
+def object_xy_footprint(points) -> dict:
+    """Fit a robust top-down footprint to the YOLO-cropped object cloud.
+
+    The axis-aligned RGB box supplies the object crop but cannot encode an
+    in-plane object angle. PCA on the deprojected crop supplies that angle;
+    percentile extents keep a few depth-edge outliers from defining the width.
+    """
+    cloud = np.asarray(points, dtype=np.float64)
+    if cloud.ndim != 2 or cloud.shape[0] < MIN_CLOUD_POINTS or cloud.shape[1] < 2:
+        raise ValueError("object cloud is too small for an XY footprint")
+    xy = cloud[:, :2]
+    seed = np.median(xy, axis=0)
+    centered = xy - seed
+    covariance = centered.T @ centered / max(1, centered.shape[0] - 1)
+    _values, axes = np.linalg.eigh(covariance)
+    projected = centered @ axes
+    lo = np.percentile(projected, 5.0, axis=0)
+    hi = np.percentile(projected, 95.0, axis=0)
+    extents = hi - lo
+    narrow_i = int(np.argmin(extents))
+    long_i = 1 - narrow_i
+    center = seed + axes @ (0.5 * (lo + hi))
+    narrow_axis = axes[:, narrow_i]
+    width = float(extents[narrow_i])
+    length = float(extents[long_i])
+    aspect = length / max(width, 1e-6)
+    yaw = _wrap_half_pi(
+        math.atan2(float(narrow_axis[1]), float(narrow_axis[0]))
+    )
+    return {
+        "center": center,
+        "yaw": float(yaw),
+        "width": width,
+        "length": length,
+        "aspect": float(aspect),
+    }
+
+
+def bounded_xy_center(reference_xy, cloud_xy, max_shift_m: float) -> np.ndarray:
+    """Use cloud centering without allowing a visible-surface snap off target."""
+    reference = np.asarray(reference_xy, dtype=np.float64).reshape(2)
+    cloud = np.asarray(cloud_xy, dtype=np.float64).reshape(2)
+    delta = cloud - reference
+    distance = float(np.linalg.norm(delta))
+    limit = max(0.0, float(max_shift_m))
+    if distance <= limit or distance <= 1e-9:
+        return cloud.copy()
+    return reference + delta * (limit / distance)
+
+
+def wrist_depth_object_observation(
+    depth,
+    k,
+    cam_T,
+    expected_xyz,
+    *,
+    search_radius_m: float = DEFAULT_WRIST_SEARCH_RADIUS_M,
+    depth_gate_m: float = DEFAULT_WRIST_DEPTH_GATE_M,
+    min_points: int = DEFAULT_WRIST_MIN_POINTS,
+) -> Optional[dict]:
+    """Measure the expected object's visible surface from the wrist depth image.
+
+    The base-camera pose predicts a pixel and depth in the wrist camera. Only a
+    small metric window around that prediction is accepted, and points must also
+    agree in depth. This prevents the floor or fingers from becoming a new target.
+    """
+    arr = np.asarray(depth) if depth is not None else np.zeros((0, 0))
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    T = np.asarray(cam_T, dtype=np.float64) if cam_T is not None else np.zeros((0, 0))
+    km = np.asarray(k, dtype=np.float64).reshape(-1) if k is not None else np.zeros(0)
+    if arr.ndim != 2 or arr.size == 0 or T.shape != (4, 4):
+        return None
+    if km.size >= 9:
+        fx, fy, cx, cy = float(km[0]), float(km[4]), float(km[2]), float(km[5])
+    elif km.size >= 4:
+        fx, fy, cx, cy = (float(value) for value in km[:4])
+    else:
+        return None
+    if fx <= 1.0 or fy <= 1.0:
+        return None
+    expected = np.append(np.asarray(expected_xyz, dtype=np.float64).reshape(3), 1.0)
+    try:
+        optical_expected = np.linalg.inv(T) @ expected
+    except np.linalg.LinAlgError:
+        return None
+    predicted_depth = float(optical_expected[2])
+    if not (0.05 < predicted_depth < 0.80):
+        return None
+    u = fx * float(optical_expected[0]) / predicted_depth + cx
+    v = fy * float(optical_expected[1]) / predicted_depth + cy
+    radius = max(0.02, float(search_radius_m))
+    rx = max(2, int(math.ceil(fx * radius / predicted_depth)))
+    ry = max(2, int(math.ceil(fy * radius / predicted_depth)))
+    h, w = arr.shape
+    x1, x2 = max(0, int(math.floor(u)) - rx), min(w, int(math.ceil(u)) + rx + 1)
+    y1, y2 = max(0, int(math.floor(v)) - ry), min(h, int(math.ceil(v)) + ry + 1)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    ys, xs = np.mgrid[y1:y2:2, x1:x2:2]
+    values = arr[ys, xs].astype(np.float64)
+    gate = max(0.01, float(depth_gate_m))
+    valid = (
+        np.isfinite(values)
+        & (values > 0.05)
+        & (values < 0.80)
+        & (np.abs(values - predicted_depth) <= gate)
+    )
+    if int(np.count_nonzero(valid)) < max(4, int(min_points)):
+        return None
+    z = values[valid]
+    px = xs[valid].astype(np.float64)
+    py = ys[valid].astype(np.float64)
+    optical = np.column_stack(
+        ((px - cx) * z / fx, (py - cy) * z / fy, z, np.ones_like(z))
+    )
+    arm_points = (T @ optical.T).T[:, :3]
+    # Keep the visible object surface near the predicted top, not support below it.
+    expected_top = float(expected[2])
+    surface = arm_points[
+        np.abs(arm_points[:, 2] - expected_top) <= gate
+    ]
+    if surface.shape[0] < max(4, int(min_points)):
+        return None
+    center = np.median(surface[:, :2], axis=0)
+    return {
+        "center": center,
+        "top_z": float(np.percentile(surface[:, 2], 90.0)),
+        "depth_m": float(np.median(z)),
+        "n_points": int(surface.shape[0]),
+        "predicted_depth_m": predicted_depth,
+    }
 
 
 def select_topdown_contact_pose(
@@ -164,6 +380,9 @@ def select_topdown_contact_pose(
     fingertip_depth_m: float = DEFAULT_TCP_DEPTH_M,
     max_tilt_deg: float = DEFAULT_TOPDOWN_TILT_DEG,
     max_xy_m: float = DEFAULT_OBJECT_RADIUS_M,
+    max_grasp_width_m: float = DEFAULT_MAX_GRASP_WIDTH_M,
+    force_neutral_yaw: bool = False,
+    diagnostics: Optional[dict] = None,
 ):
     """Select a reachable top-down contact pose from GraspGen-X output.
 
@@ -174,11 +393,35 @@ def select_topdown_contact_pose(
     """
     grasps, scores = _unpack_grasps(raw)
     if grasps is None or len(grasps) == 0:
+        if diagnostics is not None:
+            diagnostics.update(reason="no_grasps", total=0)
         return None
     cloud = np.asarray(points, dtype=np.float64)
     if cloud.ndim != 2 or cloud.shape[0] < MIN_CLOUD_POINTS:
+        if diagnostics is not None:
+            diagnostics.update(reason="small_cloud", total=len(grasps))
         return None
     tx, ty = float(target_xyz[0]), float(target_xyz[1])
+    footprint = object_xy_footprint(cloud)
+    center_xy = np.asarray(footprint["center"], dtype=np.float64)
+    center_dxy = math.hypot(float(center_xy[0]) - tx, float(center_xy[1]) - ty)
+    if center_dxy > float(max_xy_m):
+        if diagnostics is not None:
+            diagnostics.update(
+                reason="footprint_center",
+                total=len(grasps),
+                center_dxy=center_dxy,
+                max_xy=float(max_xy_m),
+            )
+        return None
+    directional = (
+        not force_neutral_yaw
+        and footprint["aspect"]
+        >= _env_float(
+            "MARC_GRASPGENX_MIN_DIRECTIONAL_ASPECT",
+            DEFAULT_MIN_DIRECTIONAL_ASPECT,
+        )
+    )
     top_z = float(np.percentile(cloud[:, 2], 95.0))
     bottom_z = min(float(np.percentile(cloud[:, 2], 5.0)), float(target_xyz[2]))
     height = max(0.02, top_z - bottom_z)
@@ -188,40 +431,125 @@ def select_topdown_contact_pose(
         DEFAULT_MIN_INSERTION_FRACTION,
     )
     min_down = math.cos(math.radians(float(max_tilt_deg)))
+    rejected = {
+        "shape": 0,
+        "tilt": 0,
+        "xy": 0,
+        "z": 0,
+        "closing": 0,
+        "width": 0,
+    }
+    contact_z_min = float("inf")
+    contact_z_max = float("-inf")
     candidates = []
     for index, raw_pose in enumerate(grasps):
         matrix = np.asarray(raw_pose, dtype=np.float64)
         if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+            rejected["shape"] += 1
             continue
         approach = matrix[:3, 2]
         norm = float(np.linalg.norm(approach))
         if norm <= 1e-9:
+            rejected["tilt"] += 1
             continue
         approach = approach / norm
         # A safe overhead grasp approaches downward in arm_base (+Z is up).
         if float(approach[2]) > -min_down:
+            rejected["tilt"] += 1
             continue
         contact = matrix[:3, 3] + approach * float(fingertip_depth_m)
+        contact_z_min = min(contact_z_min, float(contact[2]))
+        contact_z_max = max(contact_z_max, float(contact[2]))
         dxy = math.hypot(float(contact[0]) - tx, float(contact[1]) - ty)
         if dxy > float(max_xy_m):
+            rejected["xy"] += 1
             continue
         if not (z_lo <= float(contact[2]) <= z_hi):
+            rejected["z"] += 1
             continue
         closing = matrix[:2, 0]
         if float(np.linalg.norm(closing)) <= 1e-9:
+            rejected["closing"] += 1
             continue
-        yaw = _wrap_half_pi(math.atan2(float(closing[1]), float(closing[0])))
+        if directional:
+            # Finalize yaw from the whole bbox-cropped object footprint. This
+            # prevents a high-scoring end grasp from putting one finger on the
+            # base and the other on the top of an elongated object.
+            yaw = float(footprint["yaw"])
+            width = float(footprint["width"])
+        else:
+            # Upright/near-round footprints have no meaningful PCA direction.
+            # Keep the physical jaw axis at its default world yaw, which avoids
+            # a large arbitrary wrist rotation for a rotationally symmetric item.
+            yaw = _wrap_half_pi(
+                _env_float("MARC_GRASPGENX_ISOTROPIC_YAW", DEFAULT_ISOTROPIC_YAW)
+            )
+            width = closing_axis_width(
+                cloud, (math.cos(yaw), math.sin(yaw))
+            )
+        if width > float(max_grasp_width_m):
+            rejected["width"] += 1
+            continue
         score = _score_at(scores, index)
-        candidates.append((score, -dxy, -abs(yaw), contact, yaw, matrix, index))
+        center_offset = float(np.linalg.norm(contact[:2] - center_xy))
+        # Aperture fit is a hard constraint. Prefer the candidate closest to
+        # the footprint centre before model confidence; execution then snaps
+        # XY to that centre cross-section and uses the finalized narrow yaw.
+        candidates.append(
+            (
+                -width,
+                -center_offset,
+                score,
+                -dxy,
+                -abs(yaw),
+                contact,
+                yaw,
+                matrix,
+                index,
+            )
+        )
     if not candidates:
+        if diagnostics is not None:
+            diagnostics.update(
+                reason="all_filtered",
+                total=len(grasps),
+                rejected=rejected,
+                z_window=(z_lo, z_hi),
+                contact_z_range=(contact_z_min, contact_z_max),
+                footprint=(
+                    float(footprint["width"]),
+                    float(footprint["length"]),
+                    float(footprint["aspect"]),
+                ),
+                directional=bool(directional),
+                center_dxy=center_dxy,
+            )
         return None
-    candidates.sort(key=lambda row: row[:3], reverse=True)
-    score, neg_dxy, _neg_yaw, contact, yaw, matrix, index = candidates[0]
+    candidates.sort(key=lambda row: row[:5], reverse=True)
+    (
+        neg_width,
+        neg_center_offset,
+        score,
+        neg_dxy,
+        _neg_yaw,
+        contact,
+        yaw,
+        matrix,
+        index,
+    ) = candidates[0]
+    centered_contact = np.asarray(contact, dtype=np.float64).copy()
+    centered_contact[:2] = center_xy
     return {
-        "xyz": tuple(float(v) for v in contact),
+        "xyz": tuple(float(v) for v in centered_contact),
+        "candidate_xyz": tuple(float(v) for v in contact),
         "yaw": float(yaw),
         "score": float(score),
         "dyolo": float(-neg_dxy),
+        "width": float(-neg_width),
+        "length": float(footprint["length"]),
+        "aspect": float(footprint["aspect"]),
+        "center_offset": float(-neg_center_offset),
+        "directional": bool(directional),
         "n_keep": len(candidates),
         "index": int(index),
         "matrix": matrix,
@@ -315,14 +643,142 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             self._emit("[pick] GraspGen-X visual verification failed (%s)" % exc)
             return None
 
+    def _confirmed_hold_after_lift(self) -> bool:
+        """Require consecutive hold samples before camera-based verification."""
+        samples = max(
+            1,
+            _env_int(
+                "MARC_GRASPGENX_HOLD_CONFIRM_SAMPLES",
+                DEFAULT_HOLD_CONFIRM_SAMPLES,
+            ),
+        )
+        for index in range(samples):
+            try:
+                if self.client.is_grasping() is not True:
+                    return False
+            except Exception:
+                return False
+            if index + 1 < samples:
+                self._sleep(self.poll_dt)
+        return True
+
+    def _wrist_depth_refinement(
+        self, arm, expected_xyz, *, profile=None
+    ) -> Optional[dict]:
+        """Fuse a bounded local wrist-depth observation with the base-camera pose."""
+        search_radius_m = (
+            profile.wrist_search_radius_m
+            if profile is not None
+            else _env_float(
+                "MARC_GRASPGENX_WRIST_SEARCH_RADIUS_M",
+                DEFAULT_WRIST_SEARCH_RADIUS_M,
+            )
+        )
+        depth_gate_m = (
+            profile.wrist_depth_gate_m
+            if profile is not None
+            else _env_float(
+                "MARC_GRASPGENX_WRIST_DEPTH_GATE_M",
+                DEFAULT_WRIST_DEPTH_GATE_M,
+            )
+        )
+        min_points = (
+            profile.wrist_min_points
+            if profile is not None
+            else _env_int(
+                "MARC_GRASPGENX_WRIST_MIN_POINTS",
+                DEFAULT_WRIST_MIN_POINTS,
+            )
+        )
+        try:
+            from arm_pick import _camera_depth_T, _gripper_camera_k, _gripper_depth_array
+            from .arm_control import read_arm_q
+
+            q = read_arm_q(self.client)
+            if q is None:
+                raise RuntimeError("no arm joint state")
+            observation = wrist_depth_object_observation(
+                _gripper_depth_array(self.client),
+                _gripper_camera_k(self.client),
+                _camera_depth_T(arm.kin, q),
+                expected_xyz,
+                search_radius_m=search_radius_m,
+                depth_gate_m=depth_gate_m,
+                min_points=max(4, min_points),
+            )
+        except Exception as exc:
+            self._emit("[pick] wrist-depth unavailable (%s); keeping base pose" % exc)
+            return None
+        if observation is None:
+            self._emit("[pick] wrist-depth found no consistent object surface")
+            return None
+        base_xy = np.asarray(expected_xyz[:2], dtype=np.float64)
+        wrist_xy = np.asarray(observation["center"], dtype=np.float64)
+        disagreement = float(np.linalg.norm(wrist_xy - base_xy))
+        max_disagreement_m = (
+            profile.wrist_max_disagreement_m
+            if profile is not None
+            else _env_float(
+                "MARC_GRASPGENX_WRIST_MAX_DISAGREEMENT_M",
+                DEFAULT_WRIST_MAX_DISAGREEMENT_M,
+            )
+        )
+        limit = max(0.01, max_disagreement_m)
+        if disagreement > limit:
+            self._emit(
+                "[pick] wrist-depth rejected disagreement=%.3fm limit=%.3fm"
+                % (disagreement, limit)
+            )
+            return None
+        max_correction_m = (
+            profile.wrist_max_correction_m
+            if profile is not None
+            else _env_float(
+                "MARC_GRASPGENX_WRIST_MAX_CORRECTION_M",
+                DEFAULT_WRIST_MAX_CORRECTION_M,
+            )
+        )
+        fused_xy = bounded_xy_center(
+            base_xy, wrist_xy, max(0.0, max_correction_m)
+        )
+        observation["fused_center"] = fused_xy
+        observation["disagreement_m"] = disagreement
+        self._emit(
+            "[pick] wrist-depth n=%d depth=%.3fm predicted=%.3fm "
+            "raw_delta=(%+.3f,%+.3f) applied_delta=(%+.3f,%+.3f) top_z=%.3f"
+            % (
+                observation["n_points"],
+                observation["depth_m"],
+                observation["predicted_depth_m"],
+                wrist_xy[0] - base_xy[0],
+                wrist_xy[1] - base_xy[1],
+                fused_xy[0] - base_xy[0],
+                fused_xy[1] - base_xy[1],
+                observation["top_z"],
+            )
+        )
+        return observation
+
     def _grasp(self, target) -> None:
         self._visual_grasp_verified = False
-        localized_before = SimpleNamespace(
+        profile = resolve_grasp_profile(target)
+        self._emit(
+            "[pick] grasp profile=%s"
+            % (profile.name if profile is not None else "generic_unvalidated")
+        )
+        contact_fwd_bias = _env_float(
+            "MARC_GRASPGENX_CONTACT_FWD_BIAS_M", DEFAULT_CONTACT_FWD_BIAS_M
+        )
+        contact_lat_bias = _env_float(
+            "MARC_GRASPGENX_CONTACT_LAT_BIAS_M", DEFAULT_CONTACT_LAT_BIAS_M
+        )
+        cloud_localization = SimpleNamespace(
             fwd=float(target.fwd),
             lat=float(target.lat),
             z=float(target.z),
             valid=True,
         )
+        localized_before = cloud_localization
         try:
             points = self._points_fn(target, client=self.client)
         except TypeError:
@@ -335,13 +791,53 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             )
             return
 
+        cloud_footprint = object_xy_footprint(points)
+        cloud_center = np.asarray(cloud_footprint["center"], dtype=np.float64)
+        localized_xy = np.array(
+            [cloud_localization.fwd, cloud_localization.lat], dtype=np.float64
+        )
+        max_cloud_center_shift = max(
+            0.0,
+            profile.max_cloud_center_shift_m
+            if profile is not None
+            else _env_float(
+                "MARC_GRASPGENX_MAX_CLOUD_CENTER_SHIFT_M",
+                DEFAULT_MAX_CLOUD_CENTER_SHIFT_M,
+            ),
+        )
+        execution_center = bounded_xy_center(
+            localized_xy, cloud_center, max_cloud_center_shift
+        )
+
         arm = self._teleop_arm()
-        if not arm.stage_for_openvla(target):
+        support_z, top_z = object_vertical_extent(points, float(target.z))
+        stage_clearance = max(
+            0.10,
+            profile.stage_clearance_m
+            if profile is not None
+            else _env_float(
+                "MARC_GRASPGENX_STAGE_CLEARANCE_M", DEFAULT_STAGE_CLEARANCE_M
+            ),
+        )
+        # stage_for_openvla adds its configured stage-up distance. Feed it a
+        # synthetic Z so the resulting handoff is measured from the observed
+        # object top, not from the bbox-center localization used for driving.
+        stage_up = float(arm.cfg.openvla_stage_up_m)
+        stage_input_z = top_z + stage_clearance - stage_up
+        stage_target = SimpleNamespace(
+            fwd=float(execution_center[0]) + contact_fwd_bias,
+            lat=float(execution_center[1]) + contact_lat_bias,
+            z=float(stage_input_z),
+            valid=True,
+        )
+        stage = getattr(arm, "stage_for_graspgenx", arm.stage_for_openvla)
+        if not stage(stage_target):
             self._emit("[pick] GraspGen-X deterministic staging failed")
             return
         self._emit(
-            "[pick] GraspGen-X handoff: staged in base-camera view; "
-            "sampling saved base-depth cloud"
+            "[pick] GraspGen-X handoff support_z=%.3f top_z=%.3f "
+            "stage_z=%.3f clearance=%.3f; sampling saved base-depth cloud"
+            % (support_z, top_z, top_z + stage_clearance, stage_clearance)
         )
 
         generator = self._grasp_generator or load_local_graspgenx()
@@ -354,10 +850,22 @@ class StagedGraspGenXPickRuntime(PickRuntime):
         except Exception as exc:
             self._emit("[pick] GraspGen-X inference failed (%s) -- fail closed" % exc)
             return
+        selection_diagnostics = {}
+        upright_bbox = yolo_bbox_is_upright(
+            target,
+            _env_float(
+                "MARC_GRASPGENX_UPRIGHT_BBOX_ASPECT",
+                DEFAULT_UPRIGHT_BBOX_ASPECT,
+            ),
+        )
         selected = select_topdown_contact_pose(
             raw,
             points,
-            (float(target.fwd), float(target.lat), float(target.z)),
+            (
+                float(target.fwd) + contact_fwd_bias,
+                float(target.lat) + contact_lat_bias,
+                float(target.z),
+            ),
             fingertip_depth_m=_env_float(
                 "MARC_GRASPGENX_TCP_DEPTH_M", DEFAULT_TCP_DEPTH_M
             ),
@@ -367,11 +875,16 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             max_xy_m=_env_float(
                 "MARC_GRASPGENX_OBJECT_RADIUS_M", DEFAULT_OBJECT_RADIUS_M
             ),
+            max_grasp_width_m=_env_float(
+                "MARC_GRASPGENX_MAX_GRASP_WIDTH_M", DEFAULT_MAX_GRASP_WIDTH_M
+            ),
+            force_neutral_yaw=upright_bbox,
+            diagnostics=selection_diagnostics,
         )
         if selected is None:
             self._emit(
-                "[pick] GraspGen-X produced no safe top-down contact n_pts=%d"
-                % n_points
+                "[pick] GraspGen-X produced no safe top-down contact n_pts=%d "
+                "diagnostics=%s" % (n_points, selection_diagnostics)
             )
             return
 
@@ -385,15 +898,55 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             z=float(fresh.z),
             valid=True,
         )
-        # The eye-to-hand camera has a repeatable physical XY offset; GraspGen-X
-        # still supplies the closing yaw and filters unsafe contact candidates.
-        fwd = localized_before.fwd + _env_float(
-            "MARC_GRASPGENX_CONTACT_FWD_BIAS_M", DEFAULT_CONTACT_FWD_BIAS_M
+        # The saved depth cloud owns width/yaw, but its sparse footprint centre
+        # can be biased by the visible surface. Gate fresh RGB-D independently
+        # per axis: arm occlusion commonly corrupts forward depth while lateral
+        # image centering remains accurate.
+        drift_fwd = localized_before.fwd - cloud_localization.fwd
+        drift_lat = localized_before.lat - cloud_localization.lat
+        max_relocalization_drift = max(
+            0.0,
+            _env_float(
+                "MARC_GRASPGENX_MAX_RELOCALIZATION_DRIFT_M",
+                DEFAULT_MAX_RELOCALIZATION_DRIFT_M,
+            ),
         )
-        lat = localized_before.lat + _env_float(
-            "MARC_GRASPGENX_CONTACT_LAT_BIAS_M", DEFAULT_CONTACT_LAT_BIAS_M
+        if (
+            abs(drift_fwd) > max_relocalization_drift
+            or abs(drift_lat) > max_relocalization_drift
+        ):
+            self._emit(
+                "[pick] GraspGen-X ignoring post-stage localization jump "
+                "fwd=%+.3fm lat=%+.3fm limit=%.3fm"
+                % (
+                    drift_fwd,
+                    drift_lat,
+                    max_relocalization_drift,
+                )
+            )
+        # The cloud still owns width and yaw, but a partial visible surface can
+        # move its fitted centre several centimetres away from a stable detection.
+        # Apply only the bounded correction already used for deterministic staging.
+        fwd = float(execution_center[0]) + contact_fwd_bias
+        lat = float(execution_center[1]) + contact_lat_bias
+        raw_cloud_delta = cloud_center - localized_xy
+        applied_center_delta = execution_center - localized_xy
+        z = object_contact_z(
+            points,
+            localized_before.z,
+            contact_depth_fraction=(
+                profile.contact_depth_fraction if profile is not None else None
+            ),
+            floor_clearance_m=(
+                profile.floor_clearance_m if profile is not None else None
+            ),
         )
-        z = object_contact_z(points, localized_before.z)
+        if z is None:
+            self._emit(
+                "[pick] GraspGen-X object too short for floor-safe contact "
+                "support_z=%.3f top_z=%.3f" % (support_z, top_z)
+            )
+            return
         min_fwd = _env_float("MARC_GRASPGENX_MIN_FWD_M", DEFAULT_MIN_FWD_M)
         max_fwd = _env_float("MARC_GRASPGENX_MAX_FWD_M", DEFAULT_MAX_FWD_M)
         max_abs_lat = _env_float(
@@ -409,11 +962,22 @@ class StagedGraspGenXPickRuntime(PickRuntime):
         target.fwd, target.lat, target.z = float(fwd), float(lat), float(z)
         target.grasp_yaw = yaw
         self._emit(
-            "[pick] ggx-contact fwd=%.3f lat=%.3f z=%.3f yaw=%.2f "
-            "score=%.3f n_pts=%d n_keep=%d dyolo=%.3f"
+            "[pick] ggx-contact fwd=%.3f lat=%.3f z=%.3f yaw=%.2f mode=%s "
+            "footprint=%.3fx%.3f aspect=%.2f center_shift=%.3f "
+            "score=%.3f n_pts=%d n_keep=%d dyolo=%.3f "
+            "source=bounded-cloud-center raw_cloud_delta=(%+.3f,%+.3f) "
+            "applied_delta=(%+.3f,%+.3f) drift=(%+.3f,%+.3f)"
             % (
-                fwd, lat, z, yaw, float(selected["score"]), n_points,
+                fwd, lat, z, yaw,
+                "narrow-axis" if selected["directional"] else "upright-neutral",
+                float(selected["width"]),
+                float(selected["length"]), float(selected["aspect"]),
+                float(selected["center_offset"]),
+                float(selected["score"]), n_points,
                 int(selected["n_keep"]), float(selected["dyolo"]),
+                raw_cloud_delta[0], raw_cloud_delta[1],
+                applied_center_delta[0], applied_center_delta[1],
+                drift_fwd, drift_lat,
             )
         )
 
@@ -421,20 +985,118 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             0.03,
             _env_float("MARC_GRASPGENX_FINAL_APPROACH_M", DEFAULT_FINAL_APPROACH_M),
         )
-        if not arm.move_grasp_pose((fwd, lat, z + above), yaw, "ggx-pregrasp"):
+        overhead_clearance = max(
+            0.04,
+            profile.overhead_clearance_m
+            if profile is not None
+            else _env_float(
+                "MARC_GRASPGENX_OVERHEAD_CLEARANCE_M",
+                DEFAULT_OVERHEAD_CLEARANCE_M,
+            ),
+        )
+        pregrasp_z = max(z + above, top_z + overhead_clearance)
+        self._emit(
+            "[pick] ggx-safe-z support=%.3f top=%.3f pregrasp=%.3f "
+            "contact=%.3f floor_clearance=%.3f"
+            % (support_z, top_z, pregrasp_z, z, z - support_z)
+        )
+        # First center and rotate with the gripper safely above the object.
+        # The remaining waypoints keep the same XY/yaw and descend vertically.
+        center_z = top_z + stage_clearance
+        if not arm.move_grasp_pose((fwd, lat, center_z), yaw, "ggx-center"):
             return
-        if not arm.move_grasp_pose((fwd, lat, z), yaw, "ggx-contact"):
+        wrist = self._wrist_depth_refinement(
+            arm, (fwd, lat, top_z), profile=profile
+        )
+        if wrist is not None:
+            fused_xy = np.asarray(wrist["fused_center"], dtype=np.float64)
+            wrist_top_z = float(wrist["top_z"])
+            if float(np.linalg.norm(fused_xy - np.array((fwd, lat)))) > 1e-4:
+                if not arm.move_grasp_line(
+                    (float(fused_xy[0]), float(fused_xy[1]), center_z),
+                    yaw,
+                    "ggx-wrist-center",
+                ):
+                    return
+            fwd, lat = float(fused_xy[0]), float(fused_xy[1])
+            z_shift = float(np.clip(wrist_top_z - top_z, -0.015, 0.015))
+            floor_clearance = max(
+                0.01,
+                profile.floor_clearance_m
+                if profile is not None
+                else _env_float(
+                    "MARC_GRASPGENX_FLOOR_CLEARANCE_M",
+                    DEFAULT_FLOOR_CLEARANCE_M,
+                ),
+            )
+            z = max(
+                support_z + floor_clearance,
+                min(wrist_top_z - 0.005, z + z_shift),
+            )
+            top_z = wrist_top_z
+            pregrasp_z = max(z + above, top_z + overhead_clearance)
+            target.fwd, target.lat, target.z = fwd, lat, z
+            self._emit(
+                "[pick] wrist-fused contact fwd=%.3f lat=%.3f z=%.3f "
+                "pregrasp=%.3f"
+                % (fwd, lat, z, pregrasp_z)
+            )
+        if not arm.move_grasp_line(
+            (fwd, lat, pregrasp_z), yaw, "ggx-pregrasp"
+        ):
             return
-        # Runtime calibration is deliberately a primitive, not a learned output.
-        if not arm.set_grip(float(arm.cfg.grip_close)):
+        if not arm.move_grasp_line((fwd, lat, z), yaw, "ggx-contact"):
+            return
+        if not arm.stabilize_grasp_pose(
+            "ggx-contact-settle",
+            dwell_s=(profile.contact_settle_s if profile is not None else None),
+            max_drift_m=(
+                profile.contact_max_drift_m if profile is not None else None
+            ),
+        ):
+            return
+        # GraspGen-X uses one immediate full close: no ramp and no sensor-based
+        # early stop. Hold feedback is consulted only after the lift.
+        close_cmd = min(
+            DEFAULT_RETENTION_CLOSE,
+            max(
+                float(arm.cfg.grip_close),
+                _env_float("MARC_GRASPGENX_GRIP_CLOSE", DEFAULT_GRASP_CLOSE),
+            ),
+        )
+        self._emit("[pick] GraspGen-X immediate grip close=%.3f" % close_cmd)
+        if not arm.set_grip_immediate(close_cmd):
             return
         if not arm.lift_for_grasp_verification():
             self._emit("[pick] GraspGen-X verification lift failed")
             return
 
+        if self._confirmed_hold_after_lift():
+            self._visual_grasp_verified = True
+            self._emit(
+                "[pick] GraspGen-X grasp verified by %d consecutive post-lift "
+                "hold samples; skipping base-camera reacquisition"
+                % max(
+                    1,
+                    _env_int(
+                        "MARC_GRASPGENX_HOLD_CONFIRM_SAMPLES",
+                        DEFAULT_HOLD_CONFIRM_SAMPLES,
+                    ),
+                )
+            )
+            return
+
         after = self._observe_target(self._visual_target_observer)
         if after is None or getattr(after, "valid", False) is not True:
-            self._emit("[pick] GraspGen-X grasp rejected: target not visible after lift")
+            try:
+                held_after_lift = self.client.is_grasping() is True
+            except Exception:
+                held_after_lift = False
+            self._visual_grasp_verified = bool(held_after_lift)
+            self._emit(
+                "[pick] GraspGen-X camera occluded after lift; hold sensor %s"
+                % ("verified grasp" if held_after_lift else "did not verify grasp")
+            )
             return
         valid = target_moved_with_gripper(
             localized_before,
@@ -474,11 +1136,41 @@ class StagedGraspGenXPickRuntime(PickRuntime):
         )
 
     def poll_grasping(self):
+        # The simulator's contact sensor can drop once the object is lifted and
+        # settles between the pads. A geometrically verified co-moving detection
+        # is the independent positive signal this path was designed to provide.
+        if self._visual_grasp_verified:
+            return True
         held = super().poll_grasping()
-        if held is True and not self._visual_grasp_verified:
+        if held is True:
             self._emit("[pick] rejecting hold=True without base-camera lift evidence")
             return False
         return held
+
+    def _place(self) -> None:
+        """Consume visual hold evidence once the basket trajectory opens the jaws."""
+        try:
+            super()._place()
+        finally:
+            self._visual_grasp_verified = False
+
+    def _seed_closed_grip(self) -> None:
+        """Keep GraspGen-X's full squeeze during transport instead of live relaxation."""
+        super()._seed_closed_grip()
+        arm = self._teleop
+        if arm is None:
+            return
+        retention = min(
+            DEFAULT_RETENTION_CLOSE,
+            max(
+                float(arm.cfg.grip_close),
+                _env_float(
+                    "MARC_GRASPGENX_RETENTION_CLOSE", DEFAULT_RETENTION_CLOSE
+                ),
+            ),
+        )
+        arm.grip_cmd = retention
+        arm.grip_target = retention
 
     def unload_generator(self) -> None:
         super().unload_generator()

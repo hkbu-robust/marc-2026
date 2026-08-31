@@ -51,6 +51,30 @@ def openvla_stage_waypoints(current, target, cfg):
     )
 
 
+def graspgenx_stage_goal(target, cfg) -> np.ndarray:
+    """Object-centred overhead handoff for geometry-driven grasping."""
+    return np.array(
+        [
+            float(target.fwd),
+            float(target.lat),
+            float(target.z) + cfg.openvla_stage_up_m,
+        ],
+        dtype=np.float64,
+    )
+
+
+def graspgenx_stage_waypoints(current, target, cfg):
+    """Clear the base at ready height, then descend directly above the object."""
+    current = np.asarray(current, dtype=np.float64).reshape(3)
+    goal = graspgenx_stage_goal(target, cfg)
+    clear_z = max(float(current[2]), -0.08)
+    return (
+        ("stage-forward", np.array([goal[0], current[1], clear_z])),
+        ("stage-align", np.array([goal[0], goal[1], clear_z])),
+        ("stage-view", goal),
+    )
+
+
 def openvla_target_is_safe(target) -> tuple[bool, str]:
     """Accept any finite localization; IK determines whether its stage is reachable."""
     try:

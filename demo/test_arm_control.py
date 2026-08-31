@@ -5,10 +5,12 @@ from __future__ import annotations
 import unittest
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from arm_pick import ARM_JOINT_NAMES
+from manip_dataset import arm_control
 from manip_dataset.arm_control import ArmTeleop, _cosine_ease
 
 
@@ -53,7 +55,207 @@ class _LinearKin:
         return result
 
 
+class _XYZKin:
+    @staticmethod
+    def fk(q):
+        result = np.eye(4)
+        result[:3, 3] = np.asarray(q[:3], dtype=float)
+        return result
+
+
+class _YawKin:
+    @staticmethod
+    def fk(q):
+        yaw = float(q[1])
+        c, s = np.cos(yaw), np.sin(yaw)
+        result = np.eye(4)
+        result[:3, :3] = np.array(
+            [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
+        )
+        return result
+
+
 class GripperCloseTests(unittest.TestCase):
+    def test_immediate_grip_temporarily_disables_ramp_and_sensor_stop(self):
+        arm = object.__new__(ArmTeleop)
+        arm.cfg = SimpleNamespace(grip_ramp_s=1.2, grip_stop_on_grasp=True)
+        calls = []
+
+        def set_grip(value):
+            calls.append(
+                (float(value), arm.cfg.grip_ramp_s, arm.cfg.grip_stop_on_grasp)
+            )
+            return True
+
+        arm.set_grip = set_grip
+
+        self.assertTrue(arm.set_grip_immediate(0.703))
+        self.assertEqual([(0.703, 0.0, False)], calls)
+        self.assertEqual(1.2, arm.cfg.grip_ramp_s)
+        self.assertTrue(arm.cfg.grip_stop_on_grasp)
+
+    def test_world_closing_yaw_accounts_for_default_wrist_axis(self):
+        # The real default EE frame has local +X (jaw closing) along world -Y.
+        base_R = np.array(
+            [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+        desired_world_yaw = 0.0
+
+        relative = arm_control.closing_axis_relative_yaw(
+            base_R, desired_world_yaw
+        )
+        c, s = np.cos(relative), np.sin(relative)
+        target_R = base_R @ np.array(
+            [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
+        )
+
+        self.assertAlmostEqual(np.pi / 2.0, relative)
+        np.testing.assert_allclose(target_R[:2, 0], (1.0, 0.0), atol=1e-9)
+
+    def test_cartesian_servo_waits_for_yaw_after_position_is_settled(self):
+        client = _FollowingClient()
+        arm = object.__new__(ArmTeleop)
+        arm._client = client
+        arm.cfg = SimpleNamespace(
+            rate_hz=20.0,
+            max_ticks_per_click=20,
+            pos_step=0.008,
+            settle_tol_m=0.015,
+            settle_tol_rot_rad=0.05,
+            ik_joint_step=0.10,
+            grip_close=0.68,
+        )
+        arm.kin = _YawKin()
+        arm.grip_cmd = 0.0
+        arm.grip_target = 0.0
+        arm.target_pos = None
+        arm.target_quat = None
+        arm._closed_since_last_open = False
+        arm._log = lambda _line: None
+        arm._sleep = lambda _dt: None
+        published = []
+
+        def publish(q):
+            client.q = np.asarray(q).copy()
+            published.append(client.q.copy())
+
+        def solve(_kin, q, _target_pos, _target_quat):
+            result = np.asarray(q).copy()
+            result[1] = 0.60
+            return result
+
+        arm._publish = publish
+        with patch.object(arm_control.arm_kin, "dls_solve", side_effect=solve):
+            arm.apply_delta(dyaw=0.60)
+
+        self.assertGreaterEqual(len(published), 6)
+        self.assertAlmostEqual(0.60, client.q[1], places=6)
+
+    def test_grasp_pose_uses_multiple_servo_passes_for_large_wrist_turn(self):
+        client = _FollowingClient()
+        arm = object.__new__(ArmTeleop)
+        arm._client = client
+        arm.cfg = SimpleNamespace(
+            rate_hz=20.0,
+            max_ticks_per_click=4,
+            pos_step=0.008,
+            settle_tol_m=0.015,
+            settle_tol_rot_rad=0.05,
+            ik_joint_step=0.10,
+            grip_close=0.68,
+        )
+        arm.kin = _YawKin()
+        arm.grip_cmd = 0.0
+        arm.grip_target = 0.0
+        arm.target_pos = None
+        arm.target_quat = None
+        arm._closed_since_last_open = False
+        arm._log = lambda _line: None
+        arm._sleep = lambda _dt: None
+        arm._publish = lambda q: setattr(client, "q", np.asarray(q).copy())
+
+        def solve(_kin, q, _target_pos, _target_quat):
+            result = np.asarray(q).copy()
+            result[1] = 1.20
+            return result
+
+        with patch.object(arm_control.arm_kin, "dls_solve", side_effect=solve):
+            ok = arm.move_grasp_pose((0.0, 0.0, 0.0), 1.20)
+
+        self.assertTrue(ok)
+        self.assertAlmostEqual(1.20, client.q[1], places=6)
+
+    def test_final_grasp_descent_tracks_one_continuous_centered_line(self):
+        client = _FollowingClient()
+        client.q[:3] = (0.48, -0.02, -0.10)
+        arm = object.__new__(ArmTeleop)
+        arm._client = client
+        arm.kin = _XYZKin()
+        arm.cfg = SimpleNamespace(
+            rate_hz=20.0,
+            pos_step=0.008,
+            max_ticks_per_click=40,
+            settle_tol_rot_rad=0.05,
+        )
+        arm.grip_cmd = 0.0
+        arm._log = lambda _line: None
+        arm._sleep = lambda _dt: None
+        arm.target_pos = None
+        arm.target_quat = None
+        published = []
+
+        def publish(q):
+            client.q = np.asarray(q, dtype=float).copy()
+            published.append(client.q.copy())
+
+        def solve(_kin, q, target_pos, _target_quat):
+            result = np.asarray(q, dtype=float).copy()
+            result[:3] = np.asarray(target_pos, dtype=float)
+            return result
+
+        arm._publish = publish
+        with patch.dict(
+            "os.environ",
+            {
+                "MARC_GRASP_LINE_STEP_M": "0.03",
+                "MARC_GRASP_LINE_MAX_XY_ERROR_M": "0.02",
+                "MARC_GRASP_LINE_JOINT_STEP_RAD": "0.025",
+            },
+        ), patch.object(arm_control.arm_kin, "dls_solve", side_effect=solve):
+            ok = arm.move_grasp_line((0.48, -0.02, -0.22), 0.0, "contact")
+
+        self.assertTrue(ok)
+        self.assertGreater(len(published), 10)
+        self.assertTrue(all(np.allclose(p[:2], (0.48, -0.02)) for p in published))
+        self.assertTrue(np.all(np.diff([p[2] for p in published]) <= 1e-9))
+        np.testing.assert_allclose(client.q[:3], (0.48, -0.02, -0.22), atol=0.006)
+
+    def test_contact_pose_is_held_stable_before_close(self):
+        client = _FollowingClient()
+        client.q[:3] = (0.40, 0.01, -0.31)
+        arm = object.__new__(ArmTeleop)
+        arm._client = client
+        arm.kin = _XYZKin()
+        arm.cfg = SimpleNamespace(rate_hz=10.0)
+        arm.grip_cmd = 0.0
+        arm._log = lambda _line: None
+        arm._sleep = lambda _dt: None
+        published = []
+        arm._publish = lambda q: published.append(np.asarray(q).copy())
+
+        with patch.dict(
+            "os.environ",
+            {
+                "MARC_GRASP_CONTACT_SETTLE_S": "0.5",
+                "MARC_GRASP_CONTACT_MAX_DRIFT_M": "0.006",
+            },
+        ):
+            ok = arm.stabilize_grasp_pose()
+
+        self.assertTrue(ok)
+        self.assertEqual(5, len(published))
+        self.assertTrue(all(np.allclose(q, client.q) for q in published))
+
     def test_close_records_one_trigger_while_physical_ramp_keeps_running(self):
         client = _ContactClient(contact_sample=3)
         arm = object.__new__(ArmTeleop)
@@ -227,6 +429,49 @@ class GripperCloseTests(unittest.TestCase):
         self.assertLess(increments[0], increments[len(increments) // 2])
         self.assertLess(increments[-1], increments[len(increments) // 2])
         self.assertLessEqual(float(np.max(increments)), 0.1 + 1e-9)
+
+    def test_place_lift_preserves_live_grasp_xy_and_orientation_seed(self):
+        arm = object.__new__(ArmTeleop)
+        arm._place_params = {
+            "carry_up": 0.246,
+            "place_fwd": -0.29,
+            "place_lat": 0.0,
+            "place_up": 0.05,
+        }
+        arm.cfg = SimpleNamespace(place_ik_guard=1.2, place_lift_ik_guard=1.4)
+
+        class _StartKin:
+            @staticmethod
+            def fk(q):
+                result = np.eye(4)
+                result[:3, 3] = np.asarray(q[:3], dtype=float)
+                return result
+
+        arm.kin = _StartKin()
+        calls = []
+
+        def guarded(label, target, seed, max_joint_dev=None):
+            calls.append(
+                (
+                    label,
+                    np.asarray(target, dtype=float),
+                    np.asarray(seed).copy(),
+                    max_joint_dev,
+                )
+            )
+            return np.asarray(seed).copy()
+
+        arm._guarded_ik = guarded
+        q_grasp = np.array([0.417, 0.012, -0.252, 0.4, -1.1, 2.0])
+
+        pose = arm._grasp_lift_pose(q_grasp)
+
+        self.assertIsNotNone(pose)
+        label, target, seed, max_joint_dev = calls[0]
+        self.assertEqual("grasp-high", label)
+        np.testing.assert_allclose(target, (0.417, 0.012, 0.246))
+        np.testing.assert_allclose(seed, q_grasp)
+        self.assertAlmostEqual(1.4, max_joint_dev)
 
     def test_place_trajectory_stops_at_current_tick_when_cancelled(self):
         client = _FollowingClient()

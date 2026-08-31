@@ -234,11 +234,9 @@ class PickTestApp:
 
     def _graspgenx_pick(self):
         self._set_base(0.0, 0.0)
-        # The shared pose feedback holder can chase chassis reaction to arm motion;
-        # GraspGen-X instead re-localizes late and keeps a zero wheel command latched.
-        grasp_hold = StationaryBase(
-            self.client, log=print, position_kp=0.0, yaw_kp=0.0
-        )
+        # Hold forward position against gravity while leaving yaw untouched so
+        # arm reaction cannot rotate the carefully composed camera view.
+        grasp_hold = StationaryBase(self.client, log=print, yaw_kp=0.0)
         with grasp_hold:
             target = stable_pick_target(
                 self.nearfield, self.target_object, log=print
@@ -253,7 +251,10 @@ class PickTestApp:
             def _observe_target():
                 before_reacquire(runtime, detector)
                 return stable_pick_target(
-                    self.nearfield, self.target_object, log=print
+                    self.nearfield,
+                    self.target_object,
+                    log=print,
+                    require_reach=False,
                 )
 
             if isinstance(runtime, StagedGraspGenXPickRuntime):
