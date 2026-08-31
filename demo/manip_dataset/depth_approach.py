@@ -489,6 +489,10 @@ class DepthApproachController:
     def _measure(self) -> Optional[dict]:
         """Read RGB + depth; YOLO on new RGB. None if neither stream is usable."""
         now = time.monotonic()
+        try:
+            frame_now = float(self._client.now_s())
+        except (AttributeError, TypeError, ValueError):
+            frame_now = now
         rgb_msg = self._rgb_msg(self._lock_rgb)
         depth_msg = self._depth_msg(self._lock_depth)
 
@@ -509,7 +513,7 @@ class DepthApproachController:
                     rgb_shape = None
                 else:
                     rgb_stamp = _stamp_key(rgb_msg)
-                    rgb_new = self._note_new_frame(rgb_stamp, now)
+                    rgb_new = self._note_new_frame(rgb_stamp, frame_now)
                     if rgb_new:
                         self._last_rgb_stamp = rgb_stamp
             else:
@@ -641,7 +645,7 @@ class DepthApproachController:
             "frame_age_s": (
                 float("inf")
                 if self._last_new_frame_t is None
-                else max(0.0, now - self._last_new_frame_t)
+                else max(0.0, frame_now - self._last_new_frame_t)
             ),
             "rgb_shape": None if det is None else (det.get("rgb_shape") or rgb_shape),
             "depth_shape": depth_shape,
