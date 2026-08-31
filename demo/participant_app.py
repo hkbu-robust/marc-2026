@@ -478,21 +478,22 @@ class DemoParticipant:
                     approach_controller.last_failure,
                 )
             target = approach_target or nearfield.acquire(reveal, deadline)
-            for _ in range(5):
-                c.send_cmd_vel(0.0, 0.0)
-                c.sleep(0.1)
-            if target.valid:
-                stable = stable_pick_target(
-                    nearfield,
-                    target.name or self._state.target_type or "",
-                    log=log.info,
-                    posture_hint=approach_target,
-                )
-                if stable is None:
-                    target.valid = False
-                    target.reason = "unstable_localization"
-                else:
-                    target = stable
+            with StationaryBase(c, log=log.warning, yaw_kp=0.0):
+                for _ in range(5):
+                    c.send_cmd_vel(0.0, 0.0)
+                    c.sleep(0.1)
+                if target.valid:
+                    stable = stable_pick_target(
+                        nearfield,
+                        target.name or self._state.target_type or "",
+                        log=log.info,
+                        posture_hint=approach_target,
+                    )
+                    if stable is None:
+                        target.valid = False
+                        target.reason = "unstable_localization"
+                    else:
+                        target = stable
             if not target.valid:
                 log.warning("[Stage2] near-field acquire failed (%s) -- skip pick (fail closed)",
                             target.reason)
