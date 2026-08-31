@@ -67,6 +67,19 @@ def _round_result():
 
 
 class RoundDumpTests(unittest.TestCase):
+    def test_round_record_has_distinct_candidate_and_grounding_failures(self):
+        result = replace(
+            _round_result(),
+            failure_reason="projection_failed",
+            candidates=replace(
+                _round_result().candidates,
+                failure_reason="selection_failed",
+            ),
+        )
+        record = result.record()
+        self.assertEqual("selection_failed", record["failure_reason"])
+        self.assertEqual("projection_failed", record["grounding_failure_reason"])
+
     def test_artifact_only_dump_contains_no_structured_json(self):
         round_result = _round_result()
         with tempfile.TemporaryDirectory() as tmp:

@@ -106,8 +106,10 @@ class ExperimentLogTests(unittest.TestCase):
             root_file.write_text("occupied", encoding="utf-8")
             run = ExperimentLog(root_file, environ={})
             run.event("still.safe")
+            pipeline_action_completed = True
             run.finish()
-            self.assertTrue(run._disabled)
+            self.assertTrue(pipeline_action_completed)
+            self.assertFalse(run.events_path.exists())
 
 
 if __name__ == "__main__":

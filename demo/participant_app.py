@@ -197,12 +197,8 @@ class DemoParticipant:
             status="failed" if round_result.grounding is None else "ok",
             terminal=round_result.grounding is None,
             round=mission.round,
-            duration_ms=round_result.candidates.total_ms + round_result.projection_ms,
-            projection_ms=round_result.projection_ms,
-            method=round_result.method,
-            failure_reason=round_result.failure_reason,
             artifact_dir=str(dump_path) if dump_path else None,
-            **round_result.candidates.record(),
+            **round_result.record(),
         )
         log.info(
                  "[Stage1] CCTV round: %d cameras, %d frames, %d objects, "
@@ -307,12 +303,8 @@ class DemoParticipant:
             stage="stage2",
             status="failed" if round_result.grounding is None else "ok",
             terminal=round_result.grounding is None,
-            duration_ms=round_result.candidates.total_ms + round_result.projection_ms,
-            projection_ms=round_result.projection_ms,
-            method=round_result.method,
-            failure_reason=round_result.failure_reason,
             artifact_dir=str(dump_path) if dump_path else None,
-            **round_result.candidates.record(),
+            **round_result.record(),
         )
         grounding = round_result.grounding
         if grounding is None:

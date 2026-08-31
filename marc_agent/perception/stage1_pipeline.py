@@ -588,6 +588,15 @@ class Stage1RoundResult:
     anchor_id: Optional[str] = None
     projection_ms: float = 0.0
 
+    def record(self) -> dict:
+        return {
+            **self.candidates.record(),
+            "duration_ms": self.candidates.total_ms + self.projection_ms,
+            "projection_ms": self.projection_ms,
+            "grounding_method": self.method,
+            "grounding_failure_reason": self.failure_reason,
+        }
+
 
 def static_scene_key(parsed: Optional[ParsedCommand]) -> Optional[tuple]:
     """Identity of a target request while the Stage 1 CCTV scene is static."""
