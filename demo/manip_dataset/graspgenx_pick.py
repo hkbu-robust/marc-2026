@@ -40,7 +40,10 @@ DEFAULT_STAGE_CLEARANCE_M = 0.23
 DEFAULT_OVERHEAD_CLEARANCE_M = 0.08
 DEFAULT_FLOOR_CLEARANCE_M = 0.08
 DEFAULT_MAX_GRASP_WIDTH_M = 0.12
-DEFAULT_MIN_DIRECTIONAL_ASPECT = 1.50
+# Cropped non-tumbler clouds are often slightly inflated by the support plane.
+# An observed 1.46-aspect cola can still has a stable narrow PCA axis; keep
+# near-round objects neutral while allowing those elongated objects to yaw.
+DEFAULT_MIN_DIRECTIONAL_ASPECT = 1.30
 DEFAULT_UPRIGHT_BBOX_ASPECT = 1.20
 DEFAULT_ISOTROPIC_YAW = -0.5 * math.pi
 DEFAULT_MIN_INSERTION_FRACTION = 0.30
@@ -175,6 +178,47 @@ def object_vertical_extent(points, target_z: float) -> tuple[float, float]:
     return support, top
 
 
+def contact_z_from_extent(
+    support: float,
+    top: float,
+    *,
+    contact_depth_fraction: Optional[float] = None,
+    floor_clearance_m: Optional[float] = None,
+) -> Optional[float]:
+    """Choose a floor-safe pad midpoint from a measured vertical extent."""
+    height = max(0.02, float(top) - float(support))
+    configured_fraction = (
+        _env_float(
+            "MARC_GRASPGENX_CONTACT_DEPTH_FRACTION",
+            DEFAULT_CONTACT_DEPTH_FRACTION,
+        )
+        if contact_depth_fraction is None
+        else float(contact_depth_fraction)
+    )
+    fraction = min(0.80, max(0.25, configured_fraction))
+    contact = float(top) - fraction * height - _env_float(
+        "MARC_GRASPGENX_CONTACT_IK_BIAS_M", DEFAULT_CONTACT_IK_BIAS_M
+    )
+    configured_clearance = (
+        _env_float(
+            "MARC_GRASPGENX_FLOOR_CLEARANCE_M", DEFAULT_FLOOR_CLEARANCE_M
+        )
+        if floor_clearance_m is None
+        else float(floor_clearance_m)
+    )
+    z_lo = float(support) + max(0.01, configured_clearance)
+    z_hi = float(top) - 0.005
+    if z_lo > z_hi:
+        return None
+    contact = max(z_lo, contact) + max(
+        0.0,
+        _env_float(
+            "MARC_GRASPGENX_CONTACT_UP_BIAS_M", DEFAULT_CONTACT_UP_BIAS_M
+        ),
+    )
+    return min(z_hi, contact)
+
+
 def object_contact_z(
     points,
     target_z: float,
@@ -190,41 +234,12 @@ def object_contact_z(
     object is too short to satisfy both floor clearance and object contact.
     """
     support, top = object_vertical_extent(points, target_z)
-    height = max(0.02, top - support)
-    configured_fraction = (
-        _env_float(
-            "MARC_GRASPGENX_CONTACT_DEPTH_FRACTION",
-            DEFAULT_CONTACT_DEPTH_FRACTION,
-        )
-        if contact_depth_fraction is None
-        else float(contact_depth_fraction)
+    return contact_z_from_extent(
+        support,
+        top,
+        contact_depth_fraction=contact_depth_fraction,
+        floor_clearance_m=floor_clearance_m,
     )
-    fraction = min(
-        0.80,
-        max(0.25, configured_fraction),
-    )
-    contact = top - fraction * height - _env_float(
-        "MARC_GRASPGENX_CONTACT_IK_BIAS_M", DEFAULT_CONTACT_IK_BIAS_M
-    )
-    configured_clearance = (
-        _env_float(
-            "MARC_GRASPGENX_FLOOR_CLEARANCE_M", DEFAULT_FLOOR_CLEARANCE_M
-        )
-        if floor_clearance_m is None
-        else float(floor_clearance_m)
-    )
-    floor_clearance = max(0.01, configured_clearance)
-    z_lo = support + floor_clearance
-    z_hi = top - 0.005
-    if z_lo > z_hi:
-        return None
-    contact = max(z_lo, contact) + max(
-        0.0,
-        _env_float(
-            "MARC_GRASPGENX_CONTACT_UP_BIAS_M", DEFAULT_CONTACT_UP_BIAS_M
-        ),
-    )
-    return min(z_hi, contact)
 
 
 def closing_axis_width(points, closing_xy) -> float:
@@ -286,6 +301,23 @@ def bounded_xy_center(reference_xy, cloud_xy, max_shift_m: float) -> np.ndarray:
     if distance <= limit or distance <= 1e-9:
         return cloud.copy()
     return reference + delta * (limit / distance)
+
+
+def upright_rear_insertion_waypoints(
+    contact_xyz, rear_standoff_m: float, fold_z: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fold and descend at a fixed rear point, then insert straight forward.
+
+    The upright path must never move over the object before the wrist is fully
+    folded. ``rear_standoff_m`` is forward-axis clearance from contact,
+    independent of the GraspGen-X yaw and the profile's wrist tilt.
+    """
+    contact = np.asarray(contact_xyz, dtype=np.float64).reshape(3)
+    pregrasp = contact.copy()
+    pregrasp[0] -= max(0.0, float(rear_standoff_m))
+    fold_high = pregrasp.copy()
+    fold_high[2] = max(float(fold_z), float(pregrasp[2]))
+    return fold_high, pregrasp, contact
 
 
 def wrist_depth_object_observation(
@@ -663,7 +695,7 @@ class StagedGraspGenXPickRuntime(PickRuntime):
         return True
 
     def _wrist_depth_refinement(
-        self, arm, expected_xyz, *, profile=None
+        self, arm, expected_xyz, *, profile=None, allow_fwd_correction: bool = True
     ) -> Optional[dict]:
         """Fuse a bounded local wrist-depth observation with the base-camera pose."""
         search_radius_m = (
@@ -738,8 +770,14 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                 DEFAULT_WRIST_MAX_CORRECTION_M,
             )
         )
+        correction_target = wrist_xy.copy()
+        if not allow_fwd_correction:
+            # A front-facing wrist camera observes the near surface of an
+            # upright body, not its forward centre. Keep cloud-derived forward
+            # centering while still accepting wrist lateral correction.
+            correction_target[0] = base_xy[0]
         fused_xy = bounded_xy_center(
-            base_xy, wrist_xy, max(0.0, max_correction_m)
+            base_xy, correction_target, max(0.0, max_correction_m)
         )
         observation["fused_center"] = fused_xy
         observation["disagreement_m"] = disagreement
@@ -762,10 +800,26 @@ class StagedGraspGenXPickRuntime(PickRuntime):
     def _grasp(self, target) -> None:
         self._visual_grasp_verified = False
         profile = resolve_grasp_profile(target)
-        self._emit(
-            "[pick] grasp profile=%s"
-            % (profile.name if profile is not None else "generic_unvalidated")
+        side_profile = bool(
+            profile is not None and profile.approach_style == "front_side"
         )
+        self._emit(
+            "[pick] grasp profile=%s status=%s"
+            % (
+                profile.name if profile is not None else "generic_unvalidated",
+                "unvalidated"
+                if profile is None
+                else (
+                    "validated" if profile.physically_validated else "experimental"
+                ),
+            )
+        )
+        if profile is not None and profile.approach_style == "flip_required":
+            self._emit(
+                "[pick] lying cracker_box requires calibrated flip-and-reacquire "
+                "sequence -- no unsafe wide pinch attempted"
+            )
+            return
         contact_fwd_bias = _env_float(
             "MARC_GRASPGENX_CONTACT_FWD_BIAS_M", DEFAULT_CONTACT_FWD_BIAS_M
         )
@@ -819,26 +873,75 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                 "MARC_GRASPGENX_STAGE_CLEARANCE_M", DEFAULT_STAGE_CLEARANCE_M
             ),
         )
-        # stage_for_openvla adds its configured stage-up distance. Feed it a
-        # synthetic Z so the resulting handoff is measured from the observed
-        # object top, not from the bbox-center localization used for driving.
-        stage_up = float(arm.cfg.openvla_stage_up_m)
-        stage_input_z = top_z + stage_clearance - stage_up
-        stage_target = SimpleNamespace(
-            fwd=float(execution_center[0]) + contact_fwd_bias,
-            lat=float(execution_center[1]) + contact_lat_bias,
-            z=float(stage_input_z),
-            valid=True,
-        )
-        stage = getattr(arm, "stage_for_graspgenx", arm.stage_for_openvla)
-        if not stage(stage_target):
+        side_contact_z = None
+        side_object_lat = None
+        side_grasp_lat = None
+        if side_profile:
+            # Build the upright handoff only from the saved, unoccluded base
+            # cloud. The arm reaches the folded rear pregrasp before inference.
+            side_contact_z = contact_z_from_extent(
+                support_z,
+                top_z,
+                contact_depth_fraction=profile.contact_depth_fraction,
+                floor_clearance_m=profile.floor_clearance_m,
+            )
+            if side_contact_z is None:
+                self._emit(
+                    "[pick] GraspGen-X object too short for upright side handoff "
+                    "support_z=%.3f top_z=%.3f" % (support_z, top_z)
+                )
+                return
+            side_object_lat = float(execution_center[1]) + contact_lat_bias
+            side_grasp_lat = side_object_lat + float(profile.pad_lateral_bias_m)
+            stage_target = SimpleNamespace(
+                fwd=float(execution_center[0]) + contact_fwd_bias,
+                lat=side_grasp_lat,
+                z=float(side_contact_z),
+                support_z=float(support_z),
+                fold_z=float(top_z + stage_clearance),
+                grasp_yaw=DEFAULT_ISOTROPIC_YAW,
+                valid=True,
+            )
+            self._emit(
+                "[pick] upright pre-inference plan object_lat=%.3f "
+                "bias=%+.3f grasp_lat=%.3f contact_z=%.3f"
+                % (
+                    side_object_lat,
+                    profile.pad_lateral_bias_m,
+                    side_grasp_lat,
+                    side_contact_z,
+                )
+            )
+        else:
+            # Overhead profiles retain the demonstrated camera handoff. Feed a
+            # synthetic Z so its stage is measured from the observed object top.
+            stage_up = float(arm.cfg.openvla_stage_up_m)
+            stage_input_z = top_z + stage_clearance - stage_up
+            stage_target = SimpleNamespace(
+                fwd=float(execution_center[0]) + contact_fwd_bias,
+                lat=float(execution_center[1]) + contact_lat_bias,
+                z=float(stage_input_z),
+                valid=True,
+            )
+        stage_graspgenx = getattr(arm, "stage_for_graspgenx", None)
+        if stage_graspgenx is None:
+            staged = arm.stage_for_openvla(stage_target)
+        else:
+            staged = stage_graspgenx(stage_target, profile=profile)
+        if not staged:
             self._emit("[pick] GraspGen-X deterministic staging failed")
             return
-        self._emit(
-            "[pick] GraspGen-X handoff support_z=%.3f top_z=%.3f "
-            "stage_z=%.3f clearance=%.3f; sampling saved base-depth cloud"
-            % (support_z, top_z, top_z + stage_clearance, stage_clearance)
-        )
+        if side_profile:
+            self._emit(
+                "[pick] GraspGen-X upright handoff complete at folded rear "
+                "pregrasp; deploying inference on saved base-depth cloud"
+            )
+        else:
+            self._emit(
+                "[pick] GraspGen-X handoff support_z=%.3f top_z=%.3f "
+                "stage_z=%.3f clearance=%.3f; sampling saved base-depth cloud"
+                % (support_z, top_z, top_z + stage_clearance, stage_clearance)
+            )
 
         generator = self._grasp_generator or load_local_graspgenx()
         if generator is None:
@@ -851,13 +954,6 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             self._emit("[pick] GraspGen-X inference failed (%s) -- fail closed" % exc)
             return
         selection_diagnostics = {}
-        upright_bbox = yolo_bbox_is_upright(
-            target,
-            _env_float(
-                "MARC_GRASPGENX_UPRIGHT_BBOX_ASPECT",
-                DEFAULT_UPRIGHT_BBOX_ASPECT,
-            ),
-        )
         selected = select_topdown_contact_pose(
             raw,
             points,
@@ -878,7 +974,10 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             max_grasp_width_m=_env_float(
                 "MARC_GRASPGENX_MAX_GRASP_WIDTH_M", DEFAULT_MAX_GRASP_WIDTH_M
             ),
-            force_neutral_yaw=upright_bbox,
+            # Only the copied side-grasp motion needs neutral closing yaw.
+            # Tissue, pencilcase, and upright cracker-box deliberately retain
+            # the lying profile's narrow-axis top-down selection.
+            force_neutral_yaw=side_profile,
             diagnostics=selection_diagnostics,
         )
         if selected is None:
@@ -888,58 +987,70 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             )
             return
 
-        fresh = self._observe_target()
-        if fresh is None or getattr(fresh, "valid", False) is not True:
-            self._emit("[pick] GraspGen-X lost target before final approach")
-            return
-        localized_before = SimpleNamespace(
-            fwd=float(fresh.fwd),
-            lat=float(fresh.lat),
-            z=float(fresh.z),
-            valid=True,
-        )
-        # The saved depth cloud owns width/yaw, but its sparse footprint centre
-        # can be biased by the visible surface. Gate fresh RGB-D independently
-        # per axis: arm occlusion commonly corrupts forward depth while lateral
-        # image centering remains accurate.
-        drift_fwd = localized_before.fwd - cloud_localization.fwd
-        drift_lat = localized_before.lat - cloud_localization.lat
-        max_relocalization_drift = max(
-            0.0,
-            _env_float(
-                "MARC_GRASPGENX_MAX_RELOCALIZATION_DRIFT_M",
-                DEFAULT_MAX_RELOCALIZATION_DRIFT_M,
-            ),
-        )
-        if (
-            abs(drift_fwd) > max_relocalization_drift
-            or abs(drift_lat) > max_relocalization_drift
-        ):
+        if side_profile:
+            # The folded arm occupies the base-camera view. Re-detecting here
+            # can lock onto the arm and reclassify an untouched upright object.
+            # The deterministic handoff therefore keeps its saved localization.
+            localized_before = cloud_localization
+            drift_fwd = 0.0
+            drift_lat = 0.0
             self._emit(
-                "[pick] GraspGen-X ignoring post-stage localization jump "
-                "fwd=%+.3fm lat=%+.3fm limit=%.3fm"
-                % (
-                    drift_fwd,
-                    drift_lat,
-                    max_relocalization_drift,
-                )
+                "[pick] upright final approach keeps pre-handoff localization; "
+                "base-camera relocalization disabled while arm is folded"
             )
+        else:
+            fresh = self._observe_target()
+            if fresh is None or getattr(fresh, "valid", False) is not True:
+                self._emit("[pick] GraspGen-X lost target before final approach")
+                return
+            localized_before = SimpleNamespace(
+                fwd=float(fresh.fwd),
+                lat=float(fresh.lat),
+                z=float(fresh.z),
+                valid=True,
+            )
+            # The saved depth cloud owns width/yaw, but its sparse footprint
+            # centre can be biased by the visible surface. Gate fresh RGB-D
+            # independently per axis for overhead profiles.
+            drift_fwd = localized_before.fwd - cloud_localization.fwd
+            drift_lat = localized_before.lat - cloud_localization.lat
+            max_relocalization_drift = max(
+                0.0,
+                _env_float(
+                    "MARC_GRASPGENX_MAX_RELOCALIZATION_DRIFT_M",
+                    DEFAULT_MAX_RELOCALIZATION_DRIFT_M,
+                ),
+            )
+            if (
+                abs(drift_fwd) > max_relocalization_drift
+                or abs(drift_lat) > max_relocalization_drift
+            ):
+                self._emit(
+                    "[pick] GraspGen-X ignoring post-stage localization jump "
+                    "fwd=%+.3fm lat=%+.3fm limit=%.3fm"
+                    % (drift_fwd, drift_lat, max_relocalization_drift)
+                )
         # The cloud still owns width and yaw, but a partial visible surface can
         # move its fitted centre several centimetres away from a stable detection.
         # Apply only the bounded correction already used for deterministic staging.
         fwd = float(execution_center[0]) + contact_fwd_bias
-        lat = float(execution_center[1]) + contact_lat_bias
+        object_lat = float(execution_center[1]) + contact_lat_bias
+        lat = float(side_grasp_lat) if side_profile else object_lat
         raw_cloud_delta = cloud_center - localized_xy
         applied_center_delta = execution_center - localized_xy
-        z = object_contact_z(
-            points,
-            localized_before.z,
-            contact_depth_fraction=(
-                profile.contact_depth_fraction if profile is not None else None
-            ),
-            floor_clearance_m=(
-                profile.floor_clearance_m if profile is not None else None
-            ),
+        z = (
+            float(side_contact_z)
+            if side_profile
+            else object_contact_z(
+                points,
+                localized_before.z,
+                contact_depth_fraction=(
+                    profile.contact_depth_fraction if profile is not None else None
+                ),
+                floor_clearance_m=(
+                    profile.floor_clearance_m if profile is not None else None
+                ),
+            )
         )
         if z is None:
             self._emit(
@@ -947,8 +1058,47 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                 "support_z=%.3f top_z=%.3f" % (support_z, top_z)
             )
             return
-        min_fwd = _env_float("MARC_GRASPGENX_MIN_FWD_M", DEFAULT_MIN_FWD_M)
-        max_fwd = _env_float("MARC_GRASPGENX_MAX_FWD_M", DEFAULT_MAX_FWD_M)
+        if side_profile:
+            folded_names = (
+                "folded_pad_fwd", "folded_pad_lat", "folded_pad_z"
+            )
+            if not all(hasattr(stage_target, name) for name in folded_names):
+                self._emit(
+                    "[pick] upright stage did not report its post-fold pad pose "
+                    "-- fail closed"
+                )
+                return
+            folded_pregrasp = np.array(
+                (
+                    float(stage_target.folded_pad_fwd),
+                    float(stage_target.folded_pad_lat),
+                    float(stage_target.folded_pad_z),
+                ),
+                dtype=np.float64,
+            )
+            cloud_contact_z = float(z)
+            # The final upright correction is deliberately tiny and level.
+            # The object-centre target and lower cloud Z must not be restored.
+            fwd = float(folded_pregrasp[0]) + float(
+                profile.side_final_insertion_m
+            )
+            lat = float(folded_pregrasp[1])
+            z = float(folded_pregrasp[2])
+            self._emit(
+                "[pick] upright measured folded precontact height %.3f "
+                "(cloud contact %.3f); final level advance %.3fm"
+                % (z, cloud_contact_z, profile.side_final_insertion_m)
+            )
+        min_fwd = (
+            _env_float("MARC_GRASPGENX_MIN_FWD_M", DEFAULT_MIN_FWD_M)
+            if profile is None
+            else float(profile.min_fwd_m)
+        )
+        max_fwd = (
+            _env_float("MARC_GRASPGENX_MAX_FWD_M", DEFAULT_MAX_FWD_M)
+            if profile is None
+            else float(profile.max_fwd_m)
+        )
         max_abs_lat = _env_float(
             "MARC_GRASPGENX_MAX_ABS_LAT_M", DEFAULT_MAX_ABS_LAT_M
         )
@@ -969,7 +1119,13 @@ class StagedGraspGenXPickRuntime(PickRuntime):
             "applied_delta=(%+.3f,%+.3f) drift=(%+.3f,%+.3f)"
             % (
                 fwd, lat, z, yaw,
-                "narrow-axis" if selected["directional"] else "upright-neutral",
+                "upright-side-profile"
+                if side_profile
+                else (
+                    "narrow-axis"
+                    if selected["directional"]
+                    else "upright-neutral"
+                ),
                 float(selected["width"]),
                 float(selected["length"]), float(selected["aspect"]),
                 float(selected["center_offset"]),
@@ -994,20 +1150,73 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                 DEFAULT_OVERHEAD_CLEARANCE_M,
             ),
         )
-        pregrasp_z = max(z + above, top_z + overhead_clearance)
+        approach_tilt = (
+            float(profile.approach_tilt_rad) if side_profile else 0.0
+        )
+        pad_center_offset = (
+            float(profile.pad_center_offset_m) if profile is not None else 0.0
+        )
+        center_pos_tolerance = (
+            float(profile.center_pos_tolerance_m)
+            if profile is not None
+            else None
+        )
+        center_rot_tolerance = (
+            float(profile.center_rot_tolerance_rad)
+            if profile is not None
+            else None
+        )
+        line_joint_step = (
+            float(profile.line_joint_step_rad) if profile is not None else None
+        )
+        if side_profile:
+            pregrasp = folded_pregrasp
+        else:
+            pregrasp = np.array(
+                (fwd, lat, max(z + above, top_z + overhead_clearance)),
+                dtype=np.float64,
+            )
         self._emit(
-            "[pick] ggx-safe-z support=%.3f top=%.3f pregrasp=%.3f "
-            "contact=%.3f floor_clearance=%.3f"
-            % (support_z, top_z, pregrasp_z, z, z - support_z)
+            "[pick] ggx-safe-z support=%.3f top=%.3f "
+            "pregrasp=(%.3f,%.3f,%.3f) contact=%.3f "
+            "floor_clearance=%.3f tilt=%.2f"
+            % (
+                support_z,
+                top_z,
+                pregrasp[0],
+                pregrasp[1],
+                pregrasp[2],
+                z,
+                z - support_z,
+                approach_tilt,
+            )
         )
-        # First center and rotate with the gripper safely above the object.
-        # The remaining waypoints keep the same XY/yaw and descend vertically.
+        # Upright profiles are already folded and descended at the deterministic
+        # handoff. Overhead profiles retain the established center/refine path.
         center_z = top_z + stage_clearance
-        if not arm.move_grasp_pose((fwd, lat, center_z), yaw, "ggx-center"):
-            return
-        wrist = self._wrist_depth_refinement(
-            arm, (fwd, lat, top_z), profile=profile
-        )
+        if side_profile:
+            wrist = None
+            self._emit(
+                "[pick] upright side handoff already folded and descended; "
+                "skipping occluded camera refinement"
+            )
+        else:
+            if not arm.move_grasp_pose(
+                (fwd, lat, center_z),
+                yaw,
+                "ggx-center",
+                approach_tilt_rad=approach_tilt,
+                pad_center_offset_m=pad_center_offset,
+                position_tolerance_m=center_pos_tolerance,
+                rotation_tolerance_rad=center_rot_tolerance,
+            ):
+                return
+            wrist = self._wrist_depth_refinement(
+                arm,
+                (fwd, lat, top_z),
+                profile=profile,
+                allow_fwd_correction=True,
+            )
         if wrist is not None:
             fused_xy = np.asarray(wrist["fused_center"], dtype=np.float64)
             wrist_top_z = float(wrist["top_z"])
@@ -1016,10 +1225,12 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                     (float(fused_xy[0]), float(fused_xy[1]), center_z),
                     yaw,
                     "ggx-wrist-center",
+                    approach_tilt_rad=approach_tilt,
+                    pad_center_offset_m=pad_center_offset,
+                    joint_step_rad=line_joint_step,
                 ):
                     return
             fwd, lat = float(fused_xy[0]), float(fused_xy[1])
-            z_shift = float(np.clip(wrist_top_z - top_z, -0.015, 0.015))
             floor_clearance = max(
                 0.01,
                 profile.floor_clearance_m
@@ -1029,23 +1240,69 @@ class StagedGraspGenXPickRuntime(PickRuntime):
                     DEFAULT_FLOOR_CLEARANCE_M,
                 ),
             )
+            z_shift = float(np.clip(wrist_top_z - top_z, -0.015, 0.015))
             z = max(
                 support_z + floor_clearance,
                 min(wrist_top_z - 0.005, z + z_shift),
             )
             top_z = wrist_top_z
-            pregrasp_z = max(z + above, top_z + overhead_clearance)
+            pregrasp = np.array(
+                (fwd, lat, max(z + above, top_z + overhead_clearance)),
+                dtype=np.float64,
+            )
             target.fwd, target.lat, target.z = fwd, lat, z
             self._emit(
                 "[pick] wrist-fused contact fwd=%.3f lat=%.3f z=%.3f "
-                "pregrasp=%.3f"
-                % (fwd, lat, z, pregrasp_z)
+                "pregrasp=(%.3f,%.3f,%.3f)"
+                % (fwd, lat, z, pregrasp[0], pregrasp[1], pregrasp[2])
             )
-        if not arm.move_grasp_line(
-            (fwd, lat, pregrasp_z), yaw, "ggx-pregrasp"
+        if side_profile:
+            target.fwd, target.lat, target.z = fwd, lat, z
+            self._emit(
+                "[pick] upright pad-center lateral bias "
+                "object_lat=%.3f bias=%+.3f grasp_lat=%.3f"
+                % (object_lat, profile.pad_lateral_bias_m, lat)
+            )
+            min_pregrasp_fwd = float(profile.side_pregrasp_min_fwd_m)
+            if float(pregrasp[0]) < min_pregrasp_fwd:
+                self._emit(
+                    "[pick] upright side pregrasp inside base keepout "
+                    "fwd=%.3f min=%.3f -- fail closed; rerun A from farther standoff"
+                    % (pregrasp[0], min_pregrasp_fwd)
+                )
+                return
+            self._emit(
+                "[pick] upright rear-insertion plan rear=(%.3f,%.3f,%.3f) "
+                "contact=(%.3f,%.3f,%.3f) forward_only=%.3fm"
+                % (
+                    pregrasp[0], pregrasp[1], pregrasp[2],
+                    fwd, lat, z, fwd - pregrasp[0],
+                )
+            )
+            self._emit(
+                "[pick] upright deterministic handoff complete; "
+                "GraspGen-X owns final forward insertion only"
+            )
+        elif not arm.move_grasp_line(
+            pregrasp,
+            yaw,
+            "ggx-pregrasp",
+            approach_tilt_rad=approach_tilt,
+            pad_center_offset_m=pad_center_offset,
+            joint_step_rad=line_joint_step,
         ):
             return
-        if not arm.move_grasp_line((fwd, lat, z), yaw, "ggx-contact"):
+        if not arm.move_grasp_line(
+            (fwd, lat, z),
+            yaw,
+            "ggx-contact",
+            approach_tilt_rad=approach_tilt,
+            pad_center_offset_m=pad_center_offset,
+            cart_step_m=(0.002 if side_profile else None),
+            joint_step_rad=line_joint_step,
+            control_rate_hz=(20.0 if side_profile else None),
+            preserve_current_orientation=side_profile,
+        ):
             return
         if not arm.stabilize_grasp_pose(
             "ggx-contact-settle",
@@ -1148,11 +1405,18 @@ class StagedGraspGenXPickRuntime(PickRuntime):
         return held
 
     def _place(self) -> None:
-        """Consume visual hold evidence once the basket trajectory opens the jaws."""
-        try:
-            super()._place()
-        finally:
+        """Consume verified hold only after placement actually opens the jaws."""
+        custom_place = self._place_fn is not None
+        super()._place()
+        arm = self._teleop
+        released = custom_place or (arm is not None and not arm.closing)
+        if released:
             self._visual_grasp_verified = False
+        elif self._visual_grasp_verified:
+            self._emit(
+                "[pick] placement did not release; preserving verified hold "
+                "for place retry"
+            )
 
     def _seed_closed_grip(self) -> None:
         """Keep GraspGen-X's full squeeze during transport instead of live relaxation."""

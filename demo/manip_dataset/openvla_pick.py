@@ -51,11 +51,11 @@ def openvla_stage_waypoints(current, target, cfg):
     )
 
 
-def graspgenx_stage_goal(target, cfg) -> np.ndarray:
-    """Object-centred overhead handoff for geometry-driven grasping."""
+def graspgenx_stage_goal(target, cfg, stage_back_m: float = 0.0) -> np.ndarray:
+    """Profile-aware overhead camera handoff for geometry-driven grasping."""
     return np.array(
         [
-            float(target.fwd),
+            float(target.fwd) - max(0.0, float(stage_back_m)),
             float(target.lat),
             float(target.z) + cfg.openvla_stage_up_m,
         ],
@@ -63,10 +63,10 @@ def graspgenx_stage_goal(target, cfg) -> np.ndarray:
     )
 
 
-def graspgenx_stage_waypoints(current, target, cfg):
-    """Clear the base at ready height, then descend directly above the object."""
+def graspgenx_stage_waypoints(current, target, cfg, stage_back_m: float = 0.0):
+    """Clear the base at ready height, then enter the profile's camera view."""
     current = np.asarray(current, dtype=np.float64).reshape(3)
-    goal = graspgenx_stage_goal(target, cfg)
+    goal = graspgenx_stage_goal(target, cfg, stage_back_m=stage_back_m)
     clear_z = max(float(current[2]), -0.08)
     return (
         ("stage-forward", np.array([goal[0], current[1], clear_z])),

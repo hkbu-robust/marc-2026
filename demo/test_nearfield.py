@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -17,6 +18,7 @@ from nearfield import (
     BASE_CAMERA_TO_ARM_R,
     BASE_CAMERA_TO_ARM_T,
     BASE_CAMERA_TF_FRAME,
+    BASE_LEFT_TO_CENTER_LAT_M,
     MissingDetector,
     NearFieldAcquire,
     _candidate_detection,
@@ -124,6 +126,10 @@ def test_base_camera_calibration_and_tf_alias():
     p_car = R @ np.array([0.0, 0.0, 0.505]) + t
     p_arm = p_car - np.array([ARM_BASE_FWD, 0.0, 0.0])
     _check(abs(p_arm[0] - 0.696) < 0.01, "calibrated fwd=%s" % p_arm[0])
+    _check(
+        abs(p_arm[1] - BASE_LEFT_TO_CENTER_LAT_M) < 1e-4,
+        "left-camera baseline lat=%s" % p_arm[1],
+    )
     _check(p_arm[2] < -0.20, "camera pitch/height must affect z, got %s" % p_arm[2])
 
     acq = NearFieldAcquire.__new__(NearFieldAcquire)
@@ -229,6 +235,62 @@ def test_no_depth_never_commands_linear_motion():
     _check(linear == 0.0, "missing depth must never command positive linear motion")
 
 
+def _image_msg(array, encoding, frame):
+    arr = np.ascontiguousarray(array)
+    channels = 1 if arr.ndim == 2 else int(arr.shape[2])
+    return SimpleNamespace(
+        height=int(arr.shape[0]),
+        width=int(arr.shape[1]),
+        encoding=encoding,
+        step=int(arr.shape[1] * channels * arr.dtype.itemsize),
+        data=arr.tobytes(),
+        header=SimpleNamespace(frame_id=frame),
+    )
+
+
+def test_snapshot_lock_recovers_cached_calibrated_chassis_depth():
+    rgb = _image_msg(
+        np.zeros((480, 640, 3), dtype=np.uint8),
+        "rgb8",
+        "Base_Camera_Center",
+    )
+    closeup = _image_msg(
+        np.full((480, 640), 0.40, dtype=np.float32),
+        "32FC1",
+        "gripper_depth",
+    )
+    chassis = _image_msg(
+        np.full((360, 640), 0.60, dtype=np.float32),
+        "32FC1",
+        "Base_Camera_Center",
+    )
+
+    class Client(_FakeClient):
+        def get_robot_image(self, _which="base_left"):
+            return rgb
+
+        def get_robot_depth(self, _which="base"):
+            return closeup
+
+        def get_robot_depth_hw(self, _which, shape):
+            return chassis if tuple(shape) == (360, 640) else None
+
+        def get_robot_image_frame(self, _which, frame):
+            return rgb if frame == "Base_Camera_Center" else None
+
+        def list_robot_image_shapes(self, _which):
+            return [(480, 640)]
+
+    acq = NearFieldAcquire(Client(), MissingDetector("unused"))
+    _check(acq._lock_streams(), "cached calibrated chassis depth should recover lock")
+    locked_rgb, locked_depth, _info, _msg = acq._read_locked()
+    _check(locked_rgb is not None, "matching chassis RGB should remain available")
+    _check(
+        locked_depth is not None and locked_depth.shape == (360, 640),
+        "expected cached 360x640 chassis depth",
+    )
+
+
 def main():
     tests = [
         test_depth_in_bbox_ignores_bad_center_pixel,
@@ -241,6 +303,7 @@ def main():
         test_candidate_selection_skips_box_outside_reveal,
         test_candidate_selection_needs_depth_and_prefers_hint_distance,
         test_no_depth_never_commands_linear_motion,
+        test_snapshot_lock_recovers_cached_calibrated_chassis_depth,
     ]
     failed = 0
     for fn in tests:

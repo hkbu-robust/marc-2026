@@ -16,15 +16,21 @@ from manip_dataset.graspgenx_pick import (
     DEFAULT_STAGE_CLEARANCE_M,
     StagedGraspGenXPickRuntime,
     bounded_xy_center,
+    contact_z_from_extent,
     filter_object_points,
     object_contact_z,
     object_vertical_extent,
     object_xy_footprint,
     select_topdown_contact_pose,
+    upright_rear_insertion_waypoints,
     wrist_depth_object_observation,
     yolo_bbox_is_upright,
 )
-from manip_dataset.grasp_profiles import LYING_TUMBLER, resolve_grasp_profile
+from manip_dataset.grasp_profiles import (
+    LYING_TUMBLER,
+    TUMBLER_UPRIGHT,
+    resolve_grasp_profile,
+)
 
 
 def _topdown_pose(contact_xyz, yaw=0.0):
@@ -72,6 +78,7 @@ class _Arm:
         )
         self.grip_cmd = 0.0
         self.stage_target = None
+        self.stage_profile = None
         self.settle_kwargs = None
 
     def stage_for_openvla(self, target):
@@ -79,17 +86,24 @@ class _Arm:
         self.events.append("stage")
         return True
 
-    def stage_for_graspgenx(self, target):
+    def stage_for_graspgenx(self, target, *, profile=None):
         self.stage_target = target
+        self.stage_profile = profile
+        if profile is not None and profile.approach_style == "front_side":
+            target.folded_pad_fwd = float(target.fwd) - profile.side_standoff_m
+            target.folded_pad_lat = float(target.lat)
+            target.folded_pad_z = (
+                float(target.z) + profile.side_contact_fold_clearance_m
+            )
         self.events.append("stage")
         return True
 
-    def move_grasp_pose(self, xyz, yaw, label):
-        self.events.append((label, tuple(xyz), yaw))
+    def move_grasp_pose(self, xyz, yaw, label, **kwargs):
+        self.events.append((label, tuple(xyz), yaw, kwargs))
         return True
 
-    def move_grasp_line(self, xyz, yaw, label):
-        self.events.append((label, tuple(xyz), yaw))
+    def move_grasp_line(self, xyz, yaw, label, **kwargs):
+        self.events.append((label, tuple(xyz), yaw, kwargs))
         return True
 
     def stabilize_grasp_pose(self, label, **kwargs):
@@ -126,10 +140,11 @@ class GraspGenXStagingTests(unittest.TestCase):
 
         self.assertIs(profile, LYING_TUMBLER)
         self.assertEqual("lying_tumbler", profile.name)
+        self.assertEqual((0.32, 0.58), (profile.min_fwd_m, profile.max_fwd_m))
         self.assertEqual(0.0, profile.max_cloud_center_shift_m)
         self.assertEqual(0.03, profile.wrist_max_correction_m)
 
-    def test_upright_or_unknown_posture_does_not_select_lying_profile(self):
+    def test_upright_tumbler_selects_experimental_side_profile(self):
         upright = SimpleNamespace(
             name="tumbler", bbox_xyxy=(10.0, 20.0, 60.0, 120.0)
         )
@@ -138,9 +153,62 @@ class GraspGenXStagingTests(unittest.TestCase):
             name="bottle", bbox_xyxy=(10.0, 20.0, 110.0, 70.0)
         )
 
-        self.assertIsNone(resolve_grasp_profile(upright))
+        profile = resolve_grasp_profile(upright)
+        self.assertIs(profile, TUMBLER_UPRIGHT)
+        self.assertEqual("tumbler_upright", profile.name)
+        self.assertFalse(profile.physically_validated)
+        self.assertEqual("front_side", profile.approach_style)
+        self.assertEqual(0.10, profile.stage_back_m)
+        self.assertEqual((0.32, 0.68), (profile.min_fwd_m, profile.max_fwd_m))
+        self.assertEqual(0.44, profile.side_pregrasp_min_fwd_m)
+        self.assertEqual(0.14, profile.side_clear_lift_m)
+        self.assertEqual(0.65, profile.side_transit_tilt_rad)
+        self.assertEqual(20.0, profile.side_transit_rate_hz)
+        self.assertEqual(0.020, profile.side_transit_cart_step_m)
+        self.assertEqual(0.055, profile.side_transit_joint_step_rad)
+        self.assertEqual(1.10, profile.approach_tilt_rad)
+        self.assertEqual(0.10, profile.side_contact_fold_clearance_m)
+        self.assertEqual(0.015, profile.side_final_insertion_m)
+        self.assertEqual(0.50, profile.side_fold_speed_rad_s)
+        self.assertEqual(0.030, profile.pad_lateral_bias_m)
+        self.assertEqual(0.0205, profile.pad_center_offset_m)
+        self.assertEqual(0.35, profile.contact_depth_fraction)
+        self.assertEqual(0.005, profile.center_pos_tolerance_m)
+        self.assertEqual(0.05, profile.center_rot_tolerance_rad)
+        self.assertEqual(0.004, profile.line_joint_step_rad)
+        self.assertEqual(0.0, profile.max_cloud_center_shift_m)
+        self.assertEqual(0.10, profile.side_standoff_m)
+        self.assertEqual(profile.stage_back_m, profile.side_standoff_m)
+        self.assertEqual(0.030, profile.wrist_max_correction_m)
         self.assertIsNone(resolve_grasp_profile(unknown))
         self.assertIsNone(resolve_grasp_profile(other_class))
+        hinted_upright = SimpleNamespace(
+            name="tumbler",
+            bbox_xyxy=(10.0, 20.0, 110.0, 70.0),
+            grasp_posture="upright",
+        )
+        self.assertIs(TUMBLER_UPRIGHT, resolve_grasp_profile(hinted_upright))
+
+    def test_upright_side_approach_stays_rear_until_forward_insertion(self):
+        contact = np.array((0.595, 0.037, -0.344))
+        center_z = -0.068
+
+        fold_high, pregrasp, final = upright_rear_insertion_waypoints(
+            contact,
+            TUMBLER_UPRIGHT.side_standoff_m,
+            center_z,
+        )
+
+        self.assertAlmostEqual(pregrasp[0], fold_high[0])
+        self.assertAlmostEqual(pregrasp[1], fold_high[1])
+        self.assertAlmostEqual(
+            contact[0] - TUMBLER_UPRIGHT.side_standoff_m,
+            pregrasp[0],
+        )
+        self.assertAlmostEqual(contact[2], pregrasp[2])
+        self.assertAlmostEqual(center_z, fold_high[2])
+        self.assertGreater(fold_high[2], pregrasp[2])
+        np.testing.assert_allclose(contact, final, atol=1e-12)
 
     def test_runtime_applies_lying_tumbler_profile_end_to_end(self):
         events = []
@@ -199,6 +267,166 @@ class GraspGenXStagingTests(unittest.TestCase):
             arm.settle_kwargs,
         )
         self.assertTrue(any("grasp profile=lying_tumbler" in msg for msg in messages))
+
+    def test_runtime_executes_upright_tumbler_as_oblique_side_grasp(self):
+        events = []
+        messages = []
+        observed = []
+        wrist_calls = []
+        cloud = _cloud()
+        cloud[:, 0] += 0.201
+        target = SimpleNamespace(
+            fwd=0.601,
+            lat=0.0,
+            z=-0.40,
+            valid=True,
+            name="tumbler",
+            bbox_xyxy=(20.0, 10.0, 70.0, 140.0),
+        )
+
+        def generate(_points):
+            events.append("inference")
+            return (
+                np.stack([_topdown_pose((0.601, 0.0, -0.34))]),
+                np.array([0.9]),
+            )
+
+        runtime = StagedGraspGenXPickRuntime(
+            _Client(),
+            log=messages.append,
+            policy="graspgenx",
+            grasp_generator=generate,
+            target_observer=lambda: observed.append(True),
+            points_fn=lambda _target, client=None: cloud,
+            grasp_poll=1,
+        )
+        arm = _Arm(events)
+        runtime._teleop = arm
+        runtime._wrist_depth_refinement = lambda *args, **kwargs: (
+            wrist_calls.append(True) or None
+        )
+
+        runtime._grasp(target)
+
+        contact = next(event for event in events if event[0] == "ggx-contact")
+        self.assertLess(events.index("stage"), events.index("inference"))
+        self.assertLess(events.index("inference"), events.index(contact))
+        self.assertEqual([], observed)
+        self.assertEqual([], wrist_calls)
+        self.assertAlmostEqual(
+            0.601 - TUMBLER_UPRIGHT.side_standoff_m
+            + TUMBLER_UPRIGHT.side_final_insertion_m,
+            contact[1][0],
+            places=6,
+        )
+        self.assertAlmostEqual(
+            TUMBLER_UPRIGHT.pad_lateral_bias_m,
+            contact[1][1],
+            places=6,
+        )
+        support_z, cloud_top_z = object_vertical_extent(cloud, -0.40)
+        expected_z = contact_z_from_extent(
+            support_z,
+            cloud_top_z,
+            contact_depth_fraction=TUMBLER_UPRIGHT.contact_depth_fraction,
+            floor_clearance_m=TUMBLER_UPRIGHT.floor_clearance_m,
+        )
+        self.assertAlmostEqual(
+            expected_z + TUMBLER_UPRIGHT.side_contact_fold_clearance_m,
+            contact[1][2],
+        )
+        self.assertAlmostEqual(0.601, arm.stage_target.fwd)
+        self.assertAlmostEqual(
+            TUMBLER_UPRIGHT.pad_lateral_bias_m,
+            arm.stage_target.lat,
+        )
+        self.assertAlmostEqual(expected_z, arm.stage_target.z)
+        self.assertAlmostEqual(
+            cloud_top_z + TUMBLER_UPRIGHT.stage_clearance_m,
+            arm.stage_target.fold_z,
+        )
+        self.assertAlmostEqual(-0.5 * np.pi, arm.stage_target.grasp_yaw)
+        self.assertAlmostEqual(
+            TUMBLER_UPRIGHT.approach_tilt_rad,
+            contact[3]["approach_tilt_rad"],
+        )
+        self.assertAlmostEqual(
+            TUMBLER_UPRIGHT.pad_center_offset_m,
+            contact[3]["pad_center_offset_m"],
+        )
+        self.assertAlmostEqual(
+            TUMBLER_UPRIGHT.line_joint_step_rad,
+            contact[3]["joint_step_rad"],
+        )
+        self.assertTrue(contact[3]["preserve_current_orientation"])
+        self.assertEqual(0.002, contact[3]["cart_step_m"])
+        self.assertEqual(20.0, contact[3]["control_rate_hz"])
+        self.assertTrue(
+            any(
+                "grasp profile=tumbler_upright status=experimental" in msg
+                for msg in messages
+            )
+        )
+        self.assertIs(TUMBLER_UPRIGHT, arm.stage_profile)
+        self.assertTrue(
+            any(
+                "upright pad-center lateral bias object_lat=0.000 "
+                "bias=+0.030 grasp_lat=0.030" in msg
+                for msg in messages
+            )
+        )
+        self.assertTrue(
+            any(
+                "upright handoff complete at folded rear pregrasp" in msg
+                for msg in messages
+            )
+        )
+        self.assertTrue(
+            any(
+                "GraspGen-X owns final forward insertion only" in msg
+                for msg in messages
+            )
+        )
+
+    def test_upright_side_pregrasp_inside_base_keepout_fails_before_tilt(self):
+        events = []
+        messages = []
+        cloud = _cloud()
+        cloud[:, 0] += 0.06
+        target = SimpleNamespace(
+            fwd=0.40,
+            lat=0.0,
+            z=-0.40,
+            valid=True,
+            name="tumbler",
+            bbox_xyxy=(20.0, 10.0, 70.0, 140.0),
+        )
+        runtime = StagedGraspGenXPickRuntime(
+            _Client(),
+            log=messages.append,
+            policy="graspgenx",
+            grasp_generator=lambda _points: (
+                np.stack([_topdown_pose((0.46, 0.0, -0.34))]),
+                np.array([0.9]),
+            ),
+            target_observer=lambda: SimpleNamespace(
+                fwd=0.40, lat=0.0, z=-0.40, valid=True
+            ),
+            points_fn=lambda _target, client=None: cloud,
+            grasp_poll=1,
+        )
+        runtime._teleop = _Arm(events)
+
+        runtime._grasp(target)
+
+        self.assertFalse(
+            any(
+                event[0] == "ggx-center"
+                for event in events
+                if isinstance(event, tuple)
+            )
+        )
+        self.assertTrue(any("inside base keepout" in msg for msg in messages))
 
     def test_wrist_depth_localizes_only_surface_near_base_prediction(self):
         depth = np.full((100, 100), 0.40, dtype=np.float32)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -32,6 +33,10 @@ DEPTH_WHICH = "base"
 # into an arm command.  Translation is camera -> arm_base_link, in metres.
 BASE_CAMERA_TF_FRAME = "Base_Camera_Center"
 BASE_CAMERA_TO_ARM_T = np.array([0.22134, 0.0, -0.04833], dtype=np.float64)
+# The RGB topic is the left member of the stereo pair, while both its header
+# and TF alias describe the rig centre. At close range that omitted half-
+# baseline appears directly as a systematic arm-right localization error.
+BASE_LEFT_TO_CENTER_LAT_M = 0.028
 BASE_CAMERA_TO_ARM_R = np.array(
     [
         [-0.00000347, -0.34200427, 0.93969840],
@@ -281,8 +286,18 @@ def base_camera_to_car_transform():
     Localization converts car -> arm by subtracting ``ARM_BASE_FWD``.  Add that
     offset here so the measured camera -> arm translation is applied exactly once.
     """
-    t = BASE_CAMERA_TO_ARM_T + np.array([ARM_BASE_FWD, 0.0, 0.0])
+    t = BASE_CAMERA_TO_ARM_T + np.array(
+        [ARM_BASE_FWD, _base_left_lateral_offset_m(), 0.0]
+    )
     return BASE_CAMERA_TO_ARM_R.copy(), t
+
+
+def _base_left_lateral_offset_m() -> float:
+    raw = os.environ.get("MARC_BASE_LEFT_TO_CENTER_LAT_M")
+    try:
+        return BASE_LEFT_TO_CENTER_LAT_M if raw is None else float(raw)
+    except (TypeError, ValueError):
+        return BASE_LEFT_TO_CENTER_LAT_M
 
 
 def car_to_arm_base(fwd, lat, up, arm_base_fwd=ARM_BASE_FWD):
@@ -693,6 +708,7 @@ class NearFieldAcquire:
         rgb = None
         bbox = None
         det = None
+        unsupported_logged = False
 
         while c.is_running and c.now_s() < deadline:
             now = c.now_s()
@@ -703,8 +719,23 @@ class NearFieldAcquire:
                 result = self.detector.detect_candidates(rgb, ttype)
                 status = result.get("status")
                 if status == "unsupported_target":
-                    self._stop()
-                    return LocalizedTarget(valid=False, reason="unsupported_target")
+                    # A reveal/grounding result may legitimately name a class
+                    # newer than this bundled detector. Keep the exact detector
+                    # contract, but allow the motion-only grounding scan below.
+                    if not unsupported_logged:
+                        unsupported_logged = True
+                        log.warning(
+                            "[nearfield] unsupported YOLO class %s; using "
+                            "reveal/grounding for yaw-only search",
+                            ttype or "-",
+                        )
+                    result = {
+                        "status": "not_detected",
+                        "target_type": ttype,
+                        "rgb_shape": tuple(rgb.shape[:2]),
+                        "candidates": [],
+                    }
+                    status = "not_detected"
                 if status not in {"ok", "not_detected"}:
                     self._stop()
                     return LocalizedTarget(valid=False, reason=str(status or "detector_error"))
@@ -757,7 +788,31 @@ class NearFieldAcquire:
                 radius,
                 d_obj,
             )
-            lin, ang = self._command(now, n_obj, err, fwd_obj, may_center=may_center)
+            grounding_search = (
+                n_obj <= 0
+                and pose is not None
+                and hint_xy is not None
+                and len(pose) >= 3
+                and len(hint_xy) >= 2
+            )
+            if grounding_search:
+                distance = math.hypot(
+                    float(hint_xy[0]) - float(pose[0]),
+                    float(hint_xy[1]) - float(pose[1]),
+                )
+                hint_yaw = yaw_toward_hint(pose, hint_xy)
+                if distance > 0.15 and abs(hint_yaw) > 0.05:
+                    lin, ang = 0.0, hint_yaw
+                else:
+                    # Once facing the grounded area, scan in place. Never
+                    # advance without a YOLO box and calibrated RGB-D range.
+                    lin, ang = self._command(
+                        now, n_obj, err, fwd_obj, may_center=True
+                    )
+            else:
+                lin, ang = self._command(
+                    now, n_obj, err, fwd_obj, may_center=may_center
+                )
             if self._phase != prev_phase:
                 self._dump_frame(self._phase, rgb, bbox, "" if det is None else (det.get("name") or ""))
             lin, ang = gated_cmd_vel(pose, lin, ang, hint_xy, radius, dt=dt)
@@ -861,6 +916,7 @@ class NearFieldAcquire:
             pass
         rgb_shapes = []
         depth_shapes = []
+        depth_by_shape = getattr(c, "get_robot_depth_hw", None)
         n = LOCK_FRAMES
         for _ in range(n):
             rgb_msg = c.get_robot_image(CAMERA)
@@ -871,6 +927,19 @@ class NearFieldAcquire:
                 rgb_shapes.append(tuple(rgb.shape[:2]))
             if depth is not None:
                 depth_shapes.append(tuple(depth.shape[:2]))
+            # ``base/depth`` is multiplexed. Its latest message can remain the
+            # 480x640 close-up stream even though the SDK still has the latest
+            # calibrated 360x640 chassis frame in its shape-keyed cache. Probe
+            # that cache explicitly instead of repeating the same bad live read
+            # for every snapshot attempt.
+            if depth_by_shape is not None:
+                cached_msg = depth_by_shape(DEPTH_WHICH, CHASSIS_DEPTH_HW)
+                cached_depth = _image_to_depth(cached_msg)
+                if (
+                    cached_depth is not None
+                    and tuple(cached_depth.shape[:2]) == CHASSIS_DEPTH_HW
+                ):
+                    depth_shapes.append(CHASSIS_DEPTH_HW)
             getter = getattr(c, "list_robot_image_shapes", None)
             if getter is not None:
                 for sh in getter(CAMERA):
@@ -887,7 +956,6 @@ class NearFieldAcquire:
                 sorted(set(depth_shapes)),
             )
             return False
-        depth_by_shape = getattr(c, "get_robot_depth_hw", None)
         if depth_by_shape is not None and self._lock_depth is not None:
             selected_depth = depth_by_shape(DEPTH_WHICH, self._lock_depth)
             self._lock_frame = str(
@@ -988,15 +1056,21 @@ class NearFieldAcquire:
             if T is not None:
                 R, t = T
                 # T maps camera -> arm_base; shift +X so optical_to_car_base stays in car_base
-                # (car_to_arm_base then subtracts ARM_BASE_FWD once).
-                t = np.asarray(t, dtype=np.float64) + np.array([ARM_BASE_FWD, 0.0, 0.0])
+                # (car_to_arm_base then subtracts ARM_BASE_FWD once). The image
+                # is from the left imager although its frame names the rig centre.
+                t = np.asarray(t, dtype=np.float64) + np.array(
+                    [ARM_BASE_FWD, _base_left_lateral_offset_m(), 0.0]
+                )
                 return R, t
             log.warning(
                 "[nearfield] no TF for image frame %r; using calibrated base camera",
                 frame or "<empty>",
             )
             return base_camera_to_car_transform()
-        return T
+        R, t = T
+        return R, np.asarray(t, dtype=np.float64) + np.array(
+            [0.0, _base_left_lateral_offset_m(), 0.0]
+        )
 
 
 def _quat_to_R(x, y, z, w):

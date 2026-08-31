@@ -37,21 +37,30 @@ The platform publishes base and gripper stereo RGB, `32FC1` depth, and organized
 `PointCloud2` topics. The quick path reconstructs an arm-frame object cloud from
 the already-aligned base depth crop. **G** now runs this sequence: base YOLO/depth
 snapshot → support-plane-reduced object cloud → deterministic camera-entry stage
-→ GraspMoE pose selection → Robotiq base-to-fingertip transform → short top-down
-pregrasp/contact motion → immediate `0.703` close → lift → hold verification.
-Side grasps, far TCPs, missing depth, and unverified `holding=True` all fail closed.
+→ GraspMoE pose selection → class/posture profile → Robotiq contact motion
+→ immediate `0.703` close → lift → hold verification. Far TCPs, missing
+depth, unknown side-grasp profiles, and unverified `holding=True` all fail closed.
 The handoff stays above the observed object top. YOLO supplies the crop, while its
 deprojected depth cloud supplies a robust top-down footprint: elongated objects
 finalize jaw yaw on the footprint's narrow axis and execute at its centre
 cross-section. The GraspGen-X candidate still has to provide a safe top-down pose,
 and the measured narrow width must fit the configured aperture. World closing-axis
 yaw is converted through the default wrist frame before IK (the default local +X
-points toward arm-base -Y). The arm centres and rotates at a safe height before a
-vertical pregrasp/contact descent. Final contact treats the lower object envelope
-as a conservative local support-plane estimate and fails closed when fingertip
-floor clearance cannot be preserved. Its base contact plane is 35% down from the
-observed top with at least 8 cm between the finger-pad midpoint and support, then
-a calibrated 3 cm upward offset prevents the final close from touching the floor.
+points toward arm-base -Y). The validated lying motion is a vertical top-down
+grasp. The validated upright motion raises quickly, folds at clearance, extends
+behind the object, descends only to its guarded transition, folds in place, then
+makes a slow level 15 mm advance before closing. It never restores the lower
+cloud-contact Z after folding. Upright profiles use a measured 30 mm left
+pad-midpoint bias and accept stable centres through 0.68 m; lying profiles retain
+the 0.58 m envelope.
+
+Class routing is centralized in `grasp_profiles.py`. Mug, cola can, juice,
+disposable cup, umbrella, and sunblock each have copied `lying_<class>` and
+`upright_<class>` profiles. Tissue and pencilcase always use their lying profile.
+An upright cracker box uses `upright_cracker_box`, copied from the lying-tumbler
+motion. A flat cracker box resolves to `lying_cracker_box` with `flip_required`
+and fails before arm movement until a physical flip-and-reacquire trajectory is
+calibrated; it never falls through to a wide generic pinch.
 Clearly elongated footprints use their narrow-axis yaw; near-round/upright objects
 keep the default jaw axis and avoid an arbitrary wrist rotation. The saved cloud
 determines width/yaw, while fresh YOLO RGB-D localization is gated independently
@@ -123,7 +132,7 @@ and yaw each scene so boxes are not glued to one patch of the image.
 
 1. Arm moves to a **joint-space ready** pose (`MARC_READY_J1…J6`), then teleop uses EE-delta IK.
 2. **MANUAL_BASE** — `i/k/j/l` place and aim the chassis; `A` starts auto-approach.
-3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** and **prefers 360×640 chassis depth** when that shape is in the lock window. Then **stop-turn-go** on **YOLO**: ALIGN yaws in place until the box sits in the base-camera center, DRIVE goes straight for a short burst, and it re-ALIGNS if the box drifts or is lost. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **arm-base forward using the calibrated pitched/offset base-camera transform** (`MARC_APPROACH_STOP_M`, default 0.56 m). The final crawl stops at whichever safety boundary arrives first: the object's lower box edge entering the configured bottom-frame margin (`MARC_APPROACH_FRAME_BOTTOM_MARGIN`, default 10%) or arm-base forward reaching the hard range fallback (`MARC_APPROACH_ALREADY_NEAR`, default 0.44 m). Wall-clock `OVERRUN_M / speed` is only a cap, because the practice sim often closes much slower than `cmd_vel` (`C` cancels).
+3. **AUTO_APPROACH** — when two resolutions share `base_left`, locks the **taller 480×640 chassis** and **prefers 360×640 chassis depth** when that shape is in the lock window. Then **stop-turn-go** on **YOLO + RGB-D**: ALIGN steers the deprojected object lateral coordinate onto the arm/base centerline (using the YOLO box midpoint only when depth localization is unavailable), DRIVE goes straight for a short burst, and it re-ALIGNS if the target drifts or is lost. Reaching a range or frame boundary blocks further forward motion but still permits final yaw alignment; completion requires the arm-frame centering tolerance. It does **not** crawl without a detection, and a lost box is not treated as “already at our feet.” Stop is **arm-base forward using the calibrated pitched/offset base-camera transform** (`MARC_APPROACH_STOP_M`, default 0.56 m). The final crawl stops at whichever safety boundary arrives first: the object's lower box edge entering the configured bottom-frame margin (`MARC_APPROACH_FRAME_BOTTOM_MARGIN`, default 10%) or arm-base forward reaching the hard range fallback (`MARC_APPROACH_ALREADY_NEAR`, default 0.44 m). Every class routed to a copied upright side profile uses the farther fallback (`MARC_APPROACH_UPRIGHT_ALREADY_NEAR`, default 0.70 m); lying/top-down profiles use the generic braking point. Wall-clock `OVERRUN_M / speed` is only a cap, because the practice sim often closes much slower than `cmd_vel` (`C` cancels).
    Each tick logs `err` (box vs image center), `obj=used/raw`, `name`/`conf`, `fwd` (arm-base), and `d` (bbox depth). `obj=0/0` means YOLO saw nothing; `obj=0/3` means boxes existed but were skipped (e.g. `person`).
    Inference is always restricted to the exact `MARC_TARGET_OBJECT`; an unsupported target fails closed and never falls back to all classes. RGB is passed as a PIL image. Lock dumps PNGs under `datasets/yolo_debug/`.
 4. The collector takes the same validated near-field RGB-D snapshot as
