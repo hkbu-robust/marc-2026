@@ -18,6 +18,26 @@ bash simulation-platform/marc.sh platform    # run the simulation platform
 
 Then, on a separate machine, run your agent (see `demo/`).
 
+## Agent images
+
+The submission build is baked by default. From a fresh clone, `docker compose up --build`
+builds an offline agent image containing both pinned YOLO checkpoints and GraspGen-X, plus
+a separate pinned vLLM image containing the fine-tuned Qwen3-VL-8B snapshot. At runtime the
+vLLM endpoint listens only on participant-host loopback and all Hub clients are offline.
+
+For rebuild-free local code iteration, keep the ignored model snapshots on the host and use
+the development override:
+
+```bash
+MARC_QWEN_HOST_MODEL_DIR=/path/to/qwen3-vl-8b-stage1-finetuned \
+  docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
+
+The override is the explicit development flag: it skips every remote artifact download,
+live-mounts `marc_agent/` and `demo/`, and uses the analytic IK fallback. The two ignored
+YOLO `model.pt` files must already exist under `models/runtime/`; fetch all pinned host
+artifacts with `PYTHONPATH=. python3 models/runtime/fetch_runtime_weights.py`.
+
 ## Documentation
 
 The developer guide is the single source of truth for setup, the SDK/API reference, and submission:

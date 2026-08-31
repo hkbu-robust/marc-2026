@@ -24,6 +24,7 @@ services:
       target: agent
       network: host
       args:
+        MARC_BUILD_MODE: "${MARC_BUILD_MODE:-baked}"
         # Qwen runs in the host vLLM process, so do not bake it into this image.
         MARC_QWEN_BACKEND: remote
     image: marc-agent:local       # local build artifact (do not redistribute)
@@ -87,6 +88,7 @@ services:
       entitlements:
         - network.host
       args:
+        MARC_BUILD_MODE: "${MARC_BUILD_MODE:-baked}"
         # Dataset collection uses near-field YOLO, not the stage-1 Qwen model.
         # This selects fetch_runtime_weights.py's skip path instead of baking
         # the multi-gigabyte local Qwen snapshot into the probe image.
@@ -188,6 +190,9 @@ services:
       context: ..
       dockerfile: demo/Dockerfile
       target: manip-probe
+      args:
+        MARC_BUILD_MODE: "${MARC_BUILD_MODE:-baked}"
+        MARC_QWEN_BACKEND: remote
     image: marc-agent-manip-probe:local
     network_mode: host
     working_dir: /agent/demo

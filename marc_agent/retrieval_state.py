@@ -201,7 +201,10 @@ def close_enough_to_search(
     return dist <= radius + float(goal_tol)
 
 
-YOLO_CENTER_DEPTH_M = 2.5
+# The standalone manipulation flow is entered only after the robot has been
+# brought near the object.  A distant box is useful evidence for navigation,
+# but is not a safe reason to hand control to the close-range controller.
+YOLO_CENTER_DEPTH_M = 1.0
 
 
 def yolo_may_center(

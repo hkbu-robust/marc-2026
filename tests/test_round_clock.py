@@ -294,7 +294,7 @@ class QwenTimeBudgetTests(unittest.TestCase):
         with self.assertLogs("marc_agent.qwen_remote", level="INFO"):
             with self.assertRaises(QwenRemoteTimeout):
                 verifier(board)
-        self.assertEqual([2.0], calls)
+        self.assertAlmostEqual(2.0, calls[0], places=3)
 
 
 if __name__ == "__main__":

@@ -274,6 +274,7 @@ class RemoteQwenSarVerifier:
         self._post = post
         self.last_metrics: QwenRemoteMetrics | None = None
         self.budget_timeout_s: float | None = None
+        self._budget_deadline_s: float | None = None
         self.last_finish_reason: str | None = None
         self._scene_cache: dict[str, str] = {}
         self._scene_description: str | None = None
@@ -281,6 +282,7 @@ class RemoteQwenSarVerifier:
 
     def set_budget_timeout(self, timeout_s: float) -> None:
         self.budget_timeout_s = float(timeout_s)
+        self._budget_deadline_s = time.monotonic() + max(0.0, float(timeout_s))
 
     def retry_longer(self, board: "CandidateBoard") -> str:
         """Re-post with more tokens after a truncated reply failed to parse."""
@@ -333,7 +335,13 @@ class RemoteQwenSarVerifier:
             float(self.config.timeout_s),
             float(self.config.wall_timeout_s),
         )
-        budget = self.budget_timeout_s
+        budget = (
+            None
+            if self._budget_deadline_s is None
+            else max(0.0, self._budget_deadline_s - time.monotonic())
+        )
+        if budget == 0.0:
+            raise QwenRemoteTimeout("round Qwen budget exhausted")
         if budget is not None:
             timeout_s = min(timeout_s, float(budget))
         retry_ok = budget is None or float(budget) >= 2.0 * timeout_s

@@ -489,6 +489,10 @@ class DepthApproachController:
     def _measure(self) -> Optional[dict]:
         """Read RGB + depth; YOLO on new RGB. None if neither stream is usable."""
         now = time.monotonic()
+        try:
+            frame_now = float(self._client.now_s())
+        except (AttributeError, TypeError, ValueError):
+            frame_now = now
         rgb_msg = self._rgb_msg(self._lock_rgb)
         depth_msg = self._depth_msg(self._lock_depth)
 
@@ -509,7 +513,7 @@ class DepthApproachController:
                     rgb_shape = None
                 else:
                     rgb_stamp = _stamp_key(rgb_msg)
-                    rgb_new = self._note_new_frame(rgb_stamp, now)
+                    rgb_new = self._note_new_frame(rgb_stamp, frame_now)
                     if rgb_new:
                         self._last_rgb_stamp = rgb_stamp
             else:
@@ -638,6 +642,11 @@ class DepthApproachController:
             "target_locked": bool(det is not None and det.get("near_lock_reused")),
             "target_lock_active": self._near_lock_target is not None,
             "is_new": bool(rgb_new),
+            "frame_age_s": (
+                float("inf")
+                if self._last_new_frame_t is None
+                else max(0.0, frame_now - self._last_new_frame_t)
+            ),
             "rgb_shape": None if det is None else (det.get("rgb_shape") or rgb_shape),
             "depth_shape": depth_shape,
             "stamp": rgb_stamp,
@@ -744,8 +753,11 @@ class DepthApproachController:
         lat = None if m is None else m.get("lat_err")
         n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
         is_new = bool(m is not None and m.get("is_new"))
+        frame_age = float("inf") if m is None else float(
+            m.get("frame_age_s", 0.0 if is_new else float("inf"))
+        )
+        may_turn = frame_age <= float(self.cfg.stale_stop_s)
         has_obj = lat is not None and n_obj > 0
-        lock_active = bool(m is not None and m.get("target_lock_active"))
         range_ready = self._range_m(m) is not None
         if has_obj:
             self._lat_err = float(lat)
@@ -761,16 +773,16 @@ class DepthApproachController:
                 return 0.0, 0.0
             if self._phase != "align":
                 self._enter("align", f"range reached; final arm-center err={err:+.2f}")
-            return 0.0, self._yaw(err)
+            return (0.0, self._yaw(err)) if may_turn else (0.0, 0.0)
         lock_drive_tol = min(
             float(self.cfg.realign),
             max(float(self.cfg.center_tol), float(self.cfg.target_lock_drive_tol)),
         )
-        if lock_active and range_ready and has_obj and abs(float(lat)) <= lock_drive_tol:
+        if range_ready and has_obj and abs(float(lat)) <= lock_drive_tol:
             if self._phase != "drive":
                 self._enter(
                     "drive",
-                    f"spatial lock err={float(lat):+.2f} "
+                    f"approach aligned err={float(lat):+.2f} "
                     f"tol={lock_drive_tol:.2f}",
                 )
             return speed, 0.0
@@ -783,8 +795,8 @@ class DepthApproachController:
             if since < self.cfg.align_settle_s:
                 return 0.0, 0.0
             if not has_obj or err is None:
-                # Wait for YOLO — never crawl without a box.
-                return 0.0, 0.0
+                # Reverse the last alignment turn to bring an overshot target back into view.
+                return (0.0, -self._yaw(err)) if err is not None else (0.0, 0.0)
             if abs(err) <= self.cfg.center_tol:
                 if is_new:
                     self._align_ok += 1
@@ -803,7 +815,7 @@ class DepthApproachController:
                         f"after {timeout:.1f}s — holding yaw (not driving)"
                     )
                     self._timeout_logged = True
-            return 0.0, self._yaw(err)
+            return (0.0, self._yaw(err)) if may_turn else (0.0, 0.0)
 
         self._drive_m = since * speed
         if not has_obj:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download pinned runtime weights at Docker build (or on a developer host).
 
-Skip any artifact that is already complete. Hub 429/502/503 sleeps and retries
+Skip any artifact that is already complete. Transient Hub failures sleep and retry
 inside this process so a rate limit does not discard the rest of the layer.
 Do not call this at scoring runtime; the image is offline after this script finishes.
 """
@@ -26,8 +26,14 @@ if str(_REPO_ROOT) not in sys.path:
 from marc_agent.graspgenx_policy import has_checkpoint
 from marc_agent.perception.qwen_runtime import QwenRuntimeConfig, bundle_status
 
-QWEN_REPO = "Qwen/Qwen3-VL-8B-Instruct"
-QWEN_REVISION = "60595ebc30ec8e3b1d3b9e65d4943ca011c0006a"
+QWEN_REPO = "roBUst-marc-2026/qwen3-vl-8b-stage1-finetuned"
+QWEN_REVISION = "b2360c86972018edd3df1c7ac21e28c129317928"
+STAGE1_REPO = "roBUst-marc-2026/stage1-cctv-detector"
+STAGE1_REVISION = "f792ba38c5ce7f4a118d3c55b2bd3ccd3c602600"
+STAGE1_SHA256 = "64296e4b479855ed23b280ab3ce118e5adc7347e0241a21d6f365f8fe8d28cf2"
+STAGE2_REPO = "roBUst-marc-2026/stage2-nearfield-detector"
+STAGE2_REVISION = "868d9faef9ad52326371c33c9f7e9587d528885b"
+STAGE2_SHA256 = "ff8e156b65ee556e2eae31a5fee94f8a3056d9dc92c771c1be48762cea7f6cc7"
 GRASPGENX_MODEL_REPO = "adithyamurali/GraspGenXModel"
 GRASPGENX_MODEL_REVISION = "7c834043c11a11417e31d6d5ea9355801e40a2c1"
 GRIPPER_DATASET_REPO = "adithyamurali/gripper_descriptions"
@@ -35,10 +41,10 @@ GRIPPER_DATASET_REVISION = "19a03c00d19aeaf052d0f6801f0041982d676e8a"
 YOLO11X_REPO = "Ultralytics/YOLO11"
 YOLO11X_FILENAME = "yolo11x.pt"
 YOLO11X_SHA256 = "7bc158aa95c0ebfdd87f70f01653c1131b93e92522dbe15c228bcd742e773a24"
-# Initial try plus these sleeps: 429/502/503 inside one Docker RUN so a Hub
+# Initial try plus these sleeps inside one Docker RUN so a transient Hub
 # rate limit does not discard Qwen/GraspGen-X already written in this layer.
 RETRY_BACKOFF_S = (30, 60, 120, 240, 300)
-RETRY_STATUSES = {429, 502, 503}
+RETRY_STATUSES = {429, 500, 502, 503, 504}
 RETRY_AFTER_CAP_S = 600.0
 
 SnapshotFn = Callable[..., str]
@@ -47,6 +53,8 @@ SnapshotFn = Callable[..., str]
 def _default_paths() -> dict[str, Path]:
     return {
         "qwen": _HERE / "stage1-sar-qwen" / "model",
+        "stage1": _HERE / "stage1-cctv-detector" / "model.pt",
+        "stage2": _HERE / "stage2-nearfield-detector" / "model.pt",
         "graspgenx": _HERE / "graspgenx",
         "grippers": _HERE / "graspgenx" / "grippers",
         "yolo11x": _REPO_ROOT / "demo" / "weights" / "yolo11x.pt",
@@ -90,7 +98,16 @@ def _is_retryable(exc: BaseException) -> bool:
     if status in RETRY_STATUSES:
         return True
     text = str(exc).lower()
-    return "429" in text and "too many requests" in text
+    return any(
+        marker in text
+        for marker in (
+            "too many requests",
+            "timed out",
+            "connection reset",
+            "temporary failure",
+            "incomplete read",
+        )
+    )
 
 
 def _retry_sleep_s(exc: BaseException, fallback: float) -> float:
@@ -109,7 +126,7 @@ def _retry_sleep_s(exc: BaseException, fallback: float) -> float:
 
 
 def _hub_call(label: str, fn: Callable, *args, sleeper=None, delays=None, **kwargs):
-    """Call a Hub downloader, sleeping on 429/502/503 (honors Retry-After)."""
+    """Call a Hub downloader, sleeping on transient failures (honors Retry-After)."""
     wait = tuple(RETRY_BACKOFF_S if delays is None else delays)
     pause = time.sleep if sleeper is None else sleeper
     attempts = len(wait) + 1
@@ -234,13 +251,77 @@ def fetch_grippers(
     return f"fetched grippers ({dest})"
 
 
-def _hub_file_download(repo_id: str, filename: str, local_dir: str) -> str:
+def _hub_file_download(
+    repo_id: str,
+    filename: str,
+    local_dir: str,
+    revision: Optional[str] = None,
+) -> str:
     from huggingface_hub import hf_hub_download
 
     return hf_hub_download(
         repo_id=repo_id,
         filename=filename,
+        revision=revision,
         local_dir=local_dir,
+    )
+
+
+def fetch_checkpoint(
+    dest: Path,
+    *,
+    label: str,
+    repo_id: str,
+    revision: str,
+    expected_sha256: str,
+    hub_download=None,
+    skip_if_complete: bool = True,
+) -> str:
+    """Download one immutable checkpoint and reject partial or changed content."""
+    if skip_if_complete and dest.is_file() and _sha256(dest) == expected_sha256:
+        return f"skip {label} ({dest})"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    downloader = hub_download or _hub_file_download
+    fetched = Path(
+        _hub_call(
+            label,
+            downloader,
+            repo_id=repo_id,
+            filename="model.pt",
+            revision=revision,
+            local_dir=str(dest.parent),
+        )
+    )
+    if fetched.resolve() != dest.resolve():
+        shutil.copy2(fetched, dest)
+    digest = _sha256(dest)
+    if digest != expected_sha256:
+        dest.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"{label} checksum mismatch: got {digest}, expected {expected_sha256}"
+        )
+    return f"fetched {label} ({dest})"
+
+
+def fetch_stage1(dest: Path, **kwargs) -> str:
+    return fetch_checkpoint(
+        dest,
+        label="stage1",
+        repo_id=STAGE1_REPO,
+        revision=STAGE1_REVISION,
+        expected_sha256=STAGE1_SHA256,
+        **kwargs,
+    )
+
+
+def fetch_stage2(dest: Path, **kwargs) -> str:
+    return fetch_checkpoint(
+        dest,
+        label="stage2",
+        repo_id=STAGE2_REPO,
+        revision=STAGE2_REVISION,
+        expected_sha256=STAGE2_SHA256,
+        **kwargs,
     )
 
 
@@ -291,6 +372,14 @@ def include_qwen(environ: Optional[dict[str, str]] = None) -> bool:
     return str(env.get("MARC_QWEN_BACKEND") or "local").strip().lower() == "local"
 
 
+def baked_build(environ: Optional[dict[str, str]] = None) -> bool:
+    env = os.environ if environ is None else environ
+    mode = str(env.get("MARC_BUILD_MODE") or "baked").strip().lower()
+    if mode not in {"baked", "development"}:
+        raise ValueError("MARC_BUILD_MODE must be baked or development")
+    return mode == "baked"
+
+
 def fetch_all(
     *,
     paths: Optional[dict[str, Path]] = None,
@@ -298,12 +387,19 @@ def fetch_all(
     hub_download=None,
     skip_if_complete: bool = True,
     bake_qwen: Optional[bool] = None,
+    bake: Optional[bool] = None,
+    components: Optional[tuple[str, ...]] = None,
 ) -> list[str]:
     _allow_hub()
     dests = paths or _default_paths()
+    if not (baked_build() if bake is None else bake):
+        return ["skip runtime artifacts (development build)"]
+    requested = set(
+        components or ("qwen", "stage1", "stage2", "graspgenx", "grippers")
+    ).intersection(dests)
     should_qwen = include_qwen() if bake_qwen is None else bake_qwen
     lines: list[str] = []
-    if should_qwen:
+    if "qwen" in requested and should_qwen:
         lines.append(
             fetch_qwen(
                 dests["qwen"],
@@ -311,28 +407,48 @@ def fetch_all(
                 skip_if_complete=skip_if_complete,
             )
         )
-    else:
+    elif "qwen" in requested:
         lines.append("skip qwen (MARC_QWEN_BACKEND is not local)")
-    lines.extend(
-        [
-            # Fast-iteration branch: do not fetch GraspGenX checkpoints or grippers.
-            # fetch_graspgenx(
-            #     dests["graspgenx"],
-            #     snapshot_download=snapshot_download,
-            #     skip_if_complete=skip_if_complete,
-            # ),
-            # fetch_grippers(
-            #     dests["grippers"],
-            #     snapshot_download=snapshot_download,
-            #     skip_if_complete=skip_if_complete,
-            # ),
-            # fetch_yolo11x(
-            #     dests["yolo11x"],
-            #     hub_download=hub_download,
-            #     skip_if_complete=skip_if_complete,
-            # ),
-        ]
-    )
+    if "stage1" in requested:
+        lines.append(
+            fetch_stage1(
+                dests["stage1"],
+                hub_download=hub_download,
+                skip_if_complete=skip_if_complete,
+            )
+        )
+    if "stage2" in requested:
+        lines.append(
+            fetch_stage2(
+                dests["stage2"],
+                hub_download=hub_download,
+                skip_if_complete=skip_if_complete,
+            )
+        )
+    if "graspgenx" in requested:
+        lines.append(
+            fetch_graspgenx(
+                dests["graspgenx"],
+                snapshot_download=snapshot_download,
+                skip_if_complete=skip_if_complete,
+            )
+        )
+    if "grippers" in requested:
+        lines.append(
+            fetch_grippers(
+                dests["grippers"],
+                snapshot_download=snapshot_download,
+                skip_if_complete=skip_if_complete,
+            )
+        )
+    if "yolo11x" in requested:
+        lines.append(
+            fetch_yolo11x(
+                dests["yolo11x"],
+                hub_download=hub_download,
+                skip_if_complete=skip_if_complete,
+            )
+        )
     return lines
 
 
@@ -343,6 +459,16 @@ def main() -> None:
         action="store_true",
         help="re-download even when a complete snapshot is already present",
     )
+    parser.add_argument(
+        "--only",
+        choices=("qwen", "stage1", "stage2", "graspgenx", "grippers", "yolo11x"),
+        help="fetch one artifact (used by dedicated Docker images)",
+    )
+    parser.add_argument(
+        "--destination",
+        type=Path,
+        help="destination for --only (defaults to the repository runtime path)",
+    )
     args = parser.parse_args()
     contract = json.loads((_HERE / "stage1-sar-qwen" / "runtime_contract.json").read_text())
     revision = (contract.get("model") or {}).get("revision")
@@ -350,7 +476,16 @@ def main() -> None:
         raise SystemExit(
             f"fetch pin {QWEN_REVISION} does not match runtime_contract.json {revision}"
         )
-    for line in fetch_all(skip_if_complete=not args.force):
+    paths = _default_paths()
+    if args.only and args.destination:
+        paths[args.only] = args.destination
+    components = (args.only,) if args.only else None
+    for line in fetch_all(
+        paths=paths,
+        skip_if_complete=not args.force,
+        bake=True if args.only else None,
+        components=components,
+    ):
         print(f"[fetch-runtime] {line}", flush=True)
 
 

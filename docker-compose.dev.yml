@@ -1,0 +1,12 @@
+# Fast local iteration: reuse baked images/assets and live-mount source code.
+# docker compose -f docker-compose.yml -f docker-compose.dev.yml up --no-build
+services:
+  agent:
+    environment:
+      MARC_NAV_MAX_LINEAR: "5.0"
+    volumes:
+      - ./marc_agent:/agent/marc_agent:ro
+      - ./demo/manip_dataset:/agent/demo/manip_dataset:ro
+      - ./demo/nearfield.py:/agent/demo/nearfield.py:ro
+      - ./demo/mock_agent_navigation.py:/agent/demo/mock_agent_navigation.py:ro
+      - ./demo/participant_app.py:/agent/demo/participant_app.py:ro

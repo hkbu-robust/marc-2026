@@ -1301,6 +1301,16 @@ def select_object_candidate(
                 "[vlm] low-confidence geometry guard selected=%s",
                 selected.target.candidate_id,
             )
+        elif (
+            selected.target.confidence < 0.15
+            and geometry.target.class_name == parsed.target_type
+            and geometry.target.confidence >= 0.5
+        ):
+            selected = geometry
+            log.info(
+                "[vlm] weak-override geometry guard selected=%s",
+                selected.target.candidate_id,
+            )
         target_id, anchor_id = _pair_key(selected)
         log.info(
             "[vlm] object verified target=%s anchor=%s backend=%s output=%s",
