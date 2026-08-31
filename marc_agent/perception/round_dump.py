@@ -195,7 +195,7 @@ def dump_stage_round(
     """Write one Stage 1/2 pipeline result into ``out_dir``."""
     if not dump_enabled():
         return None
-    out_dir.mkdir(parents=True, exist_ok=True)
+    dump_stage_artifacts(out_dir, round_result)
     candidates = getattr(round_result, "candidates", None)
     command = getattr(candidates, "command_text", "") if candidates is not None else ""
     parsed = getattr(candidates, "parsed", None) if candidates is not None else None
@@ -244,17 +244,9 @@ def dump_stage_round(
             "requested_situation": sar.requested_situation,
             "selected_id": sar.selected.candidate_id if sar.selected else None,
         }
-    _save_qwen_artifacts(out_dir, object_sel, sar)
     if extra:
         selection["extra"] = extra
     _write_json(out_dir / "summary.json", selection)
-    saved = save_camera_frames(
-        out_dir,
-        detections,
-        target_id=getattr(round_result, "target_id", None),
-        anchor_id=getattr(round_result, "anchor_id", None),
-    )
-    log.info("[round-dump] %s cameras=%d -> %s", out_dir.name, saved, out_dir.resolve())
     return out_dir
 
 
