@@ -62,6 +62,7 @@ from marc_agent.retrieval_state import (
     snapshot_approach_goal,
 )
 from marc_agent.round_clock import RoundClock
+from marc_agent.stage2_delivery import Stage2Deadline, Stage2Delivery
 from mock_agent_vla import MockVLAGrounding
 from marc_agent.lidar_safety import advise, pointcloud2_xyz
 from nearfield import (
@@ -79,9 +80,6 @@ from manip_dataset.pick_target import stable_pick_target
 log = logging.getLogger("participant_app")
 
 # -- Stage 2 navigation parameters --
-# Demo-internal giveup so the drive loop cannot spin forever if a goal is unreachable. This is NOT
-# the competition timeout - the platform counts and enforces the real Stage 2 time limit.
-STAGE2_NAV_TIMEOUT_S = 1800.0
 STAGE2_NAV_RATE_HZ = 10.0
 STAGE2_NAV_DT = 1.0 / STAGE2_NAV_RATE_HZ
 STAGE2_INFLATION_M = 0.55      # body radius plus curb pad (keeps wheels off the grass)
@@ -90,7 +88,6 @@ STAGE2_STUCK_MOVE_M = 0.05
 STAGE2_REPLAN_CAP = 50         # fail closed if the crop stays sealed
 GOAL_TOLERANCE = 0.7           # reached test (m) around the search-area approach goal
 STAGE2_APPROACH_TIMEOUT_S = 120.0
-STAGE2_DELIVERY_RESERVE_S = 120.0
 
 # -- Pick approach --
 # Stop the chassis this far (m) in front of the object, then close the last stretch with a
@@ -119,9 +116,9 @@ class DemoParticipant:
         self._stage1_lock = threading.Lock()
         self._stage1_projector = None
         self._round_clock = RoundClock()
+        self._stage2_clock = Stage2Deadline()
         self._qwen_verifier = get_default_verifier()
         self._approach_snap = None
-        self._stage2_deadline = None
         self._register_handlers()
 
     # -- handler registration --
@@ -247,10 +244,16 @@ class DemoParticipant:
         # Store the runtime-provided delivery coordinate for the post-pick leg.
         self._state.adopt_mission(mission)
         self._approach_snap = None
-        self._stage2_deadline = self.client.now_s() + float(mission.time_limit)
+        deadline = self._stage2_clock.begin(mission.time_limit, self.client.now_s())
+        log.info(
+            "[Stage2] platform deadline=%.2f source=%s entry=%s guard=%.2f",
+            deadline,
+            self._stage2_clock.source,
+            self._stage2_clock.entry_s,
+            self._stage2_clock.config.platform_guard_s,
+        )
         if self._state.owner_xy is not None:
             log.info("[Stage2] owner_position(runtime-provided)=%s", self._state.owner_xy)
-        self._round_clock.begin(getattr(mission, "time_limit", None), self.client.now_s())
         if os.environ.get("MARC_STAGE2_MOCK_VLA", "").strip() == "1":
             if self._stage2_vla is None:
                 self._stage2_vla = MockVLAGrounding()
@@ -285,7 +288,7 @@ class DemoParticipant:
             expected_intent=Intent.BRING,
             projector=self._stage1_projector,
             discovery_timeout_s=timeout_s,
-            clock=self._round_clock,
+            clock=self._stage2_clock,
             verifier=self._qwen_verifier,
         )
         dump_stage_round(stage2_dir(), round_result)
@@ -335,17 +338,24 @@ class DemoParticipant:
         c = self.client
         self._approach_snap = None
         # SIM-time deadline (via /clock) -- shared across all legs, robust to real-time factor < 1.
-        deadline = min(
-            c.now_s() + STAGE2_NAV_TIMEOUT_S,
-            self._stage2_deadline or float("inf"),
-        )
+        def deadline():
+            return float(self._stage2_clock.deadline_s or c.now_s())
         dump = stage2_dir()
+
+        delivery_runtime = Stage2Delivery(
+            c,
+            self._stage2_clock,
+            self._state.owner_xy,
+            self._plan_owner_route,
+            self._navigate_owner,
+            log=log,
+        )
 
         self._wait_for_search_goal(timeout=5.0)
         search = self._state.search_xy()
         log.info("[Stage2] navigation start -- search=%s r=%.1f type=%s (timeout %.0fs)",
                  search, self._state.hint_radius, self._state.target_type or "-",
-                 max(0.0, deadline - c.now_s()))
+                 max(0.0, deadline() - c.now_s()))
 
         self._stow_arm()
         unload_cctv_yolo()
@@ -364,6 +374,7 @@ class DemoParticipant:
         )
 
         picked = False
+        pick_rt = None
         reached_search = False
         handoff = "skip_no_search"
         if search is None:
@@ -401,7 +412,7 @@ class DemoParticipant:
                 )
 
             result = None
-            while c.is_running and c.now_s() < deadline:
+            while c.is_running and c.now_s() < deadline():
                 result = self._navigate_to(
                     self._live_approach_goal,
                     deadline,
@@ -461,7 +472,7 @@ class DemoParticipant:
             log.info("[Stage2] starting calibrated near-field approach (%s)", handoff)
             reveal = self._reveal if self._reveal is not None else c.stage2_reveal
             approach_target = None
-            approach_deadline = min(deadline, c.now_s() + STAGE2_APPROACH_TIMEOUT_S)
+            approach_deadline = min(deadline(), c.now_s() + STAGE2_APPROACH_TIMEOUT_S)
             if approach_controller.start():
                 while c.is_running and c.now_s() < approach_deadline:
                     if approach_controller.tick():
@@ -477,7 +488,7 @@ class DemoParticipant:
                     "[Stage2] calibrated approach unavailable (%s); using scan fallback",
                     approach_controller.last_failure,
                 )
-            target = approach_target or nearfield.acquire(reveal, deadline)
+            target = approach_target or nearfield.acquire(reveal, deadline())
             for _ in range(5):
                 c.send_cmd_vel(0.0, 0.0)
                 c.sleep(0.1)
@@ -549,122 +560,95 @@ class DemoParticipant:
                     return nxt
 
                 pick_rt._reacquire_fn = _reacquire
-                pick_deadline = deadline - STAGE2_DELIVERY_RESERVE_S
-                pick = None
-                total_attempts = 0
-                batch = 0
-                while c.is_running and c.now_s() < pick_deadline and not picked:
-                    batch += 1
-                    # Zero cmd_vel does not stop gravity-driven rolling on slopes. Keep
-                    # the chassis anchored for staging, inference, contact, and lift.
-                    with StationaryBase(c, log=log.warning):
-                        result = pick_rt.run(
-                            target, deadline=pick_deadline, reveal=reveal,
-                        )
-                    total_attempts += result.attempts
-                    pick = replace(result, attempts=total_attempts)
-                    self._state.adopt_pick(pick)
-                    picked = pick.ok
-                    target = latest_target[0]
-                    if not picked and c.now_s() < pick_deadline:
-                        log.info(
-                            "[Stage2] pick batch %d failed after %d total attempts; "
-                            "retrying until delivery reserve",
-                            batch,
-                            total_attempts,
-                        )
+                # Zero cmd_vel does not stop gravity-driven rolling on slopes. Keep
+                # the chassis anchored for staging, inference, contact, and lift.
+                with StationaryBase(c, log=log.warning):
+                    pick = pick_rt.run(
+                        target,
+                        deadline=deadline,
+                        reveal=reveal,
+                        retry_allowed=delivery_runtime.retry_allowed,
+                    )
+                self._state.adopt_pick(pick)
+                picked = pick.ok
+                target = latest_target[0]
                 c.send_cmd_vel(0.0, 0.0)
                 if picked:
                     after_successful_pick(pick_rt, detector)
-                if pick is None:
-                    log.info("[Stage2] delivery reserve reached before first pick attempt")
-                    dump_json(dump, "pick.json", {
-                        "skipped": True,
-                        "reason": "delivery_reserve",
-                    })
-                else:
-                    dump_json(dump, "pick.json", {
-                        "ok": pick.ok,
-                        "reason": pick.reason,
-                        "attempts": pick.attempts,
-                        "grasped": pick.grasped,
-                        "basket_occupied": pick.basket_occupied,
-                        "policy": pick.policy,
-                        "target": {
-                            "name": target.name,
-                            "fwd": target.fwd,
-                            "lat": target.lat,
-                            "z": target.z,
-                            "conf": target.conf,
-                            "valid": target.valid,
-                            "bbox_xyxy": list(target.bbox_xyxy) if target.bbox_xyxy else None,
-                        },
-                    })
-                    log.info(
-                        "[Stage2] pick %s reason=%s attempts=%d grasping=%s "
-                        "basket=%s policy=%s",
-                        "ok" if picked else "failed",
-                        pick.reason,
-                        pick.attempts,
-                        pick.grasped,
-                        pick.basket_occupied,
-                        pick.policy,
-                    )
-
-        returned_to_owner = self._state.owner_xy is None
-        delivered = picked and returned_to_owner
-        delivery = None
-        if self._state.owner_xy is not None:
-            log.info("[Stage2] leg2 -> owner %s", self._state.owner_xy)
-            delivery = self._navigate_to(
-                self._state.owner_xy,
-                deadline,
-                tol=GOAL_TOLERANCE,
-                inflation_m=STAGE2_INFLATION_M,
-                exclude_m=0.6,
-                cruise=True,
-                leg="delivery",
-            )
-            returned_to_owner = delivery.reached
-            basket_at_owner = (
-                pick_rt.poll_basket() is True
-                if picked else c.is_basket_occupied() is True
-            )
-            delivered = returned_to_owner and basket_at_owner
-            log.info(
-                "[Stage2] leg2 result=%s reason=%s replans=%d basket=%s",
-                delivery.status.value,
-                delivery.reason,
-                delivery.replan_count,
-                basket_at_owner,
-            )
-            dump_json(dump, "delivery.json", {
-                "status": delivery.status.value,
-                "reason": delivery.reason,
-                "reached": delivery.reached,
-                "replan_count": delivery.replan_count,
-                "owner_xy": list(self._state.owner_xy),
-                "pose_xy": list(delivery.pose_xy) if delivery.pose_xy is not None else None,
-                "basket_occupied": basket_at_owner,
-            })
+                dump_json(dump, "pick.json", {
+                    "ok": pick.ok,
+                    "reason": pick.reason,
+                    "attempts": pick.attempts,
+                    "grasped": pick.grasped,
+                    "basket_occupied": pick.basket_occupied,
+                    "policy": pick.policy,
+                    "target": {
+                        "name": target.name,
+                        "fwd": target.fwd,
+                        "lat": target.lat,
+                        "z": target.z,
+                        "conf": target.conf,
+                        "valid": target.valid,
+                        "bbox_xyxy": list(target.bbox_xyxy) if target.bbox_xyxy else None,
+                    },
+                })
+                log.info(
+                    "[Stage2] pick %s reason=%s attempts=%d grasping=%s "
+                    "basket=%s policy=%s",
+                    "ok" if picked else "failed",
+                    pick.reason,
+                    pick.attempts,
+                    pick.grasped,
+                    pick.basket_occupied,
+                    pick.policy,
+                )
 
         if not picked:
             self._stow_arm()
 
-        c.stop()
-        if returned_to_owner:
-            log.info(
-                "[Stage2] owner reached (object_delivered=%s) -> task_complete",
-                delivered,
+        def _basket_state():
+            try:
+                value = c.is_basket_occupied()
+            except Exception:
+                return None
+            return None if value is None else bool(value)
+
+        def _recover_drop():
+            if pick_rt is None:
+                return False
+            before_reacquire(pick_rt, detector)
+            dropped_target = stable_pick_target(
+                nearfield,
+                self._state.target_type or "",
+                log=log.info,
             )
-            c.task_complete()
-        else:
-            log.warning(
-                "[Stage2] incomplete: picked=%s owner=%s delivery=%s",
-                picked,
-                self._state.owner_xy,
-                None if delivery is None else delivery.status.value,
-            )
+            if dropped_target is None:
+                return False
+            with StationaryBase(c, log=log.warning):
+                recovered = pick_rt.run(
+                    dropped_target,
+                    deadline=deadline,
+                    retry_allowed=lambda: False,
+                )
+            return recovered.ok
+
+        log.info("[Stage2] leg2 -> owner %s", self._state.owner_xy)
+        delivery = delivery_runtime.return_to_owner(
+            _basket_state,
+            _recover_drop if picked else None,
+        )
+        dump_json(dump, "delivery.json", delivery.as_dict())
+        log.info(
+            "[Stage2] delivery status=%s reason=%s owner_distance=%s "
+            "basket=%s dropped=%s recovery=%s complete=%s",
+            delivery.status,
+            delivery.reason,
+            delivery.owner_distance_m,
+            delivery.basket_occupied,
+            delivery.basket_dropped,
+            delivery.recovery_succeeded,
+            delivery.completion_sent,
+        )
 
     def _stow_arm(self):
         """Fold the arm to the HOME pose to lower the center of gravity -- tip-over prevention.
@@ -778,7 +762,7 @@ class DemoParticipant:
     def _navigate_to(self, goal, deadline, tol=GOAL_TOLERANCE,
                      inflation_m=STAGE2_INFLATION_M, exclude_m=0.6, cruise=False,
                      leg="search", search_xy=None, search_radius=0.0,
-                     handoff_fn=None):
+                     handoff_fn=None, observe_fn=None):
         """Drive to a goal (x, y) or callable via live occupancy D* Lite."""
         nav = Stage2Navigator(
             self.client,
@@ -793,7 +777,32 @@ class DemoParticipant:
         return nav.navigate_to(
             goal, deadline, leg=leg, tol=tol,
             search_xy=search_xy, search_radius=search_radius,
-            handoff_fn=handoff_fn,
+            handoff_fn=handoff_fn, observe_fn=observe_fn,
+        )
+
+    def _plan_owner_route(self, owner_xy):
+        nav = Stage2Navigator(
+            self.client,
+            dt=STAGE2_NAV_DT,
+            inflation_m=STAGE2_INFLATION_M,
+            exclude_m=0.6,
+            stuck_time_s=STAGE2_STUCK_TIME_S,
+            stuck_move_m=STAGE2_STUCK_MOVE_M,
+            replan_cap=STAGE2_REPLAN_CAP,
+            cruise=True,
+        )
+        return nav.plan_to(owner_xy)
+
+    def _navigate_owner(self, owner_xy, deadline, observe_fn):
+        return self._navigate_to(
+            owner_xy,
+            deadline,
+            tol=self._stage2_clock.config.owner_tolerance_m,
+            inflation_m=STAGE2_INFLATION_M,
+            exclude_m=0.6,
+            cruise=True,
+            leg="delivery",
+            observe_fn=observe_fn,
         )
 
     # -- notifications --
@@ -816,9 +825,14 @@ class DemoParticipant:
 
     def _on_state_change(self, old, new):
         log.info("[STATE] %s -> %s", old, new)
+        if new == "STAGE2_RUN":
+            self._stage2_clock.enter(self.client.now_s())
+        elif old == "STAGE2_RUN" and new != "STAGE2_RUN":
+            self._stage2_clock.leave()
 
     def _on_time_remaining(self, remaining):
         self._round_clock.note(remaining, self.client.now_s())
+        self._stage2_clock.note_remaining(remaining, self.client.now_s())
 
     def _on_time_expired(self, which):
         log.info("[TIME] expired: %s", which)
