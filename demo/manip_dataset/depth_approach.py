@@ -638,6 +638,11 @@ class DepthApproachController:
             "target_locked": bool(det is not None and det.get("near_lock_reused")),
             "target_lock_active": self._near_lock_target is not None,
             "is_new": bool(rgb_new),
+            "frame_age_s": (
+                float("inf")
+                if self._last_new_frame_t is None
+                else max(0.0, now - self._last_new_frame_t)
+            ),
             "rgb_shape": None if det is None else (det.get("rgb_shape") or rgb_shape),
             "depth_shape": depth_shape,
             "stamp": rgb_stamp,
@@ -744,6 +749,10 @@ class DepthApproachController:
         lat = None if m is None else m.get("lat_err")
         n_obj = 0 if m is None else int(m.get("lat_n_obj") or 0)
         is_new = bool(m is not None and m.get("is_new"))
+        frame_age = float("inf") if m is None else float(
+            m.get("frame_age_s", 0.0 if is_new else float("inf"))
+        )
+        may_turn = frame_age <= float(self.cfg.stale_stop_s)
         has_obj = lat is not None and n_obj > 0
         range_ready = self._range_m(m) is not None
         if has_obj:
@@ -760,7 +769,7 @@ class DepthApproachController:
                 return 0.0, 0.0
             if self._phase != "align":
                 self._enter("align", f"range reached; final arm-center err={err:+.2f}")
-            return (0.0, self._yaw(err)) if is_new else (0.0, 0.0)
+            return (0.0, self._yaw(err)) if may_turn else (0.0, 0.0)
         lock_drive_tol = min(
             float(self.cfg.realign),
             max(float(self.cfg.center_tol), float(self.cfg.target_lock_drive_tol)),
@@ -802,7 +811,7 @@ class DepthApproachController:
                         f"after {timeout:.1f}s — holding yaw (not driving)"
                     )
                     self._timeout_logged = True
-            return (0.0, self._yaw(err)) if is_new else (0.0, 0.0)
+            return (0.0, self._yaw(err)) if may_turn else (0.0, 0.0)
 
         self._drive_m = since * speed
         if not has_obj:

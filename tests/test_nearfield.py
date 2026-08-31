@@ -57,7 +57,8 @@ class NearFieldHandoffTests(unittest.TestCase):
         )
         self.assertFalse(yolo_may_center(True, far, center, 3.0, 15.0, 0.7))
         self.assertTrue(yolo_may_center(True, (3.5, 0.0), center, 3.0, 2.0, 0.7))
-        self.assertTrue(yolo_may_center(True, far, center, 3.0, 2.0, 0.7))
+        self.assertFalse(yolo_may_center(True, far, center, 3.0, 2.0, 0.7))
+        self.assertTrue(yolo_may_center(True, far, center, 3.0, 0.9, 0.7))
         acquire = NearFieldAcquire(object(), detector=object())
         acquire._phase = "scan"
         acquire._phase_t0 = 0.0
@@ -225,7 +226,7 @@ class PeekYoloHandoffTests(unittest.TestCase):
         box = {"xyxy": [20, 10, 40, 30], "confidence": 0.9, "class_name": "tumbler"}
         det = _PeekDetector([box])
         rgb = _RgbMsg(np.zeros((48, 64, 3), dtype=np.uint8))
-        depth = _DepthMsg(np.full((48, 64), 1.5, dtype=np.float32))
+        depth = _DepthMsg(np.full((48, 64), 0.9, dtype=np.float32))
         client = _PeekClient(rgb, depth)
         pose = (5.0, 0.0, 0.0)
         self.assertTrue(
@@ -242,6 +243,7 @@ class PeekYoloHandoffTests(unittest.TestCase):
         )
         self.assertFalse(yolo_may_center(True, far, center, 3.0, 15.0, 0.7))
         self.assertTrue(yolo_may_center(True, (3.5, 0.0), center, 3.0, 2.0, 0.7))
+        self.assertFalse(yolo_may_center(True, far, center, 3.0, 2.0, 0.7))
 
 
 class NearFieldSnapshotTests(unittest.TestCase):

@@ -151,12 +151,19 @@ class DepthApproachOverrunTests(unittest.TestCase):
         self.assertEqual("drive", ctrl._phase)
         self.assertAlmostEqual(0.10, BURST_SKIP_PAD_M, places=6)
 
-    def test_alignment_yaws_only_for_a_fresh_camera_frame(self):
+    def test_alignment_holds_yaw_until_camera_frame_is_stale(self):
         ctrl = self._ctrl(align_settle_s=0.0)
         measurement = dict(lat_err=0.4, lat_n_obj=1, fwd=1.0)
 
         self.assertNotEqual((0.0, 0.0), ctrl._command({**measurement, "is_new": True}))
-        self.assertEqual((0.0, 0.0), ctrl._command({**measurement, "is_new": False}))
+        self.assertNotEqual(
+            (0.0, 0.0),
+            ctrl._command({**measurement, "is_new": False, "frame_age_s": 0.4}),
+        )
+        self.assertEqual(
+            (0.0, 0.0),
+            ctrl._command({**measurement, "is_new": False, "frame_age_s": 0.6}),
+        )
 
     def test_aligned_far_target_drives_without_near_lock(self):
         ctrl = self._ctrl(center_tol=0.03, target_lock_drive_tol=0.10)
