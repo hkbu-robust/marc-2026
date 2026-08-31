@@ -517,6 +517,7 @@ class DemoParticipant:
                         nearfield,
                         target.name or self._state.target_type or "",
                         log=log.info,
+                        require_reach=False,
                     )
 
                 if isinstance(pick_rt, StagedGraspGenXPickRuntime):
@@ -557,7 +558,9 @@ class DemoParticipant:
                     batch += 1
                     # Zero cmd_vel does not stop gravity-driven rolling on slopes. Keep
                     # the chassis anchored for staging, inference, contact, and lift.
-                    with StationaryBase(c, log=log.warning):
+                    # Match the profile-pick flow: resist rolling without
+                    # disturbing the camera-composed yaw during arm motion.
+                    with StationaryBase(c, log=log.warning, yaw_kp=0.0):
                         result = pick_rt.run(
                             target, deadline=pick_deadline, reveal=reveal,
                         )
