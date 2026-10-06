@@ -11,9 +11,10 @@ from __future__ import annotations
 import logging
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Iterable, Optional
 
+from marc_agent.experiment_log import note_decision
 from marc_agent.command_parser import (
     LANDMARK_TYPES,
     MISSION_OBJECT_TYPES,
@@ -1180,6 +1181,11 @@ def select_object_candidate(
             geometry.target.candidate_id,
             "ok" if occupancy_at is not None else "missing",
         )
+        note_decision(
+            "selector", path="object", outcome="geometry_only",
+            reason="parking_geometry" if parking_geometry else "no_verifier",
+            selected=geometry.target.candidate_id,
+        )
         return geometry
     log.info(
         "[object-selection] pairs=%d classes=%s verify=%s reason=%s "
@@ -1261,6 +1267,10 @@ def select_object_candidate(
                         len(batch),
                         type(exc).__name__,
                     )
+                    note_decision(
+                        "class_screen_failed", class_name=class_name,
+                        candidates=len(batch), error=type(exc).__name__,
+                    )
                     survivors.extend(batch)
             contenders = tuple(survivors)
 
@@ -1276,17 +1286,21 @@ def select_object_candidate(
                 selected, raw_output, board = verify(
                     anchors, choose_anchor=True
                 )
+        qwen_pick = selected
+        guard = None
         if (
             parsed.relation in (Relation.ON, Relation.ABOVE)
             and selected.match != "strict"
             and geometry.match == "strict"
         ):
+            guard = "support_geometry_guard"
             selected = geometry
             log.info(
                 "[vlm] support geometry guard selected=%s",
                 selected.target.candidate_id,
             )
         elif occluded_geometry is not None:
+            guard = "contained_occlusion_guard"
             selected = geometry
             log.info(
                 "[vlm] contained-occlusion geometry guard selected=%s",
@@ -1296,6 +1310,7 @@ def select_object_candidate(
             geometry.target.class_name == parsed.target_type
             and geometry.target.confidence < 0.02
         ):
+            guard = "low_confidence_guard"
             selected = geometry
             log.info(
                 "[vlm] low-confidence geometry guard selected=%s",
@@ -1306,12 +1321,25 @@ def select_object_candidate(
             and geometry.target.class_name == parsed.target_type
             and geometry.target.confidence >= 0.5
         ):
+            guard = "weak_override_guard"
             selected = geometry
             log.info(
                 "[vlm] weak-override geometry guard selected=%s",
                 selected.target.candidate_id,
             )
         target_id, anchor_id = _pair_key(selected)
+        if guard is not None:
+            note_decision(
+                "geometry_override", path="object", reason=guard,
+                qwen_target=qwen_pick.target.candidate_id,
+                qwen_anchor=_pair_key(qwen_pick)[1],
+                selected=target_id, selected_anchor=anchor_id,
+            )
+        note_decision(
+            "selector", path="object", backend=method,
+            outcome="geometry_override" if guard is not None else "qwen_choice",
+            reason=guard, selected=target_id,
+        )
         log.info(
             "[vlm] object verified target=%s anchor=%s backend=%s output=%s",
             target_id,
@@ -1342,4 +1370,9 @@ def select_object_candidate(
             exc,
             preview,
         )
-        return geometry
+        note_decision(
+            "selector", path="object", backend=method, outcome="fallback",
+            reason=f"verifier_failed:{type(exc).__name__}",
+            selected=geometry.target.candidate_id,
+        )
+        return replace(geometry, method="deterministic_fallback")

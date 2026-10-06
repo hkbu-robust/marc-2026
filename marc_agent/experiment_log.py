@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,8 @@ _SAFE_ENV = (
     "MARC_RUN_MODE",
     "MARC_BUILD_ID",
     "MARC_SAR_DETECTOR",
+    "MARC_STAGE1_SCENE_CACHE",
+    "MARC_ROUND_DUMP",
     "MARC_QWEN_BACKEND",
     "MARC_QWEN_MODEL_DIR",
     "MARC_QWEN_MODEL",
@@ -36,6 +39,7 @@ _SAFE_ENV = (
 )
 _FAILURE_STATUSES = {"error", "failed", "timeout", "unavailable", "not_implemented"}
 _current = None
+_decision_scope: ContextVar[dict | None] = ContextVar("decision_scope", default=None)
 
 
 class ExperimentLog:
@@ -249,3 +253,39 @@ def start_experiment(root: str | Path | None = None, *, environ=None) -> Experim
 
 def current_experiment() -> ExperimentLog | None:
     return _current
+
+
+@contextmanager
+def decision_scope(stage: str, round: int | None = None):
+    """Collect the decision notes made while one grounding round runs.
+
+    Yields the list the notes are appended to. Decision code never reads it.
+    """
+    notes: list[dict] = []
+    token = _decision_scope.set({"stage": stage, "round": round, "notes": notes})
+    try:
+        yield notes
+    finally:
+        _decision_scope.reset(token)
+
+
+def note_decision(decision: str, /, **fields) -> None:
+    """Record one decision path (fallback, override, proxy, sentinel, ...).
+
+    Writes a ``decision.<decision>`` event and appends to the open decision
+    scope. Positional-only so no field name can collide with the parameter.
+    Fail-open: never raises and returns nothing, so it cannot change behaviour.
+    """
+    try:
+        scope = _decision_scope.get()
+        if scope is not None:
+            scope["notes"].append({**fields, "decision": decision})
+        if _current is not None:
+            _current.event(
+                f"decision.{decision}",
+                stage=scope["stage"] if scope else None,
+                round=scope["round"] if scope else None,
+                **fields,
+            )
+    except Exception:
+        pass

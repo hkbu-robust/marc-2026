@@ -22,12 +22,15 @@ import math
 import os
 import threading
 import time
-from dataclasses import replace
 
 from marc_sdk import MARCClient
 
 from marc_agent.command_parser import Intent
-from marc_agent.experiment_log import current_experiment, start_experiment
+from marc_agent.experiment_log import (
+    current_experiment,
+    decision_scope,
+    start_experiment,
+)
 from marc_agent.navigation_runtime import NavStatus, Stage2Navigator
 from marc_agent.gpu_handoff import (
     after_successful_pick,
@@ -48,11 +51,10 @@ from marc_agent.perception.cctv_round import (
     fetch_cctv_round,
 )
 from marc_agent.perception.stage1_pipeline import (
+    StaticSceneCache,
     get_default_verifier,
-    has_complete_camera_coverage,
     log_qwen_startup_status,
     run_stage1_round,
-    static_scene_key,
 )
 from marc_agent.pick_runtime import PickRuntime, pick_policy_name
 from marc_agent.retrieval_state import (
@@ -100,6 +102,7 @@ ARM_BASE_FWD = 0.18
 # transit), tuned slightly forward for a secure grip.
 GRASP_FWD_BACKOFF = -0.01
 
+
 class DemoParticipant:
     """SDK-based demo participant -- connects the VLA/nav logic through handlers."""
 
@@ -114,7 +117,7 @@ class DemoParticipant:
         self._reveal = None
         self._last_detections = None
         self._last_stage1_candidates = None
-        self._stage1_grounding_cache = {}
+        self._stage1_cache = StaticSceneCache.from_env()
         self._stage1_lock = threading.Lock()
         self._stage1_projector = None
         self._round_clock = RoundClock()
@@ -172,31 +175,16 @@ class DemoParticipant:
         if self._stage1_projector is None:
             self._stage1_projector = CctvProjector.from_client(self.client)
         self._round_clock.begin(getattr(mission, "time_limit", None), self.client.now_s())
-        round_result = run_stage1_round(
-            self.client,
-            mission.voice_command,
-            discovery_timeout_s=timeout_s,
-            projector=self._stage1_projector,
-            clock=self._round_clock,
-            verifier=self._qwen_verifier,
-        )
-        key = static_scene_key(round_result.candidates.parsed)
-        cached = self._stage1_grounding_cache.get(key)
-        if cached is not None:
-            round_result = replace(
-                round_result,
-                grounding=cached.grounding,
-                method="static_scene_cache",
-                target_id=cached.target_id,
-                anchor_id=cached.anchor_id,
+        with decision_scope("stage1", mission.round) as decisions:
+            round_result = run_stage1_round(
+                self.client,
+                mission.voice_command,
+                discovery_timeout_s=timeout_s,
+                projector=self._stage1_projector,
+                clock=self._round_clock,
+                verifier=self._qwen_verifier,
             )
-            log.info("[Stage1] reused static-scene grounding key=%s", key)
-        elif (
-            key is not None
-            and round_result.grounding is not None
-            and has_complete_camera_coverage(round_result.candidates.detections)
-        ):
-            self._stage1_grounding_cache[key] = round_result
+            round_result = self._stage1_cache.apply(round_result, mission.round)
         self._last_stage1_candidates = round_result.candidates
         self._last_detections = round_result.candidates.detections
         dump_path = dump_stage_artifacts(stage1_dir(mission.round), round_result)
@@ -207,6 +195,7 @@ class DemoParticipant:
             terminal=round_result.grounding is None,
             round=mission.round,
             artifact_dir=self._experiment.artifact_ref(dump_path),
+            decisions=decisions,
             **round_result.record(),
         )
         log.info(
@@ -304,15 +293,16 @@ class DemoParticipant:
         if self._stage1_projector is None:
             self._stage1_projector = CctvProjector.from_client(self.client)
         timeout_s = discovery_timeout_from_limit(getattr(mission, "time_limit", None))
-        round_result = run_stage1_round(
-            self.client,
-            mission.task_description,
-            expected_intent=Intent.BRING,
-            projector=self._stage1_projector,
-            discovery_timeout_s=timeout_s,
-            clock=self._stage2_clock,
-            verifier=self._qwen_verifier,
-        )
+        with decision_scope("stage2") as decisions:
+            round_result = run_stage1_round(
+                self.client,
+                mission.task_description,
+                expected_intent=Intent.BRING,
+                projector=self._stage1_projector,
+                discovery_timeout_s=timeout_s,
+                clock=self._stage2_clock,
+                verifier=self._qwen_verifier,
+            )
         dump_path = dump_stage_artifacts(stage2_dir("grounding"), round_result)
         self._experiment.event(
             "stage2.grounding.pipeline.completed",
@@ -320,6 +310,7 @@ class DemoParticipant:
             status="failed" if round_result.grounding is None else "ok",
             terminal=round_result.grounding is None,
             artifact_dir=self._experiment.artifact_ref(dump_path),
+            decisions=decisions,
             **round_result.record(),
         )
         grounding = round_result.grounding

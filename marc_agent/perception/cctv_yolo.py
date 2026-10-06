@@ -13,6 +13,7 @@ from typing import Optional
 
 import numpy as np
 
+from marc_agent.experiment_log import note_decision
 from marc_agent.command_parser import (
     MISSION_OBJECT_TYPES,
     PARKED_VEHICLE_LANDMARKS,
@@ -479,6 +480,10 @@ class CctvYoloDetector:
                     proxy.candidate_id,
                     landmark.candidate_id,
                 )
+                note_decision(
+                    "proxy_created", variant="landmark_context",
+                    candidate=proxy.candidate_id, landmark=landmark.candidate_id,
+                )
         return extra
 
     def _landmarks_for_refine(
@@ -792,6 +797,11 @@ def _refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetection
             len(extra_people),
             ",".join(item.candidate_id for item in extra_people) or "-",
         )
+        if extra_people:
+            note_decision(
+                "refine_added", path="sar",
+                candidates=[item.candidate_id for item in extra_people],
+            )
         if not extra_people:
             return round_
         return CctvDetectionRound(
@@ -824,6 +834,11 @@ def _refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetection
         len(extra),
         ",".join(item.candidate_id for item in extra) or "-",
     )
+    if extra:
+        note_decision(
+            "refine_added", path="object",
+            candidates=[item.candidate_id for item in extra],
+        )
     if not extra:
         return round_
     objects = list(round_.objects) + extra
