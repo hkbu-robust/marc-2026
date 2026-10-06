@@ -154,8 +154,41 @@ class ObjectSelectorTests(unittest.TestCase):
         )
         note = _only(notes, "selector", path="object", outcome="fallback")
         self.assertEqual("verifier_failed:RuntimeError", note["reason"])
+        self.assertEqual("target_pick", note["failed_step"])
         self.assertEqual("deterministic_fallback", failed.method)
         self.assertEqual(geometry.grounding, failed.grounding)
+
+    def test_malformed_anchor_repick_records_the_failed_step(self):
+        # Seen live: Qwen answers the anchor re-pick with the target id only.
+        text = "Find the tumbler I dropped as I got out of my car in the parking lot."
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam:tumbler:0", "tumbler", (20, 100, 60, 160), "cam"),
+                _object("cam:tumbler:1", "tumbler", (150, 100, 190, 160), "cam"),
+                _object("cam:police_car:0", "police_car", (10, 50, 200, 200), "cam"),
+                _object("cam:suv:0", "suv", (120, 60, 320, 210), "cam"),
+            ],
+            frames={"cam": _frame("cam")},
+            camera_ids=["cam"],
+        )
+
+        class Verifier:
+            method = "qwen_remote"
+            last_metrics = None
+            last_finish_reason = "stop"
+
+            def __call__(self, board):
+                return "cam:tumbler:1"
+
+        selected, notes = _notes(
+            select_object_candidate, parse_command(text), round_,
+            command_text=text, verifier=Verifier(),
+        )
+        note = _only(notes, "selector", outcome="fallback")
+        self.assertEqual("verifier_failed:ReplyParseError", note["reason"])
+        self.assertEqual("anchor_repick", note["failed_step"])
+        self.assertEqual("cam:tumbler:1", note["qwen_target"])
+        self.assertEqual("deterministic_fallback", selected.method)
 
     def test_guard_veto_is_a_geometry_override(self):
         text = "Find the mug near the bench."

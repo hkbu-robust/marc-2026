@@ -1199,6 +1199,7 @@ def select_object_candidate(
     )
 
     method = str(getattr(verifier, "method", "qwen"))
+    step, target_pick = "before_target_pick", None  # recorded only on failure
     try:
         remote = method == "qwen_remote"
         contenders = ranked
@@ -1274,6 +1275,7 @@ def select_object_candidate(
                     survivors.extend(batch)
             contenders = tuple(survivors)
 
+        step = "target_pick"
         if remote and len(contenders) == 1 and _pair_key(contenders[0]) in screened:
             selected, raw_output, board = screened[_pair_key(contenders[0])]
         else:
@@ -1283,6 +1285,7 @@ def select_object_candidate(
                 selected, parsed, command_text, round_
             )
             if anchors:
+                step, target_pick = "anchor_repick", selected.target.candidate_id
                 selected, raw_output, board = verify(
                     anchors, choose_anchor=True
                 )
@@ -1373,6 +1376,7 @@ def select_object_candidate(
         note_decision(
             "selector", path="object", backend=method, outcome="fallback",
             reason=f"verifier_failed:{type(exc).__name__}",
+            failed_step=step, qwen_target=target_pick,
             selected=geometry.target.candidate_id,
         )
         return replace(geometry, method="deterministic_fallback")

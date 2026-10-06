@@ -40,6 +40,7 @@ class Round:
     selector_outcome: Optional[str] = None
     selector_reason: Optional[str] = None
     override_guards: Optional[str] = None
+    fallback_step: Optional[str] = None
     qwen_skipped: Optional[str] = None
     scene_description_failed: bool = False
     class_screen_failures: int = 0
@@ -138,6 +139,7 @@ def _apply_pipeline(item: Round, event: dict) -> None:
             item.selector_path = note.get("path")
             item.selector_outcome = note.get("outcome")
             item.selector_reason = note.get("reason")
+            item.fallback_step = note.get("failed_step")
         elif kind == "geometry_override":
             guards = note.get("guards") or [note.get("reason")]
             item.override_guards = " > ".join(str(guard) for guard in guards)
@@ -216,7 +218,10 @@ def path_table(runs: list[Run]) -> list[dict]:
         if item.path == "cache reuse":
             continue  # the selector note describes the discarded fresh answer
         if item.selector_outcome in {"fallback", "geometry_override", "geometry_only"}:
-            detail[(item.path, item.selector_reason)] += 1
+            reason = item.selector_reason
+            if item.fallback_step:
+                reason = f"{reason} at {item.fallback_step}"
+            detail[(item.path, reason)] += 1
         if item.sentinel:
             detail[("sentinel coordinate", item.sentinel)] += 1
     table = []
@@ -266,7 +271,7 @@ def markdown(runs: list[Run]) -> str:
         out.write("| " + " | ".join(_fmt(row[key]) for key in columns) + " |\n")
     out.write("\n## Per round\n\n")
     keys = ["run", "round", "problem_id", "total", "path", "selector_reason",
-            "override_guards",
+            "override_guards", "fallback_step",
             "landmark_proxy", "projection_proxy", "fallthrough_rank",
             "anchor_collapsed", "sentinel", "cache_source_round", "cache_same_pair",
             "coverage_complete", "round_time_s", "round_sim_s"]
