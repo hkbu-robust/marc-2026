@@ -4,3 +4,5 @@
 services:
   agent:
     image: marc-agent:frozen-logging
+    environment:
+      MARC_ROUND_DUMP: "${MARC_ROUND_DUMP:-1}"
