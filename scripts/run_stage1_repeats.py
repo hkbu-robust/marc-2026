@@ -106,6 +106,21 @@ def provenance(args, env: dict, agent_project: str) -> dict:
     }
 
 
+def _problems(record: dict) -> list[str]:
+    """Why a run is incomplete; empty when it is usable."""
+    problems = []
+    if not record["finished"]:
+        problems.append("no FINISHED state")
+    if not record["score_files"]:
+        problems.append("no platform score file")
+    rounds = record.get("rounds_logged", 0)
+    if not rounds:
+        problems.append("no logged rounds")
+    elif record.get("round_dumps") != rounds:
+        problems.append(f"{record.get('round_dumps')} round dumps for {rounds} rounds")
+    return problems
+
+
 def one_run(index: int, args, env: dict) -> dict:
     run_dir = args.out / f"run-{index:02d}"
     experiments = run_dir / "experiments"
@@ -168,11 +183,12 @@ def one_run(index: int, args, env: dict) -> dict:
         record["rounds_logged"] = len(summary.rounds)
         record["totals"] = run_totals(summary)
         write([summary], run_dir / "decisions")
+    record["problems"] = _problems(record)
     (run_dir / "run.json").write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
     log(
         f"run {index:02d}: finished={finished} wall={wall_s:.0f}s "
         f"scores={record['score_files']} rounds={record.get('rounds_logged')} "
-        f"dumps={record.get('round_dumps')}"
+        f"dumps={record.get('round_dumps')} problems={record['problems'] or 'none'}"
     )
     return record
 
@@ -216,9 +232,9 @@ def main(argv=None) -> None:
     finished = [path for path in sorted(args.out.glob("run-*/experiments/*")) if path.is_dir()]
     if finished:
         write([read_run(path) for path in finished], args.out / "decisions")
-    failed = [record["run"] for record in records if not record["finished"]]
+    failed = {record["run"]: record["problems"] for record in records if record["problems"]}
     if failed:
-        sys.exit(f"runs without FINISHED: {failed}")
+        sys.exit(f"incomplete runs: {failed}")
 
 
 if __name__ == "__main__":
