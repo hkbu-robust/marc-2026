@@ -260,6 +260,7 @@ class SarSelectorTests(unittest.TestCase):
         )
         note = _only(notes, "geometry_override", path="sar")
         self.assertEqual("pose_geometry_override", note["reason"])
+        self.assertEqual(["pose_geometry_override"], note["guards"])
         self.assertEqual("rig_b:person_prone:0", note["qwen_target"])
         _only(notes, "selector", path="sar", outcome="geometry_override")
 

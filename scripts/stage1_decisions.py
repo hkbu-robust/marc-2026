@@ -31,6 +31,7 @@ class Round:
     target: Optional[float] = None
     anchor: Optional[float] = None
     round_time_s: Optional[float] = None
+    round_sim_s: Optional[float] = None
     cameras: int = 0
     frames: int = 0
     coverage_complete: Optional[bool] = None
@@ -38,6 +39,7 @@ class Round:
     selector_path: Optional[str] = None
     selector_outcome: Optional[str] = None
     selector_reason: Optional[str] = None
+    override_guards: Optional[str] = None
     qwen_skipped: Optional[str] = None
     scene_description_failed: bool = False
     class_screen_failures: int = 0
@@ -87,7 +89,7 @@ def read_run(run_dir: Path) -> Run:
     """One run folder (with events.jsonl) as a list of decided rounds."""
     run = Run(run_dir.name)
     rounds: dict[int, Round] = {}
-    received: dict[int, float] = {}
+    received: dict[int, dict] = {}
 
     def row(number: int) -> Round:
         return rounds.setdefault(number, Round(run.name, number))
@@ -96,13 +98,18 @@ def read_run(run_dir: Path) -> Run:
         name = event.get("event")
         number = event.get("round")
         if name == "stage1.round.received" and number is not None:
-            received[number] = event.get("monotonic_offset_s")
+            received[number] = event
         elif name == "stage1.pipeline.completed" and number is not None:
             _apply_pipeline(row(number), event)
         elif name == "stage1.submission.completed" and number is not None:
             start = received.get(number)
             if start is not None:
-                row(number).round_time_s = event["monotonic_offset_s"] - start
+                item = row(number)
+                item.round_time_s = event["monotonic_offset_s"] - start["monotonic_offset_s"]
+                if "simulation_timestamp" in event and "simulation_timestamp" in start:
+                    item.round_sim_s = (
+                        event["simulation_timestamp"] - start["simulation_timestamp"]
+                    )
         elif name == "score.received" and number is not None and not event.get("is_final"):
             scores = event.get("scores") or {}
             item = row(number)
@@ -131,6 +138,9 @@ def _apply_pipeline(item: Round, event: dict) -> None:
             item.selector_path = note.get("path")
             item.selector_outcome = note.get("outcome")
             item.selector_reason = note.get("reason")
+        elif kind == "geometry_override":
+            guards = note.get("guards") or [note.get("reason")]
+            item.override_guards = " > ".join(str(guard) for guard in guards)
         elif kind == "qwen_skipped":
             item.qwen_skipped = note.get("reason")
         elif kind == "scene_description_failed":
@@ -169,6 +179,7 @@ def _p95(values: list[float]) -> Optional[float]:
 def run_totals(run: Run) -> dict:
     rounds = run.rounds
     times = [item.round_time_s for item in rounds if item.round_time_s is not None]
+    sim_times = [item.round_sim_s for item in rounds if item.round_sim_s is not None]
     scores = [item.total for item in rounds if item.total is not None]
     return {
         "run": run.name,
@@ -187,8 +198,10 @@ def run_totals(run: Run) -> dict:
         "cache_hit": sum(item.cache_source_round is not None for item in rounds),
         "cache_disagree": sum(item.cache_same_pair is False for item in rounds),
         "incomplete_coverage": sum(item.coverage_complete is False for item in rounds),
-        "p95_round_time_s": _p95(times),
-        "max_round_time_s": max(times) if times else None,
+        "p95_round_wall_s": _p95(times),
+        "max_round_wall_s": max(times) if times else None,
+        "p95_round_sim_s": _p95(sim_times),
+        "max_round_sim_s": max(sim_times) if sim_times else None,
     }
 
 
@@ -251,9 +264,10 @@ def markdown(runs: list[Run]) -> str:
         out.write("| " + " | ".join(_fmt(row[key]) for key in columns) + " |\n")
     out.write("\n## Per round\n\n")
     keys = ["run", "round", "problem_id", "total", "path", "selector_reason",
+            "override_guards",
             "landmark_proxy", "projection_proxy", "fallthrough_rank",
             "anchor_collapsed", "sentinel", "cache_source_round", "cache_same_pair",
-            "coverage_complete", "round_time_s"]
+            "coverage_complete", "round_time_s", "round_sim_s"]
     out.write("| " + " | ".join(keys) + " |\n|" + "---|" * len(keys) + "\n")
     for run in runs:
         for item in run.rounds:

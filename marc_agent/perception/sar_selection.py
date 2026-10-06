@@ -981,6 +981,7 @@ def select_sar_candidate(
                 if item.person.candidate_id == candidate_id
             )
             reason = "valid_model_output"
+            guards: list[str] = []
             if poses:
                 pose_matches = tuple(
                     item for item in contenders if item.person.pose_class in poses
@@ -1010,6 +1011,7 @@ def select_sar_candidate(
                         surface=command.scene_hint,
                     )
                     reason = "pose_geometry_override"
+                    guards.append(reason)
                     log.info(
                         "[vlm] pose guard replaced=%s with=%s",
                         candidate_id,
@@ -1052,6 +1054,7 @@ def select_sar_candidate(
                         ),
                     )
                     reason = "support_geometry_override"
+                    guards.append(reason)
                     log.info(
                         "[vlm] support guard replaced=%s with=%s",
                         candidate_id,
@@ -1077,6 +1080,7 @@ def select_sar_candidate(
                     surface=command.scene_hint,
                 )
                 reason = "place_geometry_override"
+                guards.append(reason)
                 log.info(
                     "[vlm] place guard replaced=%s with=%s",
                     candidate_id,
@@ -1131,6 +1135,7 @@ def select_sar_candidate(
                             surface=command.scene_hint,
                         )
                         reason = "landmark_geometry_override"
+                        guards.append(reason)
                         log.info(
                             "[vlm] landmark guard replaced=%s with=%s",
                             candidate_id,
@@ -1138,7 +1143,7 @@ def select_sar_candidate(
                         )
             if reason != "valid_model_output":
                 note_decision(
-                    "geometry_override", path="sar", reason=reason,
+                    "geometry_override", path="sar", reason=reason, guards=guards,
                     qwen_target=candidate_id, selected=selected.candidate_id,
                 )
             note_decision(
