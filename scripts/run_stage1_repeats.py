@@ -7,7 +7,9 @@ For every run: tear down, start the platform headless, start vLLM (kept between
 runs) and a fresh agent, wait for the platform's FINISHED state, then copy the
 score file, the agent's experiment folder and both container logs into
 OUT/run-NN/ and record provenance and the decision summary. Stage selection
-comes from ./problems.yaml, as for any platform run.
+comes from ./problems.yaml, as for any platform run. vLLM is restarted with
+the agent unless --warm-qwen is given, so every run starts like a fresh
+`docker compose up`.
 """
 
 from __future__ import annotations
@@ -112,7 +114,10 @@ def one_run(index: int, args, env: dict) -> dict:
     platform, agent = f"{args.project}-platform", f"{args.project}-agent"
 
     log(f"run {index:02d}: resetting platform and agent")
-    compose(agent, AGENT_COMPOSE, "rm", "-sf", "agent", env=env, check=False)
+    # A fresh `docker compose up` starts vLLM cold, and round 1 pays for it.
+    # Restart it every run unless --warm-qwen asks to keep it loaded.
+    services = ["agent"] if args.warm_qwen else ["agent", "qwen"]
+    compose(agent, AGENT_COMPOSE, "rm", "-sf", *services, env=env, check=False)
     compose(platform, PLATFORM_COMPOSE, "down", env=env, check=False)
 
     free = gpu_free_mib()
@@ -145,6 +150,7 @@ def one_run(index: int, args, env: dict) -> dict:
     record = {
         "run": index,
         "finished": finished,
+        "warm_qwen": args.warm_qwen,
         "started_utc": started.isoformat(),
         "wall_s": wall_s,
         "score_files": [path.name for path in new_scores],
@@ -184,7 +190,8 @@ def main(argv=None) -> None:
     parser.add_argument("--agent-delay-s", type=float, default=20.0)
     parser.add_argument("--timeout-s", type=float, default=2400.0)
     parser.add_argument("--min-free-gpu-mib", type=int, default=60000)
-    parser.add_argument("--keep-qwen", action="store_true", help="leave vLLM up at the end")
+    parser.add_argument("--warm-qwen", action="store_true",
+                        help="keep vLLM loaded between runs instead of a cold start each run")
     args = parser.parse_args(argv)
     args.out = args.out.expanduser().resolve()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -203,8 +210,7 @@ def main(argv=None) -> None:
         for index in range(args.first, args.first + args.runs):
             records.append(one_run(index, args, env))
     finally:
-        if not args.keep_qwen:
-            compose(f"{args.project}-agent", AGENT_COMPOSE, "down", env=env, check=False)
+        compose(f"{args.project}-agent", AGENT_COMPOSE, "down", env=env, check=False)
         compose(f"{args.project}-platform", PLATFORM_COMPOSE, "down", env=env, check=False)
 
     finished = [path for path in sorted(args.out.glob("run-*/experiments/*")) if path.is_dir()]
