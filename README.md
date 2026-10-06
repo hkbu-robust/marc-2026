@@ -106,6 +106,46 @@ weights. Stop it with the same file set and `down`:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml down
 ```
 
+## Frozen submitted system for experiments
+
+`docker compose up` runs whatever images are currently tagged `marc-agent:local` and
+`marc-qwen-vllm:local`. Those tags are shared by everyone on the machine, and any
+`--build` from any clone replaces them, so they are not a stable experiment baseline.
+Experiments that must use the system exactly as submitted for the qualifier use these
+images instead:
+
+| Service | Frozen image | Contents |
+|---|---|---|
+| `agent` | `marc-agent:qualifier-1450aa9` | Agent built from `1450aa9`, the code of the `qualifier` tag; Stage 1 detector SHA-256 `64296e4b…` |
+| `qwen` | `marc-qwen-vllm:qualifier-b2360c86` | vLLM server with `roBUst-marc-2026/qwen3-vl-8b-stage1-finetuned@b2360c86` |
+
+Check that they exist, then start them:
+
+```bash
+docker images | grep qualifier
+docker compose -f docker-compose.yml -f docker-compose.frozen.yml up
+docker compose -f docker-compose.yml -f docker-compose.frozen.yml down
+```
+
+[`docker-compose.frozen.yml`](docker-compose.frozen.yml) changes only the image names. It
+removes the build sections and disables pulls, so the frozen images are never rebuilt or
+overwritten, even with `--build`. If an image is missing, Compose stops with
+`No such image`. Environment variables are unchanged, so this is the submitted runtime
+configuration.
+
+On a machine without the frozen images, build them once from the submitted code. The
+build needs internet; the Qwen image downloads about 17.5 GB.
+
+```bash
+git worktree add ../marc-2026-robust-1450aa9 1450aa9
+cd ../marc-2026-robust-1450aa9
+docker buildx build --load --allow network.host --network host -f demo/Dockerfile \
+  --target agent --build-arg MARC_BUILD_MODE=baked --build-arg MARC_QWEN_BACKEND=remote \
+  -t marc-agent:qualifier-1450aa9 .
+docker buildx build --load --allow network.host --network host -f demo/Dockerfile.vllm \
+  --build-arg MARC_BUILD_MODE=baked -t marc-qwen-vllm:qualifier-b2360c86 .
+```
+
 ## Local simulation platform
 
 The bundled practice platform is separate from the submission entry point and requires the
@@ -140,6 +180,7 @@ The official requirements are in the
 |---|---|
 | `docker-compose.yml` | Organizer-facing one-command submission entry point |
 | `docker-compose.dev.yml` | Rebuild-free Python development mounts |
+| `docker-compose.frozen.yml` | Runs the frozen qualifier images for experiments |
 | `demo/` | Participant entry point, vLLM image, navigation, near-field, and manipulation runtime |
 | `marc_agent/` | Perception, reasoning, navigation, pick, delivery, and runtime policies |
 | `marc_sdk/` | Organizer ROS 2 protocol client |
