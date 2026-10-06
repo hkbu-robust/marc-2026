@@ -71,6 +71,7 @@ services:
       MARC_QWEN_WALL_TIMEOUT_S: "${MARC_QWEN_WALL_TIMEOUT_S:-90}"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
       MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"
+      MARC_STAGE1_SCENE_CACHE: "${MARC_STAGE1_SCENE_CACHE:-1}"
       MARC_GRASPGENX_WEIGHTS: "/agent/models/runtime/graspgenx"
       GRASPGENX_CHECKPOINT_DIR: "/agent/models/runtime/graspgenx"
       GRASPGENX_GRIPPER_CFG_DIR: "/agent/models/runtime/graspgenx/grippers"

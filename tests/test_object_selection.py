@@ -329,7 +329,7 @@ class ObjectSelectionTests(unittest.TestCase):
                 verifier=lambda board: "not a pair",
             )
         self.assertEqual("rig_a:mug:0", selected.target.candidate_id)
-        self.assertEqual("object_relation", selected.method)
+        self.assertEqual("deterministic_fallback", selected.method)
         self.assertIn("output=not a pair", "\n".join(captured.output))
 
     def test_single_pair_calls_configured_verifier(self):

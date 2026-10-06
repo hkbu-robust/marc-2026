@@ -1,0 +1,6 @@
+# Run the frozen qualifier pair with the #85 logging build of the agent.
+#   docker compose -f docker-compose.yml -f docker-compose.frozen.yml \
+#     -f scripts/frozen-logging.compose.yml up
+services:
+  agent:
+    image: marc-agent:frozen-logging

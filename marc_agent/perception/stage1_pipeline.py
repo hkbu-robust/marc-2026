@@ -54,6 +54,7 @@ from marc_agent.perception.qwen_runtime import (
     configured_backend,
 )
 from marc_agent.perception.stage1_detect import detect_stage1_round
+from marc_agent.experiment_log import note_decision
 from marc_agent.round_clock import QwenBudget, qwen_budget
 from marc_agent.types import CctvDetectionRound, CctvRoundMetrics, ObjectCandidate
 
@@ -356,6 +357,7 @@ def _select_verifier(
             "[vlm] skipped reason=time_budget remaining=%.1fs",
             budget.remaining if budget.remaining is not None else -1.0,
         )
+        note_decision("qwen_skipped", reason="time_budget", remaining_s=budget.remaining)
         return None
     _apply_budget(selected, budget)
     if budget.remaining is not None and budget.timeout_s is not None:
@@ -441,6 +443,7 @@ def run_stage1_candidate_pipeline(
                 type(exc).__name__,
                 exc,
             )
+            note_decision("scene_description_failed", error=type(exc).__name__)
     point_objects = getattr(selected_verifier, "point_object_candidates", None)
     if parsed.target_type != "person" and callable(point_objects):
         try:
@@ -595,6 +598,9 @@ class Stage1RoundResult:
             "projection_ms": self.projection_ms,
             "grounding_method": self.method,
             "grounding_failure_reason": self.failure_reason,
+            "camera_coverage_complete": has_complete_camera_coverage(
+                self.candidates.detections
+            ),
         }
 
 
@@ -616,6 +622,81 @@ def has_complete_camera_coverage(detections: CctvDetectionRound) -> bool:
     """True when every discovered CCTV camera supplied a usable frame."""
     return bool(detections.camera_ids) and all(
         camera_id in detections.frames for camera_id in detections.camera_ids
+    )
+
+
+class StaticSceneCache:
+    """Reuse the first grounding given for a request while the scene is static.
+
+    An answer is stored only when every discovered camera sent a frame. A hit
+    replaces the submitted grounding; the fresh one is recorded, not used.
+    ``MARC_STAGE1_SCENE_CACHE=0`` turns reuse off for experiments.
+    """
+
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self._entries: dict[tuple, tuple[Optional[int], "Stage1RoundResult"]] = {}
+
+    @classmethod
+    def from_env(cls, environ=None) -> "StaticSceneCache":
+        env = os.environ if environ is None else environ
+        return cls(env.get("MARC_STAGE1_SCENE_CACHE", "1") != "0")
+
+    def apply(
+        self, result: "Stage1RoundResult", round_number: Optional[int] = None
+    ) -> "Stage1RoundResult":
+        if not self.enabled:
+            return result
+        key = static_scene_key(result.candidates.parsed)
+        entry = self._entries.get(key)
+        if entry is not None:
+            source_round, cached = entry
+            log.info("[Stage1] reused static-scene grounding key=%s", key)
+            _note_cache_hit(key, source_round, cached, result)
+            return replace(
+                result,
+                grounding=cached.grounding,
+                method="static_scene_cache",
+                target_id=cached.target_id,
+                anchor_id=cached.anchor_id,
+            )
+        if (
+            key is not None
+            and result.grounding is not None
+            and has_complete_camera_coverage(result.candidates.detections)
+        ):
+            self._entries[key] = (round_number, result)
+        return result
+
+
+def _note_cache_hit(key, source_round, cached, fresh) -> None:
+    cached_grounding = cached.grounding
+    fresh_grounding = fresh.grounding
+    note_decision(
+        "cache_hit",
+        key=key,
+        source_round=source_round,
+        cached_method=cached.method,
+        cached_target=cached.target_id,
+        cached_anchor=cached.anchor_id,
+        cached_camera=cached_grounding.camera_id,
+        cached_target_coord=cached_grounding.target_coord,
+        cached_anchor_coord=cached_grounding.anchor_coord,
+        fresh_method=fresh.method,
+        fresh_target=fresh.target_id,
+        fresh_anchor=fresh.anchor_id,
+        fresh_camera=fresh_grounding.camera_id if fresh_grounding else None,
+        fresh_target_coord=fresh_grounding.target_coord if fresh_grounding else None,
+        fresh_anchor_coord=fresh_grounding.anchor_coord if fresh_grounding else None,
+        same_pair=(
+            fresh.target_id == cached.target_id
+            and fresh.anchor_id == cached.anchor_id
+        ),
+        target_shift_m=(
+            math.dist(fresh_grounding.target_coord, cached_grounding.target_coord)
+            if fresh_grounding is not None
+            else None
+        ),
     )
 
 
@@ -647,6 +728,7 @@ def _project_pair(
         return target_xyz, target_xyz
     anchor_xyz = projector.project_contact(camera_id, anchor_box)
     if anchor_xyz is None:
+        note_decision("anchor_collapsed", camera_id=camera_id, anchor_box=anchor_box)
         return target_xyz, target_xyz
     return target_xyz, anchor_xyz
 
@@ -700,7 +782,9 @@ def _compose_person(
         log.info("[stage1] skip submit reason=%s", reason)
         return Stage1RoundResult(candidates, None, None, reason)
     if selection is None or selection.selected is None:
-        return _compose_last_resort(candidates, projector, parsed)
+        return _compose_last_resort(
+            candidates, projector, parsed, "no_person_selected"
+        )
 
     person = selection.selected
     evidence = candidate_evidence(
@@ -730,7 +814,9 @@ def _compose_person(
             person.camera_id,
             person.candidate_id,
         )
-        return _compose_last_resort(candidates, projector, parsed)
+        return _compose_last_resort(
+            candidates, projector, parsed, "person_projection_failed"
+        )
     target_xyz, anchor_xyz = projected
     grounding = _grounding_payload(
         parsed,
@@ -786,6 +872,11 @@ def _project_selection(
             selection.target.candidate_id,
             selection.anchor.candidate_id,
         )
+        note_decision(
+            "projection_proxy", variant="hidden_umbrella",
+            target=selection.target.candidate_id,
+            proxy=selection.anchor.candidate_id,
+        )
     elif selection.target.confidence < 0.02 and clipped and selection.anchor is not None:
         ax1, ay1, ax2, ay2 = selection.anchor.bbox_xyxy
         ac = ((ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0)
@@ -822,6 +913,10 @@ def _project_selection(
                 selection.target.candidate_id,
                 proxy.candidate_id,
             )
+            note_decision(
+                "projection_proxy", variant="clipped_target",
+                target=selection.target.candidate_id, proxy=proxy.candidate_id,
+            )
     elif (
         parsed.target_type == "umbrella"
         and (target_box[2] - target_box[0]) * (target_box[3] - target_box[1]) <= 400
@@ -855,6 +950,10 @@ def _project_selection(
                 "[stage1] occluded target proxy target=%s proxy=%s",
                 selection.target.candidate_id,
                 proxy.candidate_id,
+            )
+            note_decision(
+                "projection_proxy", variant="occluded_target",
+                target=selection.target.candidate_id, proxy=proxy.candidate_id,
             )
     return _project_pair(
         projector,
@@ -907,14 +1006,30 @@ def _compose_object(
             continue
         ordered.append(item)
     if not ordered:
-        return _compose_last_resort(candidates, projector, parsed)
+        return _compose_last_resort(candidates, projector, parsed, "no_object_pairs")
 
-    for selection in ordered:
+    for rank, selection in enumerate(ordered):
         projected = _project_selection(
             projector, parsed, selection, candidates.detections.objects
         )
         if projected is None:
             continue
+        if rank > 0:
+            first = ordered[0]
+            note_decision(
+                "projection_fallthrough",
+                failed_target=first.target.candidate_id,
+                failed_anchor=(
+                    first.anchor.candidate_id if first.anchor is not None else None
+                ),
+                used_target=selection.target.candidate_id,
+                used_anchor=(
+                    selection.anchor.candidate_id
+                    if selection.anchor is not None
+                    else None
+                ),
+                rank=rank,
+            )
         target_xyz, anchor_xyz = projected
         grounding = _grounding_payload(
             parsed, selection.target.camera_id, target_xyz, anchor_xyz,
@@ -946,7 +1061,9 @@ def _compose_object(
         )
 
     log.info("[stage1] projection_failed; using dummy target_type=%s", parsed.target_type)
-    return _compose_last_resort(candidates, projector, parsed)
+    return _compose_last_resort(
+        candidates, projector, parsed, "object_projection_failed"
+    )
 
 
 def _dummy_camera_id(detections: CctvDetectionRound, parsed: ParsedCommand) -> str:
@@ -972,6 +1089,7 @@ def _compose_last_resort(
     candidates: Stage1CandidateResult,
     projector: CctvProjector,
     parsed: ParsedCommand,
+    reason: str,
 ) -> Stage1RoundResult:
     """Submit parser fields with a dummy XYZ so the round always ends.
 
@@ -979,6 +1097,10 @@ def _compose_last_resort(
     """
     del projector
     camera_id = _dummy_camera_id(candidates.detections, parsed)
+    note_decision(
+        "sentinel", reason=reason, camera_id=camera_id,
+        target_type=parsed.target_type,
+    )
     xyz = IGNORED_CLASS_DUMMY_XYZ
     grounding = _grounding_payload(
         parsed,

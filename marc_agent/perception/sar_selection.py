@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Iterable, Optional
 
+from marc_agent.experiment_log import note_decision
 from marc_agent.command_parser import (
     LANDMARK_TYPES,
     SEATING_LANDMARKS,
@@ -931,6 +932,10 @@ def select_sar_candidate(
             reason,
             item.person.candidate_id,
         )
+        note_decision(
+            "selector", path="sar", outcome="geometry_only", reason=reason,
+            selected=item.person.candidate_id,
+        )
         board = (
             _assemble_board(command_text, command, round_, shortlist, None)
             if shortlist
@@ -976,6 +981,7 @@ def select_sar_candidate(
                 if item.person.candidate_id == candidate_id
             )
             reason = "valid_model_output"
+            guards: list[str] = []
             if poses:
                 pose_matches = tuple(
                     item for item in contenders if item.person.pose_class in poses
@@ -1005,6 +1011,7 @@ def select_sar_candidate(
                         surface=command.scene_hint,
                     )
                     reason = "pose_geometry_override"
+                    guards.append(reason)
                     log.info(
                         "[vlm] pose guard replaced=%s with=%s",
                         candidate_id,
@@ -1047,6 +1054,7 @@ def select_sar_candidate(
                         ),
                     )
                     reason = "support_geometry_override"
+                    guards.append(reason)
                     log.info(
                         "[vlm] support guard replaced=%s with=%s",
                         candidate_id,
@@ -1072,6 +1080,7 @@ def select_sar_candidate(
                     surface=command.scene_hint,
                 )
                 reason = "place_geometry_override"
+                guards.append(reason)
                 log.info(
                     "[vlm] place guard replaced=%s with=%s",
                     candidate_id,
@@ -1126,11 +1135,26 @@ def select_sar_candidate(
                             surface=command.scene_hint,
                         )
                         reason = "landmark_geometry_override"
+                        guards.append(reason)
                         log.info(
                             "[vlm] landmark guard replaced=%s with=%s",
                             candidate_id,
                             selected.candidate_id,
                         )
+            if reason != "valid_model_output":
+                note_decision(
+                    "geometry_override", path="sar", reason=reason, guards=guards,
+                    qwen_target=candidate_id, selected=selected.candidate_id,
+                )
+            note_decision(
+                "selector", path="sar",
+                backend=str(getattr(verifier, "method", "qwen")),
+                outcome=(
+                    "qwen_choice" if reason == "valid_model_output"
+                    else "geometry_override"
+                ),
+                reason=reason, selected=selected.candidate_id,
+            )
             log.info(
                 "[vlm] validated output candidate=%s situation=%s backend=%s output=%s",
                 candidate_id,
@@ -1173,6 +1197,12 @@ def select_sar_candidate(
         log.info("[vlm] verifier not configured; using deterministic fallback")
 
     best = _fallback_pick(shortlist, ranked)
+    note_decision(
+        "selector", path="sar",
+        outcome="fallback" if verifier is not None else "geometry_only",
+        reason=fallback_reason,
+        selected=best.person.candidate_id if best is not None else None,
+    )
     return _selected_from_item(
         best,
         requested,
