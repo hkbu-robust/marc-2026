@@ -213,6 +213,8 @@ def path_table(runs: list[Run]) -> list[dict]:
         groups.setdefault(item.path, []).append(item)
     detail = Counter()
     for item in rounds:
+        if item.path == "cache reuse":
+            continue  # the selector note describes the discarded fresh answer
         if item.selector_outcome in {"fallback", "geometry_override", "geometry_only"}:
             detail[(item.path, item.selector_reason)] += 1
         if item.sentinel:
