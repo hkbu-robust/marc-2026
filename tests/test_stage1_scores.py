@@ -14,7 +14,7 @@ OBJECT_WEIGHTS = {"camera": 0.1, "object_type": 0.15, "landmark": 0.1, "relation
 SAR_WEIGHTS = {**OBJECT_WEIGHTS, "landmark": 0.0, "relation": 0.0}
 
 
-def _detail(problem, total, weights, target=1.0, coord=(1.0, 2.0, 3.0)):
+def _detail(problem, total, weights, target=1.0, coord=(1.0, 2.0, 3.0), submitted=(1.0, 2.0, 3.0)):
     return {
         "problem_id": problem, "total": total, "weights": weights,
         "camera": 1.0, "object_type": 1.0, "landmark": 1.0,
@@ -23,10 +23,12 @@ def _detail(problem, total, weights, target=1.0, coord=(1.0, 2.0, 3.0)):
         "expected": {"camera_id": "rig_1_a", "target_type": problem, "relation": None,
                      "landmark_name": "bench_01", "situation": None,
                      "target_coord": list(coord)},
+        "submission": {"camera_id": "rig_1_a", "target_coord": list(submitted),
+                       "anchor_coord": [0.0, 0.0, 0.0]},
     }
 
 
-def _write_run(root: Path, name: str, details: list[dict], answers: list[tuple]) -> Path:
+def _write_run(root: Path, name: str, details: list[dict]) -> Path:
     run_dir = root / name
     events_dir = run_dir / "experiments" / "20261006T000000Z_x"
     events_dir.mkdir(parents=True)
@@ -35,13 +37,12 @@ def _write_run(root: Path, name: str, details: list[dict], answers: list[tuple])
         "scores": {"stage1_average": average}, "round_details": details,
     }))
     lines = []
-    for number, (detail, answer) in enumerate(zip(details, answers), start=1):
+    for number, detail in enumerate(details, start=1):
         lines += [
             {"event": "stage1.round.received", "round": number,
              "simulation_timestamp": 10.0 * number, "time_limit_s": 30.0},
             {"event": "stage1.submission.completed", "round": number,
-             "simulation_timestamp": 10.0 * number + 5.0,
-             "camera_id": answer[0], "target_id": answer[1], "anchor_id": answer[2]},
+             "simulation_timestamp": 10.0 * number + 5.0},
             {"event": "score.received", "round": number,
              "scores": {"problem_id": detail["problem_id"]}},
         ]
@@ -56,13 +57,12 @@ class ScoreTests(unittest.TestCase):
         sar = _detail("sar01", 90.0, SAR_WEIGHTS)
         first = [_detail("lf01", 100.0, OBJECT_WEIGHTS), sar,
                  _detail("hf01", 100.0, OBJECT_WEIGHTS)]
-        second = [_detail("lf01", 60.0, OBJECT_WEIGHTS, target=0.0), sar,
-                  _detail("hf01", 100.0, OBJECT_WEIGHTS)]
-        stable = ("rig_1_a", "rig_1_a:mug:0", "rig_1_a:bench:0")
+        # lf01's target moves 3 m (a changed answer); hf01's moves 0.2 m (the same answer).
+        second = [_detail("lf01", 60.0, OBJECT_WEIGHTS, target=0.0, submitted=(4.0, 2.0, 3.0)),
+                  sar, _detail("hf01", 100.0, OBJECT_WEIGHTS, submitted=(1.2, 2.0, 3.0))]
         self.runs = [
-            read_run(_write_run(root, "run-01", first, [stable] * 3)),
-            read_run(_write_run(root, "run-02", second,
-                                [("rig_1_a", "rig_1_a:mug:1", "rig_1_a:bench:0"), stable, stable])),
+            read_run(_write_run(root, "run-01", first)),
+            read_run(_write_run(root, "run-02", second)),
         ]
 
     def tearDown(self):
@@ -80,6 +80,7 @@ class ScoreTests(unittest.TestCase):
         self.assertEqual(rows["lf01"]["lost_components"], "target")
         self.assertEqual(rows["lf01"]["runs_below_95"], 1)
         self.assertEqual(rows["sar01"]["answer_changes"], 0)
+        self.assertEqual(rows["hf01"]["answer_changes"], 0)
         self.assertEqual(rows["sar01"]["lost_components"], "")
 
     def test_round_time_is_simulation_time(self):

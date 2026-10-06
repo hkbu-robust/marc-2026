@@ -11,8 +11,10 @@ Each RUN_DIR is a harness ``run-NN/`` folder: the platform score file
 - ``strip.png``: every run's Stage 1 average.
 
 A component is averaged only over rounds where its weight is non-zero; SAR
-rounds score landmark and relation with weight 0. A round's answer is the
-submitted (camera, target ID, anchor ID). Configuration clusters group rounds
+rounds score landmark and relation with weight 0. Two runs give the same
+answer to a round when they submit the same camera and target and anchor
+coordinates within ``SAME_ANSWER_M``; candidate IDs alone are not enough,
+because one ID can project to different points. Configuration clusters group rounds
 whose ``expected`` fields match, so repeated public configurations count once
 in the bootstrap.
 """
@@ -23,15 +25,16 @@ import argparse
 import csv
 import io
 import json
+import math
 import random
 import statistics
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 COMPONENTS = ("camera", "object_type", "landmark", "relation", "anchor", "target")
 LOST_TOTAL = 95.0
+SAME_ANSWER_M = 0.5
 
 
 @dataclass
@@ -40,7 +43,7 @@ class RoundScore:
     total: float
     components: dict[str, Optional[float]]
     cluster: tuple
-    answer: Optional[tuple] = None
+    answer: Optional[tuple] = None  # (camera, target xyz, anchor xyz)
     sim_s: Optional[float] = None
     time_limit_s: Optional[float] = None
 
@@ -60,8 +63,8 @@ def _cluster(expected: dict) -> tuple:
     )
 
 
-def _submissions(events_path: Path) -> dict[str, dict]:
-    """Submitted answer and simulation round time, keyed by problem ID."""
+def _round_times(events_path: Path) -> dict[str, dict]:
+    """Simulation round time and time limit, keyed by problem ID."""
     received, submitted, problems = {}, {}, {}
     for line in events_path.read_text(encoding="utf-8").splitlines():
         try:
@@ -84,7 +87,6 @@ def _submissions(events_path: Path) -> dict[str, dict]:
         if "simulation_timestamp" in event and "simulation_timestamp" in start:
             sim_s = event["simulation_timestamp"] - start["simulation_timestamp"]
         out[problems.get(number) or str(number)] = {
-            "answer": (event.get("camera_id"), event.get("target_id"), event.get("anchor_id")),
             "sim_s": sim_s,
             "time_limit_s": start.get("time_limit_s"),
         }
@@ -97,11 +99,12 @@ def read_run(run_dir: Path) -> RunScores:
         raise SystemExit(f"{run_dir}: expected one score file, found {len(score_files)}")
     data = json.loads(score_files[0].read_text(encoding="utf-8"))
     events = sorted(run_dir.glob("experiments/*/events.jsonl"))
-    submitted = _submissions(events[-1]) if events else {}
+    submitted = _round_times(events[-1]) if events else {}
     run = RunScores(run_dir.name, data["scores"]["stage1_average"])
     for detail in data["round_details"]:
         weights = detail.get("weights") or {}
         extra = submitted.get(detail["problem_id"], {})
+        submission = detail.get("submission") or {}
         run.rounds.append(RoundScore(
             problem_id=detail["problem_id"],
             total=detail["total"],
@@ -110,7 +113,11 @@ def read_run(run_dir: Path) -> RunScores:
                 for name in COMPONENTS
             },
             cluster=_cluster(detail.get("expected") or {}),
-            answer=extra.get("answer"),
+            answer=(
+                submission.get("camera_id"),
+                tuple(submission.get("target_coord") or ()),
+                tuple(submission.get("anchor_coord") or ()),
+            ),
             sim_s=extra.get("sim_s"),
             time_limit_s=extra.get("time_limit_s"),
         ))
@@ -175,14 +182,33 @@ def cluster_bootstrap(runs: list[RunScores], draws: int = 10000, seed: int = 88)
     }
 
 
+def answer_groups(answers: list[tuple]) -> list[int]:
+    """Sizes of the groups of answers that agree with each group's first answer."""
+    firsts: list[tuple] = []
+    sizes: list[int] = []
+    for camera, target, anchor in answers:
+        for index, (first_camera, first_target, first_anchor) in enumerate(firsts):
+            if (
+                camera == first_camera
+                and math.dist(target, first_target) <= SAME_ANSWER_M
+                and math.dist(anchor, first_anchor) <= SAME_ANSWER_M
+            ):
+                sizes[index] += 1
+                break
+        else:
+            firsts.append((camera, target, anchor))
+            sizes.append(1)
+    return sizes
+
+
 def round_table(runs: list[RunScores]) -> list[dict]:
     order = [item.problem_id for item in runs[0].rounds]
     rows = []
     for problem in order:
         items = [item for run in runs for item in run.rounds if item.problem_id == problem]
         totals = [item.total for item in items]
-        answers = Counter(item.answer for item in items if item.answer)
-        modal = answers.most_common(1)[0][1] if answers else 0
+        groups = answer_groups([item.answer for item in items])
+        modal = max(groups) if groups else 0
         lost = sorted({
             name for item in items for name in COMPONENTS
             if name != "anchor" and item.components[name] is not None and item.components[name] < 1.0
@@ -193,7 +219,7 @@ def round_table(runs: list[RunScores]) -> list[dict]:
             "mean": statistics.fmean(totals),
             "min": min(totals),
             "max": max(totals),
-            "distinct_answers": len(answers),
+            "distinct_answers": len(groups),
             "answer_changes": len(items) - modal,
             "mean_anchor": statistics.fmean(
                 item.components["anchor"] for item in items
@@ -263,7 +289,7 @@ def markdown(runs: list[RunScores], label: str) -> str:
     out.write("## Per-round stability\n\n")
     out.write(
         f"{len(changed)} of {len(rows)} rounds changed their submitted answer "
-        f"(camera, target ID, anchor ID) in at least one run; "
+        f"(camera, or target or anchor moved more than {SAME_ANSWER_M:g} m) in at least one run; "
         f"{sum(row['answer_changes'] for row in rows)} answer changes in total "
         f"against each round's most common answer.\n\n"
     )
