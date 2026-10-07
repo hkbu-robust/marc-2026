@@ -393,9 +393,11 @@ def _named_pose_classes(
 
 
 def _world_xy(projector, camera_id: str, box, pose_class: Optional[str] = None):
+    """Ground XY on the flat plane: people are modelled there (#112), so the
+    person-to-landmark distances that SAR selection compares stay in one frame."""
     if projector is None:
         return None
-    xyz = projector.project_contact(camera_id, box, pose_class=pose_class)
+    xyz = projector.project_contact(camera_id, box, pose_class=pose_class, calibrated=False)
     if xyz is None:
         return None
     return (float(xyz[0]), float(xyz[1]))
