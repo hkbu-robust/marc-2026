@@ -23,6 +23,7 @@ from marc_agent.command_parser import (
     Relation,
     implicit_anchor_classes,
 )
+from marc_agent.perception import occlusion_hypothesis
 from marc_agent.perception.camera_gate import apply_camera_gate, scene_classes
 from marc_agent.perception.cctv_project import pair_alignment_score
 from marc_agent.perception.lost_item_priors import (
@@ -576,6 +577,11 @@ def rank_object_candidates(
     visual_proposals: bool = False,
 ) -> tuple[ObjectSelection, ...]:
     """Rank matching object (and same-camera landmark) pairs across cameras."""
+    if any(occlusion_hypothesis.is_hypothesis(item) for item in round_.objects):
+        # Hypotheses are never ranked against detections (#117).
+        round_ = replace(round_, objects=[
+            item for item in round_.objects if not occlusion_hypothesis.is_hypothesis(item)
+        ])
     gated = (
         apply_camera_gate(parsed, round_)
         if not visual_proposals or (parsed.scene_hint and not parsed.landmark)
@@ -1179,8 +1185,17 @@ def select_object_candidate(
 ) -> Optional[ObjectSelection]:
     """Return the best matching object, optionally verified, or None.
 
-    A command that names no landmark gets its anchor from ``infer_anchor``.
+    A command that names no landmark gets its anchor from ``infer_anchor``. When the
+    candidate stage added an occlusion hypothesis (no detection satisfies the
+    relation, #117), it is submitted with its landmark, without Qwen.
     """
+    picked = occlusion_hypothesis.choose(parsed, round_, projector, command_text)
+    if picked is not None:
+        hypothesis, landmark = picked
+        log.info("[object-selection] occlusion hypothesis=%s landmark=%s",
+                 hypothesis.candidate_id, landmark.candidate_id)
+        return ObjectSelection(hypothesis, landmark, 0.0, method="occlusion_hypothesis",
+                               match="hypothesis")
     selection = _select_object_candidate(
         parsed,
         round_,

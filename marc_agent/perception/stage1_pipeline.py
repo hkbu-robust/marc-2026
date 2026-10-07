@@ -38,6 +38,7 @@ from marc_agent.perception.object_selection import (
     rank_object_candidates,
     select_object_candidate,
 )
+from marc_agent.perception.occlusion_hypothesis import add_hypotheses
 from marc_agent.perception.sar_selection import (
     QwenSarVerifier,
     SarSelectionResult,
@@ -493,6 +494,7 @@ def run_stage1_candidate_pipeline(
         )
 
     detections = refine_detection_round(parsed, detections)
+    detections = add_hypotheses(parsed, detections, projector, command_text)
     selection_started = time.perf_counter()
     selected_verifier = _select_verifier(verifier, clock, client)
     prepare_scene = getattr(selected_verifier, "prepare_scene", None)
