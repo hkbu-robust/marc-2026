@@ -40,7 +40,8 @@ def _iou(a, b) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def run(set_name: str, sets: Path, out: Path, limit: Optional[int]) -> None:
+def run(set_name: str, sets: Path, out: Path, limit: Optional[int],
+        only: Optional[set[str]] = None) -> None:
     from PIL import Image
 
     from marc_agent.perception import cctv_yolo
@@ -62,6 +63,8 @@ def run(set_name: str, sets: Path, out: Path, limit: Optional[int]) -> None:
         for path in paths[:limit]:
             case = json.loads(path.read_text(encoding="utf-8"))
             if case["kind"] != "object" or case["case_id"] in done:
+                continue
+            if only is not None and case["case_id"] not in only:
                 continue
             frames = {}
             for camera, rel in sorted(case["frames"].items()):
@@ -158,6 +161,7 @@ def main(argv=None) -> None:
     r.add_argument("--out", type=Path, required=True)
     r.add_argument("--env", nargs="*", default=[], metavar="KEY=VALUE")
     r.add_argument("--limit", type=int)
+    r.add_argument("--cases", type=Path, help="file of case IDs, one per line: run only these")
     s = sub.add_parser("summarise")
     s.add_argument("--off", type=Path, required=True)
     s.add_argument("--on", type=Path, required=True)
@@ -168,7 +172,8 @@ def main(argv=None) -> None:
         for pair in args.env:
             key, _, value = pair.partition("=")
             os.environ[key] = value
-        run(args.set, args.sets, args.out, args.limit)
+        only = set(args.cases.read_text().split()) if args.cases else None
+        run(args.set, args.sets, args.out, args.limit, only)
     else:
         print(summarise(args.off, args.on, args.sets, args.cases))
 

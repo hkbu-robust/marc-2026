@@ -80,6 +80,14 @@ class HypothesisTests(unittest.TestCase):
         _, out, _ = self._add("Find the mug beside the picnic table.", _round(mug_at=3.0), _projector(3.0))
         self.assertTrue([o for o in out.objects if occlusion_hypothesis.is_hypothesis(o)])
 
+    def test_a_target_stacked_on_its_support_satisfies_on(self):
+        # Projected 4 m away (raised object, ground plane), but its box sits on the table.
+        on_table = (450.0, 280.0, 470.0, 300.0)
+        mug = ObjectCandidate("cam:mug:0", "mug", on_table, 0.8, "cam", SIZE)
+        projector = Projector({TABLE: (0.0, 0.0, 0.0), PERSON: (0.6, 0.0, 0.0), on_table: (4.0, 0.0, 0.0)})
+        _, out, _ = self._add("Find the mug on the picnic table.", _round(mug_at=None, extra=[mug]), projector)
+        self.assertFalse([o for o in out.objects if occlusion_hypothesis.is_hypothesis(o)])
+
     def test_no_occluder_no_hypothesis(self):
         _, out, notes = self._add("Find the mug near the picnic table.",
                                   _round(mug_at=10.0, people=()), _projector(10.0))

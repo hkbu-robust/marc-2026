@@ -9,10 +9,11 @@ occluder O in L's camera, a hypothesis candidate: O's box under the target's cla
 candidate consistent with the command) and reports it as its own method; it never
 fires while any detection satisfies the relation.
 
-Relation radii are the #87 rule (``scripts/frozen_eval/relations.py``): planar origin
-distance <= 2.0 m for beside, <= 6.0 m for near and the camera-relative relations.
-On/above cannot be tested from projected points, so they use the beside radius with
-the target projected on the support's raised plane, as the runtime projects it.
+Relations follow the #87 rule (``scripts/frozen_eval/relations.py``): planar origin
+distance <= 2.0 m for beside, <= 6.0 m for near and the camera-relative relations
+(projected points); on/above by the training converter's 2D stacking test on the two
+boxes (``demo/vlm_dataset/cctv_gt_to_qwen._stacked_on_top``), or the beside radius
+with the target on the support's raised plane.
 The occluder rule (person or vehicle, confidence >= 0.5, box overlapping L's box or
 ground point within 1.5 m of L) is the ticket's, not tuned.
 """
@@ -26,6 +27,7 @@ from dataclasses import replace
 from typing import Optional
 
 from marc_agent.command_parser import (
+    SEATING_LANDMARKS,
     VEHICLE_LANDMARKS,
     ParsedCommand,
     Relation,
@@ -42,6 +44,9 @@ BESIDE_M = 2.0
 NEAR_M = 6.0
 OCCLUDER_MIN_CONF = 0.5
 OCCLUDER_REACH_M = 1.5
+# The converter's 2D stacking test (#87 "on"), same constants.
+STACK_X_OVERLAP = 0.4
+STACK_FEET_ABOVE_BASE = 0.22
 _RADIUS_M = {
     Relation.BESIDE: BESIDE_M,
     Relation.ON: BESIDE_M,
@@ -86,6 +91,9 @@ def add_hypotheses(
                 support_class=landmark.class_name))
             # A visible candidate satisfies the command, or might (not projectable).
             if target_xy is None or _within(target_xy, landmark_xy[landmark.candidate_id], radius):
+                return round_
+            if relation in (Relation.ON, Relation.ABOVE) and target.camera_id == landmark.camera_id \
+                    and _stacked_on(target.bbox_xyxy, landmark.bbox_xyxy, landmark.class_name):
                 return round_
     added: list[ObjectCandidate] = []
     counts = {}
@@ -163,6 +171,19 @@ def _occluder(landmark: ObjectCandidate, landmark_xy, round_: CctvDetectionRound
         if best is None or (item.confidence, item.candidate_id) > (best.confidence, best.candidate_id):
             best, best_dist = item, (round(dist, 2) if dist is not None else None)
     return best, best_dist
+
+
+def _stacked_on(box, support, support_class: str) -> bool:
+    """The object's box sits on the support's box, not on the ground beside it."""
+    overlap_x = min(box[2], support[2]) - max(box[0], support[0])
+    min_w = min(box[2] - box[0], support[2] - support[0])
+    if min_w <= 1.0 or overlap_x < STACK_X_OVERLAP * min_w:
+        return False
+    if (box[1] + box[3]) / 2.0 >= (support[1] + support[3]) / 2.0:
+        return False
+    if support_class in SEATING_LANDMARKS:
+        return True
+    return (support[3] - box[3]) >= STACK_FEET_ABOVE_BASE * (support[3] - support[1])
 
 
 def _overlaps(a, b) -> bool:
