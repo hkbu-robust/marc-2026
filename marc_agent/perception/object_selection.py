@@ -1281,6 +1281,14 @@ def select_object_candidate(
         else:
             selected, raw_output, board = verify(contenders)
         if remote:
+            # Known limitation, kept on purpose (#120, option a). This re-pick asks
+            # for TARGET_ID|ANCHOR_ID, a format the LoRA never saw (its training
+            # export writes single IDs), so the reply usually fails to parse and
+            # the fallback below takes geometry for target and anchor. On hf07 that
+            # failure is what discards Qwen's wrong first target, so accepting the
+            # bare ID would cost about 1.1-1.6 points; retiring the call would be a
+            # routing rule chosen from public failures. The submitted anchor for a
+            # command with no named landmark comes from infer_anchor either way.
             anchors = _anchor_variants(
                 selected, parsed, command_text, round_
             )
