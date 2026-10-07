@@ -97,9 +97,15 @@ def provenance(args, env: dict, agent_project: str) -> dict:
         "env": {
             key: env[key] for key in (
                 "ROS_DOMAIN_ID", "MARC_TEAM_ID", "HEADLESS", "ENV_MARC_SCENARIO",
-                "MARC_STAGE1_SCENE_CACHE", "MARC_ROUND_DUMP",
+                "MARC_STAGE1_SCENE_CACHE", "MARC_ROUND_DUMP", "MARC_AGENT_IMAGE",
+                "MARC_QWEN_IMAGE",
             )
         },
+        # Set by `docker build --label org.opencontainers.image.revision=<sha>`.
+        "agent_revision": out([
+            "docker", "image", "inspect", args.agent_image, "--format",
+            '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+        ]),
         "problems_yaml": (REPO / "problems.yaml").read_text(encoding="utf-8"),
         "gpu": out(["nvidia-smi", "--query-gpu=name,memory.used,memory.total",
                     "--format=csv,noheader"]),
@@ -149,6 +155,15 @@ def one_run(index: int, args, env: dict) -> dict:
     compose(agent, AGENT_COMPOSE, "up", "-d", "--no-build", "--wait", "qwen", env=env)
     compose(agent, AGENT_COMPOSE, "up", "-d", "--no-build", "--no-deps",
             "--force-recreate", "agent", env=env)
+    running = compose(agent, AGENT_COMPOSE, "ps", "-q", "agent",
+                      capture=True, check=False, env=env).stdout.strip()
+    running_id = sh(["docker", "inspect", running, "--format", "{{.Image}}"],
+                    capture=True, check=False).stdout.strip()
+    wanted_id = sh(["docker", "image", "inspect", args.agent_image, "--format", "{{.Id}}"],
+                   capture=True, check=False).stdout.strip()
+    if not running_id or running_id != wanted_id:
+        raise SystemExit(f"agent container runs {running_id or 'nothing'}, "
+                         f"not {args.agent_image} ({wanted_id})")
     log(f"run {index:02d}: started; waiting for FINISHED")
     finished = wait_finished(platform, args.timeout_s)
     wall_s = time.monotonic() - t0
@@ -221,6 +236,8 @@ def main(argv=None) -> None:
         "ENV_MARC_SCENARIO": SCENARIO,
         "MARC_STAGE1_SCENE_CACHE": "1" if args.scene_cache == "on" else "0",
         "MARC_ROUND_DUMP": "1",
+        "MARC_AGENT_IMAGE": args.agent_image,
+        "MARC_QWEN_IMAGE": args.qwen_image,
     }
     records = []
     try:
