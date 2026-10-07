@@ -195,6 +195,35 @@ def start_qwen_warmup() -> Optional[threading.Thread]:
     return thread
 
 
+DEFAULT_WARMUP_MAX_S = 150.0
+
+
+def warm_up_qwen_before_registering() -> None:
+    """Block until vLLM has answered once, at most ``MARC_QWEN_WARMUP_MAX_S`` (#133).
+
+    The platform starts round 1 only after the participant registers, and the
+    first vLLM request after a container start JIT-compiles kernels for ~70 s.
+    Registering after the warm-up means no round meets a cold server. The wait
+    is bounded so a broken or slow vLLM delays registration, never blocks it.
+    """
+    try:
+        max_s = float(os.environ.get("MARC_QWEN_WARMUP_MAX_S") or DEFAULT_WARMUP_MAX_S)
+    except ValueError:
+        max_s = DEFAULT_WARMUP_MAX_S
+    started = time.perf_counter()
+    thread = start_qwen_warmup()
+    if thread is None:
+        return
+    thread.join(max(0.0, max_s))
+    if thread.is_alive():
+        log.warning(
+            "[qwen-warmup] still running after %.0fs; registering anyway", max_s
+        )
+        note_decision("qwen_warmup_wait", ok=False, waited_s=max_s)
+        return
+    log.info("[qwen-warmup] registering after %.1fs", time.perf_counter() - started)
+
+
 @dataclass(frozen=True)
 class Stage1CandidateResult:
     """Candidate-stage output; deliberately contains no world coordinates."""
