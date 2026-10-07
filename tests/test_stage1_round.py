@@ -15,6 +15,8 @@ from marc_agent.perception.stage1_pipeline import (
     IGNORED_CLASS_DUMMY_XYZ,
     _project_selection,
     has_complete_camera_coverage,
+    Stage1CandidateResult,
+    compose_stage1_grounding,
     run_stage1_round,
     start_qwen_warmup,
     static_scene_key,
@@ -638,6 +640,24 @@ class Stage1RoundTests(unittest.TestCase):
                 self.assertEqual(expected, (grounding.landmark, grounding.relation))
                 source = [note for note in notes if note["decision"] == "field_source"][-1]
                 self.assertEqual(sources, (source["landmark"], source["relation"]))
+
+    def test_fallthrough_pairs_also_get_the_nearest_implied_anchor(self):
+        text = "Find the tumbler dropped in the empty parking space."
+        size = (640, 480)
+        lost = ObjectCandidate("rig_x:tumbler:0", "tumbler", (300, 300, 320, 330), 0.9, "rig_x", size)
+        target = ObjectCandidate("rig_a:tumbler:0", "tumbler", (300, 300, 320, 330), 0.5, "rig_a", size)
+        far = ObjectCandidate("rig_a:police_car:0", "police_car", (0, 100, 100, 200), 0.9, "rig_a", size)
+        near = ObjectCandidate("rig_a:suv:0", "suv", (330, 280, 420, 340), 0.9, "rig_a", size)
+        detections = CctvDetectionRound(objects=[lost, target, far, near], camera_ids=["rig_a", "rig_x"])
+        candidates = Stage1CandidateResult(
+            text, parse_command(text), detections, None, None, 0.0,
+            # rig_x has no geometry, so composition falls through to rig_a.
+            object_selection=ObjectSelection(target=lost, anchor=None, score=1.0),
+        )
+        result = compose_stage1_grounding(candidates, _geometry())
+        self.assertEqual("rig_a:tumbler:0", result.target_id)
+        self.assertEqual("rig_a:suv:0", result.anchor_id)
+        self.assertEqual("suv", result.grounding.landmark)
 
     def test_sar_without_landmark_does_not_project_nearby_object(self):
         def detector(client, *, stub_path=None):

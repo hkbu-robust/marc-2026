@@ -1119,8 +1119,11 @@ def infer_anchor(
         return selection
     classes = implicit_anchor_classes(parsed, command_text) or LANDMARK_TYPES
     target = selection.target
+    kept = selection.anchor.candidate_id if selection.anchor is not None else None
     target_xy = _target_world_xy(projector, target)
     if target_xy is None:
+        note_decision("implied_anchor", classes=sorted(classes), chosen=None,
+                      kept=kept, reason="target_not_projected")
         return selection
     scored = []
     for item in objects:
@@ -1133,12 +1136,13 @@ def infer_anchor(
             dist = math.hypot(anchor_xy[0] - target_xy[0], anchor_xy[1] - target_xy[1])
             scored.append((dist, -item.confidence, item.candidate_id, item))
     if not scored:
+        note_decision("implied_anchor", classes=sorted(classes), chosen=None,
+                      kept=kept, reason="no_projected_candidate_in_camera")
         return selection
     dist, _, _, anchor = min(scored)
     note_decision(
         "implied_anchor", classes=sorted(classes), chosen=anchor.candidate_id,
-        dist_m=round(dist, 3),
-        replaced=selection.anchor.candidate_id if selection.anchor is not None else None,
+        chosen_class=anchor.class_name, dist_m=round(dist, 3), replaced=kept,
     )
     return replace(selection, anchor=anchor)
 

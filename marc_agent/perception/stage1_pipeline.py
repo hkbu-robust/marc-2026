@@ -22,6 +22,7 @@ from marc_agent.command_parser import (
     ParseErrorCode,
     ParsedCommand,
     Relation,
+    implicit_anchor_classes,
     parse_command,
 )
 from marc_agent.perception.cctv_project import (
@@ -32,6 +33,7 @@ from marc_agent.perception.cctv_yolo import (
 )
 from marc_agent.perception.object_selection import (
     ObjectSelection,
+    infer_anchor,
     occupancy_lookup,
     rank_object_candidates,
     select_object_candidate,
@@ -746,7 +748,8 @@ def _grounding_payload(
         relation, relation_source = Relation.NEAR, "default"
     else:
         relation, relation_source = None, "none"
-    note_decision("field_source", landmark=landmark_source, relation=relation_source)
+    if is_object:
+        note_decision("field_source", landmark=landmark_source, relation=relation_source)
     return _grounding_result_cls()(
         camera_id=camera_id,
         target_type=parsed.target_type,
@@ -758,10 +761,20 @@ def _grounding_payload(
     )
 
 
-def _scene_landmark_class(detections: CctvDetectionRound, camera_id: str) -> Optional[str]:
-    """Class of the most confident landmark detection, preferring this camera."""
+def _scene_landmark_class(
+    detections: CctvDetectionRound, camera_id: str, parsed: ParsedCommand, command_text: str
+) -> Optional[str]:
+    """A landmark class when no anchor could be projected: the most confident
+    detection of the command's implied classes, else of any landmark class,
+    preferring this camera. None only when no landmark was detected at all."""
+    implied = implicit_anchor_classes(parsed, command_text)
     landmarks = [item for item in detections.objects if item.class_name in LANDMARK_TYPES]
-    for pool in ([item for item in landmarks if item.camera_id == camera_id], landmarks):
+    pools = []
+    for names in (implied, LANDMARK_TYPES):
+        if names:
+            pool = [item for item in landmarks if item.class_name in names]
+            pools += [[item for item in pool if item.camera_id == camera_id], pool]
+    for pool in pools:
         if pool:
             return max(pool, key=lambda item: (item.confidence, item.candidate_id)).class_name
     return None
@@ -998,13 +1011,23 @@ def _compose_object(
     if chosen is not None:
         ordered.append(chosen)
     for item in ranked:
-        if chosen is not None and _same_object_pair(item, chosen):
+        if chosen is not None and (
+            _same_object_pair(item, chosen)
+            # With no named landmark the anchor follows from the target alone.
+            or (parsed.landmark is None
+                and item.target.candidate_id == chosen.target.candidate_id)
+        ):
             continue
         ordered.append(item)
     if not ordered:
         return _compose_last_resort(candidates, projector, parsed, "no_object_pairs")
 
     for rank, selection in enumerate(ordered):
+        if rank > 0:
+            selection = infer_anchor(
+                selection, parsed, candidates.command_text,
+                candidates.detections.objects, projector,
+            )
         projected = _project_selection(
             projector, parsed, selection, candidates.detections.objects
         )
@@ -1033,7 +1056,8 @@ def _compose_object(
                 selection.anchor.class_name
                 if selection.anchor is not None
                 else _scene_landmark_class(
-                    candidates.detections, selection.target.camera_id
+                    candidates.detections, selection.target.camera_id,
+                    parsed, candidates.command_text,
                 )
             ),
         )
@@ -1109,7 +1133,9 @@ def _compose_last_resort(
         camera_id,
         xyz,
         xyz,
-        anchor_class=_scene_landmark_class(candidates.detections, camera_id),
+        anchor_class=_scene_landmark_class(
+            candidates.detections, camera_id, parsed, candidates.command_text
+        ),
     )
     log.info(
         "[stage1] grounding camera=%s target_id=%s method=ignored_class_dummy "

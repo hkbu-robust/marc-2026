@@ -1032,8 +1032,12 @@ class ObjectSelectionTests(unittest.TestCase):
             round_,
             command_text="Find the tumbler dropped in the empty parking space.",
         )
-        self.assertIsNotNone(ranked[0].anchor)
-        self.assertIn(ranked[0].anchor.class_name, {"police_car", "normal_car_1"})
+        # Without a projector the ranking falls back to image-space pair scores.
+        # The 0.4-confidence tumbler used to win only through the police_car
+        # +0.5 bonus (#113); on pair evidence alone the confident tumbler near
+        # the normal car ranks first.
+        self.assertEqual("rig_a:tumbler:0", ranked[0].target.candidate_id)
+        self.assertEqual("rig_a:normal_car_1:0", ranked[0].anchor.candidate_id)
         # No vehicle class is preferred: renaming the cars changes nothing.
         renamed = CctvDetectionRound(
             objects=[
