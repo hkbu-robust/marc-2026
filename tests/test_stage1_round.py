@@ -284,7 +284,10 @@ class Stage1RoundTests(unittest.TestCase):
             support_class="picnic_table",
             support_box=selection.anchor.bbox_xyxy,
         )
-        expected_anchor = projector.project_contact("rig_a", selection.anchor.bbox_xyxy)
+        anchor = selection.anchor
+        expected_anchor = projector.project_landmark(
+            "rig_a", anchor.bbox_xyxy, anchor.class_name, anchor.image_size
+        )
         self.assertIsNotNone(expected_target)
         self.assertIsNotNone(expected_anchor)
         self.assertEqual(list(expected_target), result.grounding.target_coord)

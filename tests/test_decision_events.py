@@ -443,6 +443,7 @@ class ProjectionTests(unittest.TestCase):
         projector.project_contact.side_effect = (
             lambda camera_id, box, **kwargs: None if box == anchor_box else (1.0, 2.0, 0.0)
         )
+        projector.project_landmark.return_value = None  # anchors go through the prior
         projected, notes = _notes(
             _project_pair, projector, "rig_a", (0.0, 0.0, 10.0, 10.0), anchor_box,
             relation=None, support_class=None,

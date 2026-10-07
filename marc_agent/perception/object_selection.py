@@ -494,6 +494,17 @@ def _target_world_xy(projector, target: ObjectCandidate):
     return (float(xyz[0]), float(xyz[1]))
 
 
+def _landmark_world_xy(projector, item: ObjectCandidate):
+    """Where the scorer puts a landmark: its footprint point when the projector has one."""
+    project = getattr(projector, "project_landmark", None)
+    if not callable(project):
+        return _target_world_xy(projector, item)
+    xyz = project(item.camera_id, item.bbox_xyxy, item.class_name, item.image_size)
+    if xyz is None:
+        return None
+    return (float(xyz[0]), float(xyz[1]))
+
+
 def _pair_world_dist_m(item: ObjectSelection, projector) -> Optional[float]:
     """Ground metres from target to the paired landmark. None if either end fails."""
     if projector is None or item.anchor is None:
@@ -1141,7 +1152,7 @@ def infer_anchor(
             continue
         if item.candidate_id == target.candidate_id:
             continue
-        anchor_xy = _target_world_xy(projector, item)
+        anchor_xy = _landmark_world_xy(projector, item)
         if anchor_xy is not None:
             dist = math.hypot(anchor_xy[0] - target_xy[0], anchor_xy[1] - target_xy[1])
             scored.append((dist, -item.confidence, item.candidate_id, item))

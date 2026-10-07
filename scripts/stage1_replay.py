@@ -36,9 +36,12 @@ from pathlib import Path
 from typing import Optional
 from unittest import mock
 
+from PIL import Image
+
 from marc_agent.command_parser import Intent, ParsedCommand, Relation, Situation
 from marc_agent.experiment_log import decision_scope
 from marc_agent.perception.cctv_project import CameraGeometry, CctvProjector, static_lookup
+from marc_agent.perception.ground_model import default_ground_model
 from marc_agent.perception.object_selection import ObjectSelection
 from marc_agent.perception.sar_selection import SarSelectionResult, SelectionStatus
 from marc_agent.perception.stage1_pipeline import (
@@ -76,7 +79,8 @@ def load_geometry(path: Path = DEFAULT_GEOMETRY) -> dict[str, CameraGeometry]:
 
 
 def projector_for(path: Path = DEFAULT_GEOMETRY) -> CctvProjector:
-    return CctvProjector(static_lookup(load_geometry(path)))
+    """The runtime's projector over captured geometry, with the shipped ground model."""
+    return CctvProjector(static_lookup(load_geometry(path)), default_ground_model())
 
 
 def _parsed(record: dict) -> ParsedCommand:
@@ -257,11 +261,34 @@ class AnchorCase:
         return 0.0 if self.error_m is None else max(0.0, 1.0 - self.error_m / ANCHOR_ZERO_M)
 
 
-def replay_cases(set_dir: Path, projector: CctvProjector) -> tuple[list[AnchorCase], int]:
-    """Anchor error of each case whose gold anchor was detected; also the count skipped."""
+def _frame_size(case_dir: Path, case: dict, camera_id: str) -> Optional[tuple[int, int]]:
+    frame = (case.get("frames") or {}).get(camera_id)
+    if not frame or not (case_dir / frame).exists():
+        return None
+    with Image.open(case_dir / frame) as image:
+        return image.size
+
+
+def _scene_parity(case: dict) -> Optional[int]:
+    gt = (case.get("source") or {}).get("gt_json")
+    if not gt:
+        return None
+    return int(Path(gt).parent.name.split("_")[-1]) % 2
+
+
+def replay_cases(
+    set_dir: Path, projector: CctvProjector, scenes: str = "all"
+) -> tuple[list[AnchorCase], int]:
+    """Anchor error of each case whose gold anchor was detected; also the count skipped.
+
+    ``scenes`` = ``even`` / ``odd`` keeps one half of the generator scenes (the
+    footprint prior is fitted on even scenes, #112).
+    """
     rows, skipped = [], 0
     for path in sorted(Path(set_dir).glob("cases/*/case.json")):
         case = json.loads(path.read_text(encoding="utf-8"))
+        if scenes != "all" and _scene_parity(case) != (0 if scenes == "even" else 1):
+            continue
         gold = case["gold"]
         candidates = {item["candidate_id"]: item for item in case["candidates"]}
         anchors = [candidates[cid] for cid in gold.get("anchor_ids") or [] if cid in candidates]
@@ -270,7 +297,10 @@ def replay_cases(set_dir: Path, projector: CctvProjector) -> tuple[list[AnchorCa
             continue
         # Several detections can match one GT box; take the one the runtime trusts most.
         anchor = max(anchors, key=lambda item: (item["confidence"], item["candidate_id"]))
-        xyz = project_anchor(projector, anchor["camera_id"], tuple(anchor["bbox_xyxy"]))
+        xyz = project_anchor(
+            projector, anchor["camera_id"], tuple(anchor["bbox_xyxy"]),
+            anchor["class_name"], _frame_size(path.parent, case, anchor["camera_id"]),
+        )
         rows.append(AnchorCase(
             case_id=case["case_id"],
             kind=case["kind"],
@@ -475,6 +505,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--runs", nargs="*", type=Path, default=[])
     parser.add_argument("--cases", nargs="*", type=Path, default=[])
+    parser.add_argument("--case-scenes", choices=["all", "even", "odd"], default="all",
+                        help="keep only even- or odd-numbered generator scenes of --cases")
     parser.add_argument("--env", nargs="*", default=[], metavar="KEY=VALUE")
     parser.add_argument("--geometry", type=Path, default=DEFAULT_GEOMETRY)
     parser.add_argument("--out", type=Path, required=True)
@@ -489,7 +521,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     started = time.perf_counter()
     with mock.patch.dict(os.environ, env):
         replayed = [item for run in runs for item in replay_run(run, projector)]
-        cases = {str(path): replay_cases(path, projector) for path in args.cases}
+        cases = {
+            str(path): replay_cases(path, projector, args.case_scenes) for path in args.cases
+        }
     seconds = time.perf_counter() - started
     args.out.mkdir(parents=True, exist_ok=True)
     _write_csv(args.out / "rounds.csv", round_rows(replayed))

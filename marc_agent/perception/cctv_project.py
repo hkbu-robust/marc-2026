@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 import weakref
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from marc_agent.command_parser import Relation
+from marc_agent.perception.ground_model import GroundModel, GroundSurface, default_ground_model
 from marc_agent.perception.situation_rules import POSE_GROUPS
 
 
@@ -74,6 +76,30 @@ def k_from_camera_info(info) -> Optional[tuple[float, float, float, float]]:
         return None
     return fx, fy, cx, cy
 
+
+# Landmark footprint prior (#112): for each class, where the scorer's landmark
+# point (the prim origin) falls in a full detection box, as fractions (fu, fv) of
+# the box width and height, and its height dz above the calibrated ground.
+# Per-class medians from scripts/fit_landmark_footprint.py on the #87 held-out
+# generator GT, even-numbered scenes only (219 frames, 2026-10-08); odd scenes
+# are the test. Tipped-over bicycles, scooters and trash cans widen fv; medians.
+LANDMARK_FOOTPRINT: dict[str, tuple[float, float, float]] = {
+    "bench": (0.548, 0.778, -0.034),
+    "bicycle": (0.502, 0.841, 0.136),
+    "hydrant": (0.634, 0.925, -0.037),
+    "kick_scooter": (0.519, 0.898, 0.139),
+    "normal_car_1": (0.500, 0.631, -0.040),
+    "normal_car_2": (0.495, 0.753, -0.010),
+    "picnic_table": (0.532, 0.797, -0.036),
+    "police_car": (0.505, 0.719, -0.021),
+    "postbox": (0.534, 0.843, -0.687),  # the prim origin sits below the ground
+    "sports_car": (0.503, 0.655, -0.022),
+    "sports_car_2": (0.512, 0.719, -0.022),
+    "suv": (0.487, 0.747, -0.012),
+    "taxi": (0.497, 0.690, -0.023),
+    "trash_can": (0.640, 0.994, 0.334),
+    "vending_machine": (0.367, 0.885, -0.037),
+}
 
 LOWER_HALF_CENTER = 0.75
 PROSTRATE_HALF_CENTER = 0.60
@@ -185,6 +211,40 @@ def intersect_ray_plane(
         origin[1] + t_ray * direction_world[1],
         origin[2] + t_ray * direction_world[2],
     )
+
+
+SURFACE_ITERATIONS = 8
+SURFACE_TOLERANCE_M = 1e-3
+
+
+def _flag_on(name: str) -> bool:
+    """Feature flags default on and are read at call time (scripts/README.md)."""
+    return os.environ.get(name, "1") != "0"
+
+
+def intersect_ray_surface(
+    geometry: CameraGeometry,
+    u: float,
+    v: float,
+    surface: GroundSurface,
+    lift: float = 0.0,
+) -> Optional[tuple[float, float, float]]:
+    """Intersect the pixel's ray with ``surface`` raised by ``lift`` metres.
+
+    Fixed point: hit the plane at the current height, look the ground up at that
+    XY, repeat until the height settles (at most ``SURFACE_ITERATIONS``).
+    """
+    z = float(geometry.ground_height) + lift
+    for _ in range(SURFACE_ITERATIONS):
+        hit = intersect_ray_plane(geometry, u, v, z)
+        if hit is None:
+            return None
+        z_next = surface.z(hit[0], hit[1]) + lift
+        settled = abs(z_next - z) < SURFACE_TOLERANCE_M
+        z = z_next
+        if settled:
+            break
+    return intersect_ray_plane(geometry, u, v, z)
 
 
 def project_pixel(
@@ -355,22 +415,62 @@ def static_lookup(geometry_by_camera: dict[str, CameraGeometry]) -> GeometryLook
 
 
 class CctvProjector:
-    """Pixel-to-world adapter over a geometry lookup."""
+    """Pixel-to-world adapter over a geometry lookup.
 
-    def __init__(self, lookup: GeometryLookup):
+    With a ``GroundModel`` and ``MARC_GROUND_CALIBRATION`` on (default), every
+    projection lands on the camera's calibrated ground surface when its pose
+    fingerprint matches (#112); otherwise on the flat ``ground_height`` plane,
+    exactly as without a model.
+    """
+
+    def __init__(self, lookup: GeometryLookup, ground: Optional[GroundModel] = None):
         self.lookup = lookup
+        self.ground = ground
 
     @classmethod
     def from_client(cls, client) -> "CctvProjector":
         """Return the process-wide projector for this client (one tf2 listener)."""
         projector = _CLIENT_PROJECTORS.get(client)
         if projector is None:
-            projector = cls(Tf2ClientLookup(client))
+            projector = cls(Tf2ClientLookup(client), default_ground_model())
             try:
                 _CLIENT_PROJECTORS[client] = projector
             except TypeError:
                 pass
         return projector
+
+    def ground_status(self, camera_id: str) -> str:
+        """Whether this camera's projections use calibrated ground, and if not why."""
+        if self.ground is None:
+            return "no_model"
+        if not _flag_on("MARC_GROUND_CALIBRATION"):
+            return "disabled"
+        geometry = self.lookup(camera_id)
+        if geometry is None:
+            return "no_geometry"
+        return self.ground.for_camera(camera_id, geometry)[1]
+
+    def _surface(self, camera_id: str, geometry: CameraGeometry) -> Optional[GroundSurface]:
+        if self.ground is None or not _flag_on("MARC_GROUND_CALIBRATION"):
+            return None
+        return self.ground.for_camera(camera_id, geometry)[0]
+
+    def _hit(
+        self, camera_id: str, geometry: CameraGeometry, u: float, v: float, z_plane: float
+    ) -> Optional[tuple[float, float, float]]:
+        """The pixel on the calibrated ground, else on the plane ``z = z_plane``.
+
+        Only ground contact uses the surface. A raised plane (on/above a support)
+        stays flat: SUPPORT_HEIGHT_M was set against the flat plane, and no
+        held-out data calibrates it (#112: the generator's "on" objects mostly
+        rest on the ground).
+        """
+        surface = None if z_plane != geometry.ground_height else self._surface(
+            camera_id, geometry
+        )
+        if surface is None:
+            return intersect_ray_plane(geometry, u, v, z_plane)
+        return intersect_ray_surface(geometry, u, v, surface)
 
     def project_pixel(
         self,
@@ -380,9 +480,44 @@ class CctvProjector:
         *,
         z_plane: Optional[float] = None,
     ) -> Optional[tuple[float, float, float]]:
-        return project_pixel(
-            camera_id, u, v, z_plane=z_plane, lookup=self.lookup
+        geometry = self.lookup(camera_id)
+        if geometry is None:
+            return None
+        plane = geometry.ground_height if z_plane is None else z_plane
+        return self._hit(camera_id, geometry, u, v, plane)
+
+    def project_landmark(
+        self,
+        camera_id: str,
+        bbox_xyxy: tuple[float, float, float, float],
+        class_name: Optional[str] = None,
+        image_size: Optional[tuple[int, int]] = None,
+    ) -> Optional[tuple[float, float, float]]:
+        """World point of a landmark's prim origin, which the scorer measures (#112).
+
+        With ``MARC_LANDMARK_FOOTPRINT`` on (default), a known class's box maps
+        through its footprint prior: the origin's pixel as a fraction of the box,
+        and its height above the ground. A box cut by the frame edge, or an
+        unknown class, keeps the generic contact rule (the prior assumes a full box).
+        """
+        prior = LANDMARK_FOOTPRINT.get(class_name or "")
+        x1, y1, x2, y2 = (float(value) for value in bbox_xyxy)
+        clipped = image_size is None or (
+            x1 <= 1.0 or y1 <= 1.0 or x2 >= image_size[0] - 1 or y2 >= image_size[1] - 1
         )
+        if prior is None or clipped or not _flag_on("MARC_LANDMARK_FOOTPRINT"):
+            return self.project_contact(camera_id, bbox_xyxy)
+        geometry = self.lookup(camera_id)
+        if geometry is None:
+            return None
+        fu, fv, dz = prior
+        hit = self._hit(
+            camera_id, geometry, x1 + fu * (x2 - x1), y1 + fv * (y2 - y1),
+            geometry.ground_height,
+        )
+        if hit is None:
+            return None
+        return (hit[0], hit[1], hit[2] + dz)
 
     def project_contact(
         self,
@@ -416,7 +551,15 @@ class CctvProjector:
             support_u = (float(support_box[0]) + float(support_box[2])) / 2.0
             u += BENDING_ANCHOR_PULL * (support_u - u)
         z_plane = raised_plane_z(geometry.ground_height, support_class, rel)
-        xyz = intersect_ray_plane(geometry, u, v, z_plane)
+        if pose_class:
+            # People keep the flat plane (#112): in the scored scenario a person's
+            # point sits 0.1-0.5 m above the calibrated terrain (public sar03,
+            # sar07-09), unlike objects, which sit on it, and unlike the held-out
+            # generator scenes. The pose constants below were fitted to this plane;
+            # re-fitting people is #122.
+            xyz = intersect_ray_plane(geometry, u, v, z_plane)
+        else:
+            xyz = self._hit(camera_id, geometry, u, v, z_plane)
         if xyz is None:
             return None
         if pose_class == "person_bending" and rel_name not in {"on", "above"}:
