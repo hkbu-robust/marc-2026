@@ -8,7 +8,7 @@ each round's logged candidates and selected target/anchor IDs are rebuilt into a
 ``Stage1CandidateResult`` and passed to the runtime ``compose_stage1_grounding``
 with a ``CctvProjector`` over the captured camera geometry. The submission it
 returns is rescored with ``scripts.stage1_runs.score``. ``--env`` sets runtime
-flags for the replay only, e.g. ``MARC_GROUND_CALIBRATION=0``.
+flags for the replay only, e.g. a new mechanism's flag set to ``0``.
 
 ``--cases`` takes a frozen-case set folder (``<set>/cases/<id>/case.json``, #87
 schema 1) and scores the runtime anchor projection (``project_anchor``) of each
@@ -29,6 +29,7 @@ import json
 import math
 import os
 import statistics
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,8 +57,8 @@ from scripts.stage1_runs import (
     score,
 )
 
-DEFAULT_GEOMETRY = Path(__file__).resolve().parent / "data" / "sdk_cameras.json"
-MOVED_M = 1e-3
+REPO = Path(__file__).resolve().parent.parent
+DEFAULT_GEOMETRY = REPO / "scripts" / "data" / "sdk_cameras.json"
 
 
 def load_geometry(path: Path = DEFAULT_GEOMETRY) -> dict[str, CameraGeometry]:
@@ -96,7 +97,10 @@ def _detections(round_: LoggedRound) -> CctvDetectionRound:
     for item in round_.pipeline["candidates"]:
         camera = item["camera_id"]
         if camera not in round_.image_sizes:
-            raise SystemExit(f"round {round_.number}: no round dump frame for {camera}")
+            raise SystemExit(
+                f"round {round_.number}: no round dump frame for {camera}; the replay "
+                "reads candidate image sizes from round dumps (MARC_ROUND_DUMP=1)"
+            )
         common = dict(
             candidate_id=item["candidate_id"],
             bbox_xyxy=tuple(float(v) for v in item["bbox_xyxy"]),
@@ -121,6 +125,9 @@ def rebuild(round_: LoggedRound) -> Stage1CandidateResult:
     detections = _detections(round_)
     by_id = {item.candidate_id: item for item in (*detections.objects, *detections.people)}
     target_id, anchor_id = submitted.get("target_id"), submitted.get("anchor_id")
+    missing = {target_id, anchor_id} - set(by_id) - {None}
+    if missing:
+        raise SystemExit(f"round {round_.number}: selected {missing} not among logged candidates")
     for note in round_.decisions:
         # The submitted pair is the fallback; composition started from the failed one.
         if note.get("decision") == "projection_fallthrough":
@@ -163,21 +170,54 @@ class ReplayedRound:
     decisions: list[dict]
     logged: RoundScore
     replayed: RoundScore
+    recomposed: bool = True  # False: carried over with its logged score
+
+    def _moved_m(self, name: str) -> float:
+        if not self.recomposed:
+            return 0.0
+        return math.dist(self.submission[name], self.round.detail["submission"][name])
 
     @property
     def target_moved_m(self) -> float:
-        return math.dist(self.submission["target_coord"], self.round.submission["target_coord"])
+        return self._moved_m("target_coord")
 
     @property
     def anchor_moved_m(self) -> float:
-        return math.dist(self.submission["anchor_coord"], self.round.submission["anchor_coord"])
+        return self._moved_m("anchor_coord")
+
+
+def _replayable(round_: LoggedRound) -> bool:
+    """A round the agent parsed and submitted; projection cannot change any other."""
+    return bool(
+        round_.pipeline
+        and round_.pipeline.get("parsed")
+        and round_.submission
+        and (round_.detail.get("submission") or {}).get("target_coord")
+    )
+
+
+def _logged_score(round_: LoggedRound) -> RoundScore:
+    if (round_.detail.get("submission") or {}).get("target_coord"):
+        return score(round_, round_.detail["submission"])
+    return RoundScore(
+        components={name: round_.detail[name] for name in COMPONENTS},
+        total=round_.detail["total"],
+        target_m=math.nan,
+        anchor_m=math.nan,
+        target_uncertain=False,
+    )
 
 
 def replay_round(run: str, round_: LoggedRound, projector: CctvProjector) -> ReplayedRound:
+    if not _replayable(round_):
+        logged = _logged_score(round_)
+        return ReplayedRound(
+            run=run, round=round_, submission=round_.detail.get("submission") or {},
+            target_id=None, anchor_id=None, decisions=[], logged=logged, replayed=logged,
+            recomposed=False,
+        )
     with decision_scope("stage1", round_.number) as notes:
         result = compose_stage1_grounding(rebuild(round_), projector)
-    if result.grounding is None:
-        raise SystemExit(f"{run} round {round_.number}: replay produced no submission")
     grounding = result.grounding
     submission = {
         "camera_id": grounding.camera_id,
@@ -195,15 +235,12 @@ def replay_round(run: str, round_: LoggedRound, projector: CctvProjector) -> Rep
         target_id=result.target_id,
         anchor_id=result.anchor_id,
         decisions=list(notes),
-        logged=score(round_, round_.detail["submission"]),
+        logged=_logged_score(round_),
         replayed=score(round_, submission),
     )
 
 
 def replay_run(run: LoggedRun, projector: CctvProjector) -> list[ReplayedRound]:
-    missing = [r.problem_id for r in run.rounds if r.pipeline is None or r.submission is None]
-    if missing:
-        raise SystemExit(f"{run.name}: rounds without logged pipeline/submission: {missing}")
     return [replay_round(run.name, round_, projector) for round_ in run.rounds]
 
 
@@ -273,12 +310,13 @@ def round_rows(replayed: list[ReplayedRound]) -> list[dict]:
             "logged_anchor_m": round(logged.anchor_m, 3),
             "replay_anchor_m": round(new.anchor_m, 3),
             "target_uncertain": new.target_uncertain,
-            "replay_target_xyz": _xyz(item.submission["target_coord"]),
-            "replay_anchor_xyz": _xyz(item.submission["anchor_coord"]),
+            "recomposed": item.recomposed,
+            "replay_target_xyz": _xyz(item.submission.get("target_coord") or ()),
+            "replay_anchor_xyz": _xyz(item.submission.get("anchor_coord") or ()),
             "target_id": item.target_id,
             "anchor_id": item.anchor_id,
-            "landmark": item.submission["landmark"],
-            "relation": item.submission["relation"],
+            "landmark": item.submission.get("landmark"),
+            "relation": item.submission.get("relation"),
             "decisions": " ".join(sorted({note["decision"] for note in item.decisions})),
         }
         for name in COMPONENTS:
@@ -332,7 +370,9 @@ def summary(
 
         moved = max(max(i.target_moved_m, i.anchor_moved_m) for i in replayed)
         lines += [
-            f"- Runs: {len(runs)}; rounds: {len(replayed)}",
+            f"- Runs: {len(runs)}; rounds: {len(replayed)} "
+            f"({sum(not i.recomposed for i in replayed)} without a parse or submission, "
+            "carried with their logged score)",
             f"- Largest coordinate change vs the log: {moved * 1000:.3f} mm",
             "",
             "| per run (mean ± sd) | logged | replay |",
@@ -385,7 +425,8 @@ def summary(
             f"(skipped without one: {skipped}; not projected: {len(rows) - len(errors)})",
             f"- Mean 3-D anchor error: {statistics.fmean(errors):.3f} m"
             f" (median {statistics.median(errors):.3f} m)" if errors else "- No projected anchors",
-            f"- Mean anchor credit: {statistics.fmean(r.credit for r in rows):.4f}" if rows else "",
+            f"- Mean anchor credit: {statistics.fmean(r.credit for r in rows):.4f}"
+            if rows else "- No cases",
             "",
             "| anchor class | n | mean error m | mean credit |",
             "|---|---|---|---|",
@@ -413,6 +454,13 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+def unread_flags(env: dict[str, str]) -> list[str]:
+    """Keys no runtime module mentions: a typo, or a flag its ticket has not added yet."""
+    paths = (REPO / "marc_agent").rglob("*.py")
+    source = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    return [key for key in env if key not in source]
+
+
 def _env(pairs: list[str]) -> dict[str, str]:
     env = {}
     for pair in pairs:
@@ -434,6 +482,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     if not args.runs and not args.cases:
         parser.error("give --runs and/or --cases")
     env = _env(args.env)
+    for key in unread_flags(env):
+        print(f"warning: no marc_agent module reads {key}; it has no effect", file=sys.stderr)
     projector = projector_for(args.geometry)
     runs = [read_run(path) for path in args.runs]
     started = time.perf_counter()

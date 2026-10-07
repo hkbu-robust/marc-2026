@@ -11,14 +11,16 @@ FAIL when
 - a round not in ``--allow`` scores outside its band of totals by more than
   ``BAND_TOLERANCE`` points; or
 - an invariant breaks: every round submitted; landmark and relation filled on
-  object rounds; no sentinel coordinate; every baseline camera loaded; p95 round
-  time within the time limit (simulation time); every command parses to its
+  object rounds; no sentinel or missing coordinate; every baseline camera loaded;
+  p95 round time within the time limit (simulation time); every command parses to its
   expected target type with this checkout's parser; every ``tests/test_*.py`` passes.
 
 Other differences from the baseline (score components, camera, target or anchor
 point, submitted fields, decision paths) are listed per round for review but do
 not fail on their own: a geometry fix moves points on every round, and a changed
 point that does not change the score is not a regression the gate can call.
+Targets and anchors are compared by position, because candidate IDs are renumbered
+between runs (#88).
 
 Writes a markdown report and exits 1 on FAIL.
 """
@@ -38,10 +40,10 @@ from typing import Optional
 from marc_agent.command_parser import CommandParseError, Intent, ParseErrorCode, parse_command
 from marc_agent.perception.stage1_pipeline import IGNORED_CLASS_DUMMY_XYZ
 from scripts.stage1_runs import COMPONENTS, LoggedRound, LoggedRun, read_run
+from scripts.stage1_scores import SAME_ANSWER_M
 
 REPO = Path(__file__).resolve().parent.parent
 BAND_TOLERANCE = 0.5  # points of one round's total
-SAME_POINT_M = 0.5  # as scripts.stage1_scores.SAME_ANSWER_M
 COMPONENT_TOLERANCE = 0.01  # credit; 0.01 anchor credit = 5 cm
 
 
@@ -113,9 +115,11 @@ def compare_round(
     for name in ("target_coord", "anchor_coord"):
         if submitted.get(name):
             moved = _nearest_m(submitted[name], [sub.get(name) for sub in base_subs])
-            if moved > SAME_POINT_M:
+            if moved > SAME_ANSWER_M:
+                kind = name.split("_")[0]
+                chosen = (candidate.submission or {}).get(f"{kind}_id")
                 changes.append(
-                    f"{name.split('_')[0]} point {moved:.2f} m from every baseline answer"
+                    f"{kind} point {moved:.2f} m from every baseline answer ({chosen})"
                 )
     kinds = _decision_kinds(candidate)
     base_kinds = [_decision_kinds(item) for item in baseline]
@@ -194,16 +198,19 @@ def invariants(candidate: LoggedRun, baselines: list[LoggedRun]) -> list[Check]:
         "landmark and relation on object rounds", not empty, ", ".join(empty)
     ))
 
-    sentinel = [
-        r.problem_id for r in rounds
-        if any(note.get("decision") == "sentinel" for note in r.decisions)
-        or any(
-            math.dist((r.detail.get("submission") or {}).get(name) or (0, 0, 0),
-                      IGNORED_CLASS_DUMMY_XYZ) < 1e-6
-            for name in ("target_coord", "anchor_coord")
+    def placeholder_point(r: LoggedRound) -> bool:
+        submitted = r.detail.get("submission") or {}
+        points = [submitted.get(name) for name in ("target_coord", "anchor_coord")]
+        return (
+            any(note.get("decision") == "sentinel" for note in r.decisions)
+            or any(not point or math.dist(point, IGNORED_CLASS_DUMMY_XYZ) < 1e-6
+                   for point in points)
         )
-    ]
-    checks.append(Check("no sentinel coordinates", not sentinel, ", ".join(sentinel)))
+
+    placeholders = [r.problem_id for r in rounds if placeholder_point(r)]
+    checks.append(Check(
+        "no sentinel or missing coordinates", not placeholders, ", ".join(placeholders)
+    ))
 
     cameras = {
         camera for run in baselines for r in run.rounds

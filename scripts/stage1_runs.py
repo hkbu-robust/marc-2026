@@ -33,7 +33,7 @@ TARGET_CREDITED_M = 1.854  # largest distance credited in the #88 rounds
 TARGET_UNCREDITED_M = 1.976  # smallest distance not credited
 TARGET_RADIUS_M = (TARGET_CREDITED_M + TARGET_UNCREDITED_M) / 2.0
 TARGET_CERTAIN_M = 0.5
-SAME_POINT_M = 1e-3
+UNMOVED_M = 1e-3  # a replayed target this close to the logged one keeps its logged credit
 
 
 @dataclass(frozen=True)
@@ -165,7 +165,7 @@ def score(round_: LoggedRound, submission: dict) -> RoundScore:
     target_m = math.dist(submission["target_coord"], expected["target_coord"])
     unmoved = (
         logged.get("target_coord") is not None
-        and math.dist(submission["target_coord"], logged["target_coord"]) < SAME_POINT_M
+        and math.dist(submission["target_coord"], logged["target_coord"]) < UNMOVED_M
     )
     target = round_.detail["target"] if unmoved else float(target_m <= TARGET_RADIUS_M)
     credited_m = TARGET_CERTAIN_M

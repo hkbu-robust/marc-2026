@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import math
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +59,22 @@ class ReplayTests(unittest.TestCase):
         self.assertTrue(score(round_, near).target_uncertain)
         self.assertEqual(score(round_, far).components["target"], 0.0)
         self.assertFalse(math.isclose(score(round_, far).total, round_.detail["total"]))
+
+    def test_a_round_without_a_parse_keeps_its_logged_score(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run-01"
+            shutil.copytree(FIXTURE, run_dir)
+            events = run_dir / "experiments" / "fixture" / "events.jsonl"
+            lines = [json.loads(line) for line in events.read_text().splitlines()]
+            for line in lines:
+                if line["event"] == "stage1.pipeline.completed" and line["round"] == 6:
+                    line["parsed"] = None
+            events.write_text("\n".join(json.dumps(line) for line in lines))
+            replayed = replay_run(read_run(run_dir), projector_for())
+        carried = next(item for item in replayed if item.round.number == 6)
+        self.assertFalse(carried.recomposed)
+        self.assertEqual(carried.replayed.total, carried.round.detail["total"])
+        self.assertTrue(next(item for item in replayed if item.round.number == 22).recomposed)
 
     def test_cli_writes_tables(self):
         with tempfile.TemporaryDirectory() as tmp:

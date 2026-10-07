@@ -40,7 +40,8 @@ rounds and the reverse-engineered scoring kernel.
    runs (lf06, hf08, sar03) are wide; read their rows, not just the verdict.
 
 2. **CPU replay delta (geometry PRs).** Replay the baseline runs with the new
-   mechanism on (its default) and off, and attach both summaries:
+   mechanism on (its default) and off, and attach both summaries. The example uses
+   #112's planned flag; use your ticket's.
 
    ```bash
    RUNS=~/marc-2026-work/experiments/ablations/04-repeated-runs/cache-off/run-*
@@ -62,6 +63,9 @@ rounds and the reverse-engineered scoring kernel.
   at import, so `--env` reaches them.
 - **Gate every new mechanism behind its flag**, so the "off" replay still
   reproduces the frozen system.
+- **Runs need their round dumps** (`MARC_ROUND_DUMP=1`, which the harness sets):
+  candidate image sizes come from the dumped frames. Rounds the agent did not parse
+  or submit are carried with their logged score.
 - **Anchor projection goes through `stage1_pipeline.project_anchor`**: the held-out
   anchor replay calls it directly.
 - **Selection is held fixed.** The replay recomposes the logged target/anchor pair

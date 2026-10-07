@@ -134,7 +134,7 @@ class GateTests(unittest.TestCase):
             details, decisions={"sar01_trash_sit": [{"decision": "sentinel", "reason": "x"}]}
         )
         self.assertTrue(failed)
-        self.assertIn("| no sentinel coordinates | FAIL | sar01_trash_sit |", text)
+        self.assertIn("| no sentinel or missing coordinates | FAIL | sar01_trash_sit |", text)
 
     def test_new_decision_paths_are_listed_without_failing(self):
         text, failed = self._gate(
