@@ -11,7 +11,7 @@ from PIL import Image
 
 from scripts.frozen_eval import case_store
 from scripts.frozen_eval.geometry import geometry_from_gt, ground_point, project_point
-from scripts.frozen_eval.heldout import assemble_case, stratum
+from scripts.frozen_eval.heldout import assemble_case, stratum, wilson
 from scripts.frozen_eval.public import propose
 from scripts.frozen_eval.relations import object_choices, relations_between, sar_check
 
@@ -139,6 +139,11 @@ class GoldMatchingTests(unittest.TestCase):
         missed = assemble_case(self.SPEC, self._detection([]))
         self.assertTrue(missed["tags"]["detector_miss"])
         self.assertTrue(missed["tags"]["anchor_miss"])
+
+    def test_wilson_interval(self):
+        low, high = wilson(2, 50)
+        self.assertAlmostEqual(low, 0.0110, places=3)
+        self.assertAlmostEqual(high, 0.1346, places=3)
 
     def test_strata_thresholds(self):
         self.assertEqual([stratum(0), stratum(9), stratum(58)], ["unseen", "rare", "seen"])

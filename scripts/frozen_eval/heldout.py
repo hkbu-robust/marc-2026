@@ -3,6 +3,8 @@
     python -m scripts.frozen_eval.heldout specs --gt GT_DIR --training-record JSON --out SETS/heldout-build
     # detect_pass.py inside the frozen agent image -> SETS/heldout-build/detections.jsonl
     python -m scripts.frozen_eval.heldout assemble --build SETS/heldout-build --root SETS
+    python -m scripts.frozen_eval.heldout audit --root SETS --out SETS/label-audit      # before freeze
+    python -m scripts.frozen_eval.heldout audit-score --sheet SETS/label-audit/audit.csv
 
 ``specs`` turns generator GT (``qwen-dataset-gen`` into a new empty folder; one
 populated camera per scene) into one spec per target that a command describes
@@ -43,8 +45,10 @@ from __future__ import annotations
 
 import argparse
 import collections
+import csv
 import json
 import math
+import random
 from dataclasses import asdict
 from pathlib import Path
 
@@ -321,6 +325,60 @@ def assemble_case(spec: dict, detection: dict) -> dict:
     }
 
 
+AUDIT_N = 50
+AUDIT_SEED = 87
+
+
+def write_audit(root: Path, out_dir: Path) -> Path:
+    """50 random held-out cases (fixed seed) as images + a sheet for one person to fill."""
+    from PIL import Image, ImageDraw
+
+    cases = case_store.read_cases(root, "heldout")
+    sample = sorted(random.Random(AUDIT_SEED).sample(cases, min(AUDIT_N, len(cases))),
+                    key=lambda c: c.case_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for case in sample:
+        cam = case.gold["camera_ids"][0]
+        im = Image.open(case.frames[cam]).convert("RGB")
+        draw = ImageDraw.Draw(im)
+        for gt, colour in ([(a, (0, 140, 255)) for a in case.gold["anchors_gt"]]
+                           + [(case.gold["target_gt"], (0, 255, 0))]):
+            draw.rectangle(gt["bbox"], outline=colour, width=3)
+        draw.rectangle([0, 0, im.width, 24], fill=(0, 0, 0))
+        draw.text((6, 6), f"{case.case_id} | {case.command}", fill=(255, 255, 0))
+        im.save(out_dir / f"{case.case_id}.png")
+    path = out_dir / "audit.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["case_id", "command", "kind", "relation_or_recipe",
+                         "label_correct", "note", "auditor"])
+        for case in sample:
+            writer.writerow([case.case_id, case.command, case.kind,
+                             case.gold["relation"] or case.gold["recipe_id"], "", "", ""])
+    return path
+
+
+def wilson(errors: int, n: int, z: float = 1.959964) -> tuple[float, float]:
+    if n == 0:
+        return 0.0, 1.0
+    p = errors / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def score_audit(sheet: Path) -> dict:
+    """``label_correct`` y/n per row -> label error rate with a Wilson 95% CI."""
+    rows = list(csv.DictReader(sheet.open(encoding="utf-8")))
+    answered = [r for r in rows if r["label_correct"].strip().lower() in ("y", "n")]
+    errors = sum(r["label_correct"].strip().lower() == "n" for r in answered)
+    low, high = wilson(errors, len(answered))
+    return {"audited": len(answered), "of": len(rows), "label_errors": errors,
+            "error_rate": errors / len(answered) if answered else None,
+            "wilson95": [low, high],
+            "auditors": sorted({r["auditor"] for r in answered if r["auditor"]})}
+
+
 def _jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
@@ -335,8 +393,19 @@ def main(argv=None) -> int:
     p_asm = sub.add_parser("assemble")
     p_asm.add_argument("--build", type=Path, required=True)
     p_asm.add_argument("--root", type=Path, required=True)
+    p_audit = sub.add_parser("audit")
+    p_audit.add_argument("--root", type=Path, required=True)
+    p_audit.add_argument("--out", type=Path, required=True)
+    p_score = sub.add_parser("audit-score")
+    p_score.add_argument("--sheet", type=Path, required=True)
     args = parser.parse_args(argv)
 
+    if args.action == "audit":
+        print(write_audit(args.root, args.out))
+        return 0
+    if args.action == "audit-score":
+        print(json.dumps(score_audit(args.sheet), indent=1))
+        return 0
     if args.action == "specs":
         record = json.loads(args.training_record.read_text(encoding="utf-8"))
         specs, dropped, meta = build_specs(args.gt, record)
