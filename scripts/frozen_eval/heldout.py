@@ -1,6 +1,6 @@
 """Held-out evaluation set from fresh generator scenes (#87).
 
-    python -m scripts.frozen_eval.heldout specs --gt GT_DIR --training-record JSON --out SETS/heldout-build
+    python -m scripts.frozen_eval.heldout specs --gt GT_DIR [GT_DIR ...] --training-record JSON --out SETS/heldout-build
     # detect_pass.py inside the frozen agent image -> SETS/heldout-build/detections.jsonl
     python -m scripts.frozen_eval.heldout assemble --build SETS/heldout-build --root SETS
     python -m scripts.frozen_eval.heldout audit --root SETS --out SETS/label-audit      # before freeze
@@ -74,17 +74,24 @@ LEAK_M = 0.5
 GOLD_IOU = 0.5
 
 
-def _scene_payloads(gt_dir: Path) -> list[tuple[int, Path, dict]]:
+def run_label(gt_dir: Path) -> str:
+    """``.../heldout-topup/gt/marc2026_chungmu`` -> ``topup``: generation runs number scenes from 0."""
+    return gt_dir.parents[1].name.removeprefix("heldout-")
+
+
+def _scene_payloads(gt_dirs: list[Path]) -> list[tuple[str, Path, dict]]:
     out = []
-    for scene_dir in sorted(gt_dir.glob("scene_*")):
-        for json_path in sorted(scene_dir.glob("rig_*.json")):
-            if (json_path.with_suffix(".png")).is_file():
-                out.append((int(scene_dir.name.split("_")[1]), json_path,
-                            json.loads(json_path.read_text(encoding="utf-8"))))
+    for gt_dir in gt_dirs:
+        label = run_label(gt_dir)
+        for scene_dir in sorted(gt_dir.glob("scene_*")):
+            for json_path in sorted(scene_dir.glob("rig_*.json")):
+                if (json_path.with_suffix(".png")).is_file():
+                    out.append((f"{label}{int(scene_dir.name.split('_')[1]):05d}", json_path,
+                                json.loads(json_path.read_text(encoding="utf-8"))))
     return out
 
 
-def rig_geometries(payloads: list[tuple[int, Path, dict]]) -> dict[str, dict]:
+def rig_geometries(payloads: list[tuple[str, Path, dict]]) -> dict[str, dict]:
     """One camera block per rig; raise if a rig moved between scenes."""
     rigs: dict[str, dict] = {}
     for _, path, payload in payloads:
@@ -145,8 +152,8 @@ def _parsed_matches(command: str, target: str, relation: str | None, landmark: s
     return json.loads(json.dumps(asdict(parsed), default=str))
 
 
-def build_specs(gt_dir: Path, record: dict) -> tuple[list[dict], list[dict], dict]:
-    payloads = _scene_payloads(gt_dir)
+def build_specs(gt_dirs: list[Path], record: dict) -> tuple[list[dict], list[dict], dict]:
+    payloads = _scene_payloads(gt_dirs)
     rigs = rig_geometries(payloads)
     recipes = {r["id"]: r for r in yaml.safe_load(RECIPES.read_text(encoding="utf-8"))["recipes"]}
     train = record["train_counts"]
@@ -195,7 +202,7 @@ def build_specs(gt_dir: Path, record: dict) -> tuple[list[dict], list[dict], dic
                 continue
             recipe = recipes[recipe_id]
             check = sar_check(person, recipe, people, landmarks)
-            case_id = f"ho-s{scene:05d}-{person['instance_id']}"
+            case_id = f"ho-{scene}-{person['instance_id']}"
             if not check.ok:
                 dropped.append({**base, "case_id": case_id, "kind": "sar", "recipe_id": recipe_id,
                                 "drop_reason": check.reason})
@@ -231,7 +238,7 @@ def build_specs(gt_dir: Path, record: dict) -> tuple[list[dict], list[dict], dic
                 stats["object_options_parse_mismatch"] += 1
                 continue
             n = int(train["relation"].get(option.relation, 0))
-            if emit(f"ho-s{scene:05d}-{obj['instance_id']}", "obj", obj["class"], command, parsed,
+            if emit(f"ho-{scene}-{obj['instance_id']}", "obj", obj["class"], command, parsed,
                     obj, option.anchors,
                     {"recipe_id": None, "relation": option.relation,
                      "landmark_class": option.landmark_class, "anchor_rule": "relation"},
@@ -252,6 +259,7 @@ def build_specs(gt_dir: Path, record: dict) -> tuple[list[dict], list[dict], dic
         "leak_index_skipped_rows": dict(leaks.skipped),
         "object_selection": dict(stats),
         "scenes": len({s for s, _, _ in payloads}),
+        "gt_dirs": [str(p) for p in gt_dirs],
         "rigs": rigs,
     }
     return specs, dropped, meta
@@ -387,7 +395,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Build the held-out evaluation set (#87).")
     sub = parser.add_subparsers(dest="action", required=True)
     p_specs = sub.add_parser("specs")
-    p_specs.add_argument("--gt", type=Path, required=True, help="generator <scenario> folder")
+    p_specs.add_argument("--gt", type=Path, nargs="+", required=True,
+                         help="generator <scenario> folders, e.g. heldout-gen/gt/marc2026_chungmu")
     p_specs.add_argument("--training-record", type=Path, required=True)
     p_specs.add_argument("--out", type=Path, required=True)
     p_asm = sub.add_parser("assemble")

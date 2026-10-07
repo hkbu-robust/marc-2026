@@ -102,7 +102,7 @@ class SarCheckTests(unittest.TestCase):
 
 class GoldMatchingTests(unittest.TestCase):
     SPEC = {
-        "case_id": "ho-s00001-mug_0", "kind": "object", "command": "Find the mug beside the bench.",
+        "case_id": "ho-gen00001-mug_0", "kind": "object", "command": "Find the mug beside the bench.",
         "camera_id": "rig_3_b", "scene": 1, "gt_json": "x.json",
         "target": {"class": "mug", "instance_id": "mug_0", "bbox": [100, 100, 120, 120],
                    "world_xyz": [0, 0, 0]},
