@@ -549,7 +549,10 @@ class CctvProjector:
         raised: bool = False,
         pose_class: Optional[str] = None,
         support_box: Optional[tuple[float, float, float, float]] = None,
+        calibrated: bool = True,
     ) -> Optional[tuple[float, float, float]]:
+        """Contact point of a box. ``calibrated=False`` keeps the flat plane, for
+        geometry that must share a frame with people (they stay on the plane)."""
         geometry = self.lookup(camera_id)
         if geometry is None:
             return None
@@ -571,7 +574,7 @@ class CctvProjector:
             support_u = (float(support_box[0]) + float(support_box[2])) / 2.0
             u += BENDING_ANCHOR_PULL * (support_u - u)
         z_plane = raised_plane_z(geometry.ground_height, support_class, rel)
-        ground_contact = support_lift(support_class, rel) == 0.0
+        ground_contact = calibrated and support_lift(support_class, rel) == 0.0
         if pose_class:
             # People keep the flat plane (#112): in the scored scenario a person's
             # point sits 0.1-0.5 m above the calibrated terrain (public sar03,
