@@ -202,20 +202,24 @@ class CctvYoloTests(unittest.TestCase):
         self.assertEqual((330.0, 190.0, 338.0, 198.0), extra[0].bbox_xyxy)
         self.assertEqual("zoom", extra[0].source)
 
-    def test_tiled_pass_runs_only_for_small_targets_when_enabled(self):
+    def test_zoomed_pass_runs_only_for_small_targets_when_enabled(self):
         detector = Mock()
         detector.contract = RuntimeContract.load()
         detector.refine_zoomed.return_value = []
         detector.refine_around_landmarks.return_value = []
         round_ = CctvDetectionRound(camera_ids=["cam"])
+        command = parse_command("Find the tumbler on the bench.")
         with patch("marc_agent.perception.cctv_yolo._detector", detector):
-            refine_detection_round(parse_command("Find the tumbler on the bench."), round_)
+            with patch.dict(os.environ, {"MARC_TILED_REFINE": "1"}):
+                refine_detection_round(command, round_)
             self.assertEqual(1, detector.refine_zoomed.call_count)
-            with patch.dict(os.environ, {"MARC_TILED_REFINE": "0"}):
-                refine_detection_round(parse_command("Find the tumbler on the bench."), round_)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("MARC_TILED_REFINE", None)
+                refine_detection_round(command, round_)  # off by default
             self.assertEqual(1, detector.refine_zoomed.call_count)
             detector.contract = replace(detector.contract, small_target_classes=())
-            refine_detection_round(parse_command("Find the tumbler on the bench."), round_)
+            with patch.dict(os.environ, {"MARC_TILED_REFINE": "1"}):
+                refine_detection_round(command, round_)
             self.assertEqual(1, detector.refine_zoomed.call_count)
 
     def test_landmark_crop_keeps_similar_mission_class_as_visual_proposal(self):

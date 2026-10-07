@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import json
 import tempfile
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -382,7 +383,8 @@ class ProxyTests(unittest.TestCase):
         detector.contract = RuntimeContract.load()
         detector.refine_zoomed.return_value = [tiled]
         detector.refine_around_landmarks.return_value = [missed]
-        with patch("marc_agent.perception.cctv_yolo._detector", detector):
+        with patch("marc_agent.perception.cctv_yolo._detector", detector), \
+                patch.dict(os.environ, {"MARC_TILED_REFINE": "1"}):
             refined, notes = _notes(refine_detection_round, parsed, round_)
         note = _only(notes, "refine_added", path="object")
         self.assertEqual(["rig_1:tumbler:1"], note["candidates"])
