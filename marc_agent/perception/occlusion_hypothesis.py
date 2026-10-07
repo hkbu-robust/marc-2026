@@ -55,8 +55,12 @@ _RADIUS_M = {
 
 
 def enabled() -> bool:
-    return os.environ.get("MARC_OCCLUSION_HYPOTHESIS", "1").strip().lower() not in {
-        "0", "false", "no", "off",
+    """Off by default: it failed the held-out go/no-go (#117). On the 433 #87 held-out
+    object cases it fired on 4.5 % of non-miss cases (limit 2 %), improved the anchor in
+    2 of the 28 miss cases it fired on, and lowered credit overall (-0.0071, 95% CI
+    -0.0128 to -0.0022); ablations/final-system/117-occlusion-hypothesis/summary.md."""
+    return os.environ.get("MARC_OCCLUSION_HYPOTHESIS", "0").strip().lower() in {
+        "1", "true", "yes", "on",
     }
 
 

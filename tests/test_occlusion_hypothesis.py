@@ -48,6 +48,7 @@ def _projector(mug_m):
     return Projector({TABLE: (0.0, 0.0, 0.0), PERSON: (0.6, 0.0, 0.0), FAR_MUG: (mug_m, 0.0, 0.0)})
 
 
+@mock.patch.dict(os.environ, {"MARC_OCCLUSION_HYPOTHESIS": "1"})
 class HypothesisTests(unittest.TestCase):
     def _add(self, command, round_, projector):
         parsed = parse_command(command)
@@ -144,8 +145,9 @@ class HypothesisTests(unittest.TestCase):
         record = result.record()
         self.assertIn("cam:mug:1", [c["candidate_id"] for c in record["candidates"]])
 
-    def test_flag_off(self):
-        with mock.patch.dict(os.environ, {"MARC_OCCLUSION_HYPOTHESIS": "0"}):
+    def test_off_by_default(self):
+        with mock.patch.dict(os.environ, {}):
+            os.environ.pop("MARC_OCCLUSION_HYPOTHESIS", None)
             _, out, _ = self._add("Find the mug near the picnic table.", _round(mug_at=10.0),
                                   _projector(10.0))
         self.assertFalse([o for o in out.objects if occlusion_hypothesis.is_hypothesis(o)])
