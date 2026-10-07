@@ -1,0 +1,115 @@
+{
+ "scores": {
+  "stage1_average": 94.84131044510337
+ },
+ "round_details": [
+  {
+   "problem_id": "lf06_umbrella_fallenbike",
+   "camera": 1.0,
+   "object_type": 1.0,
+   "landmark": 1.0,
+   "relation": 1.0,
+   "anchor": 0.9014792116578663,
+   "target": 1.0,
+   "total": 98.52218817486799,
+   "weights": {
+    "camera": 0.1,
+    "object_type": 0.15,
+    "landmark": 0.1,
+    "relation": 0.1,
+    "anchor": 0.15,
+    "target": 0.4
+   },
+   "expected": {
+    "camera_id": "rig_3_b",
+    "landmark_name": "trash_can_01",
+    "landmark_prefix": "trash_can",
+    "target_kind": "object",
+    "target_type": "umbrella",
+    "relation": "near",
+    "situation": null,
+    "anchor_coord": [
+     -76.58481,
+     96.19682,
+     15.70586
+    ],
+    "target_coord": [
+     -77.6659,
+     96.58378,
+     15.80732
+    ]
+   },
+   "submission": {
+    "camera_id": "rig_3_b",
+    "target_type": "umbrella",
+    "relation": "near",
+    "situation": null,
+    "landmark": "trash_can",
+    "anchor_coord": [
+     -76.88027238559768,
+     96.1930807780599,
+     16.100000381469727
+    ],
+    "target_coord": [
+     -76.88027238559768,
+     96.1930807780599,
+     16.100000381469727
+    ]
+   }
+  },
+  {
+   "problem_id": "sar03_bench_lie",
+   "camera": 1.0,
+   "object_type": 1.0,
+   "landmark": 1.0,
+   "relation": 0.0,
+   "anchor": 0.5285564114847328,
+   "target": 1.0,
+   "total": 91.16043271533874,
+   "weights": {
+    "camera": 0.1,
+    "object_type": 0.15,
+    "landmark": 0.0,
+    "relation": 0.0,
+    "anchor": 0.15,
+    "target": 0.4
+   },
+   "expected": {
+    "camera_id": "rig_3_c",
+    "landmark_name": "bench_02",
+    "landmark_prefix": "bench",
+    "target_kind": "person",
+    "target_type": "person_bending",
+    "relation": null,
+    "situation": "abnormal",
+    "anchor_coord": [
+     -84.10907,
+     112.51235,
+     15.47582
+    ],
+    "target_coord": [
+     -84.92714,
+     111.8766,
+     15.9972
+    ]
+   },
+   "submission": {
+    "camera_id": "rig_3_c",
+    "target_type": "person",
+    "relation": null,
+    "situation": "abnormal",
+    "landmark": "bench",
+    "anchor_coord": [
+     -84.32020767888478,
+     110.24910097244089,
+     16.100000381469727
+    ],
+    "target_coord": [
+     -84.09187521211679,
+     111.96481328655139,
+     16.280000381469726
+    ]
+   }
+  }
+ ]
+}

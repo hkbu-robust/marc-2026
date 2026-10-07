@@ -704,6 +704,19 @@ def _xyz_list(xyz: tuple[float, float, float]) -> list[float]:
     return [float(xyz[0]), float(xyz[1]), float(xyz[2])]
 
 
+def project_anchor(
+    projector: CctvProjector,
+    camera_id: str,
+    anchor_box: tuple[float, float, float, float],
+) -> Optional[tuple[float, float, float]]:
+    """World point submitted for an anchor (landmark) box.
+
+    The offline replay (``scripts/stage1_replay.py``) scores held-out anchors
+    through this function, so anchor geometry changes belong here.
+    """
+    return projector.project_contact(camera_id, anchor_box)
+
+
 def _project_pair(
     projector: CctvProjector,
     camera_id: str,
@@ -726,7 +739,7 @@ def _project_pair(
         return None
     if anchor_box is None:
         return target_xyz, target_xyz
-    anchor_xyz = projector.project_contact(camera_id, anchor_box)
+    anchor_xyz = project_anchor(projector, camera_id, anchor_box)
     if anchor_xyz is None:
         note_decision("anchor_collapsed", camera_id=camera_id, anchor_box=anchor_box)
         return target_xyz, target_xyz
