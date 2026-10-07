@@ -443,9 +443,11 @@ class CctvYoloDetector:
             # the crop and resolves the final identity.
             if class_name not in MISSION_OBJECT_TYPES:
                 continue
-            if any(
+            if class_name == target_type and _same_object(mapped, occupied[camera_id]):
+                continue
+            if class_name != target_type and any(
                 _box_iou(mapped, existing) >= REFINE_DEDUP_IOU
-                for existing in occupied[camera_id]
+                for existing in occupied.get(camera_id, ())
             ):
                 continue
             key = (camera_id, class_name)

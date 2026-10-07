@@ -362,13 +362,14 @@ class ProxyTests(unittest.TestCase):
 
     def test_refine_additions_are_recorded(self):
         parsed = parse_command("Find the tumbler on the bench.")
-        missed = ObjectCandidate(
-            "rig_1:tumbler:0", "tumbler", (200.0, 200.0, 240.0, 250.0), 0.2,
-            "rig_1", (640, 480),
-        )
+        # The tile pass runs first, so its candidate takes the first free ID.
         tiled = ObjectCandidate(
-            "rig_1:tumbler:1", "tumbler", (20.0, 20.0, 24.0, 25.0), 0.7,
+            "rig_1:tumbler:0", "tumbler", (20.0, 20.0, 24.0, 25.0), 0.7,
             "rig_1", (640, 480), source="tile",
+        )
+        missed = ObjectCandidate(
+            "rig_1:tumbler:1", "tumbler", (200.0, 200.0, 240.0, 250.0), 0.2,
+            "rig_1", (640, 480), source="landmark_crop",
         )
         round_ = CctvDetectionRound(
             objects=[
@@ -384,10 +385,10 @@ class ProxyTests(unittest.TestCase):
         with patch("marc_agent.perception.cctv_yolo._detector", detector):
             refined, notes = _notes(refine_detection_round, parsed, round_)
         note = _only(notes, "refine_added", path="object")
-        self.assertEqual(["rig_1:tumbler:0"], note["candidates"])
+        self.assertEqual(["rig_1:tumbler:1"], note["candidates"])
         note = _only(notes, "tiled_refine", target="tumbler")
         self.assertEqual(1, note["added"])
-        self.assertEqual(["rig_1:tumbler:1"], note["candidates"])
+        self.assertEqual(["rig_1:tumbler:0"], note["candidates"])
         self.assertEqual(["rig_1"], note["cameras"])
         self.assertIn("ms", note)
         self.assertEqual([tiled, missed], refined.objects[1:])
