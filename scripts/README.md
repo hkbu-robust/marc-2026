@@ -78,17 +78,18 @@ python -m scripts.run_stage1_repeats ... --project fs-a --ros-domain-id 88 --vll
 python -m scripts.run_stage1_repeats ... --project fs-b --ros-domain-id 89 --vllm-port 8014
 ```
 
-- **Memory:** `--vllm-memory-mib` (default 49152) sizes vLLM as on the 48 GB judging
-  card: ~36 GB, of which 16.8 GB are weights; the rest is KV cache the rounds barely
-  use. Without it vLLM reserves 75 % of the whole card (~72 GB) and nothing else fits.
-  A run needs about 36 + 7 (Isaac Sim) + 2 (agent) GB; the runner refuses to start
-  below `--min-free-gpu-mib` (45000).
+- **Memory:** `--vllm-gpu-fraction` (default 0.37) is the share of the physical card
+  vLLM reserves: ~36 GB, as on the 48 GB judging card; 16.8 GB are weights, the rest
+  is KV cache the rounds barely use. The entrypoint's default is 0.75 (~72 GB), and
+  then nothing else fits. (`VLLM_GPU_MEMORY_MIBS` does not cap memory; the entrypoint
+  only uses it to pick a fraction.) A run needs about 36 + 7 (Isaac Sim) + 2 (agent)
+  GB; the runner refuses to start below `--min-free-gpu-mib` (45000).
 - **Separate clones:** the platform writes score files to `<clone>/results/`, and the
   runner picks the new file there, so two runs from one clone would mix them up.
 - **Timing:** concurrent runs slow each other down. Fine for scores and decisions;
   run timing-sensitive tests (warm-up, round time, latency) alone.
 - Outside the runner (`docker compose up` by hand), set the same variables:
-  `MARC_VLLM_PORT`, `MARC_VLLM_MEMORY_MIBS` and `ROS_DOMAIN_ID`, with
+  `MARC_VLLM_PORT`, `MARC_VLLM_GPU_FRACTION` and `ROS_DOMAIN_ID`, with
   `scripts/frozen-logging.compose.yml` as the last `-f` file. The root
   `docker-compose.yml` (the submission entry point) is unchanged.
 

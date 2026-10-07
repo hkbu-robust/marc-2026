@@ -1356,6 +1356,13 @@ def _select_object_candidate(
             # bare ID would cost about 1.1-1.6 points; retiring the call would be a
             # routing rule chosen from public failures. The submitted anchor for a
             # command with no named landmark comes from infer_anchor either way.
+            # Open option (b), not taken (team decision 2026-10-08): since the
+            # final-system changes this reply parses, so on hf07 Qwen's wrong first
+            # target now stands (35 vs 96.7 points, 3/3 smoke runs, about -1.9 per
+            # run). Routing implied-anchor requests (no named landmark, implicit
+            # anchor classes) to geometry for target and anchor, like the
+            # parking_space route, would recover it; it must be disclosed as a rule
+            # motivated by a public failure. See #120 and ADR 0002 (#125).
             anchors = _anchor_variants(
                 selected, parsed, command_text, round_
             )

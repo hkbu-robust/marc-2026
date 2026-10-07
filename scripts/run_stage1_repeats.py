@@ -99,7 +99,7 @@ def provenance(args, env: dict, agent_project: str) -> dict:
             key: env[key] for key in (
                 "ROS_DOMAIN_ID", "MARC_TEAM_ID", "HEADLESS", "ENV_MARC_SCENARIO",
                 "MARC_STAGE1_SCENE_CACHE", "MARC_ROUND_DUMP", "MARC_AGENT_IMAGE",
-                "MARC_QWEN_IMAGE", "MARC_VLLM_PORT", "MARC_VLLM_MEMORY_MIBS",
+                "MARC_QWEN_IMAGE", "MARC_VLLM_PORT", "MARC_VLLM_GPU_FRACTION",
             )
         },
         # Set by `docker build --label org.opencontainers.image.revision=<sha>`.
@@ -226,9 +226,9 @@ def main(argv=None) -> None:
                         help="refuse to start with less free GPU memory than this")
     parser.add_argument("--vllm-port", type=int, default=8004,
                         help="host port for this run's vLLM; give each concurrent run its own")
-    parser.add_argument("--vllm-memory-mib", default="49152",
-                        help="size vLLM as if the GPU had this much memory (49152 = the 48 GB "
-                             "judging card); empty = the whole card")
+    parser.add_argument("--vllm-gpu-fraction", default="0.37",
+                        help="share of the physical GPU vLLM reserves (0.37 of 96 GB = ~36 GB, "
+                             "as on the 48 GB judging card); empty = the entrypoint's 0.75")
     parser.add_argument("--warm-qwen", action="store_true",
                         help="keep vLLM loaded between runs instead of a cold start each run")
     args = parser.parse_args(argv)
@@ -246,7 +246,7 @@ def main(argv=None) -> None:
         "MARC_AGENT_IMAGE": args.agent_image,
         "MARC_QWEN_IMAGE": args.qwen_image,
         "MARC_VLLM_PORT": str(args.vllm_port),
-        "MARC_VLLM_MEMORY_MIBS": args.vllm_memory_mib,
+        "MARC_VLLM_GPU_FRACTION": args.vllm_gpu_fraction,
     }
     records = []
     try:
