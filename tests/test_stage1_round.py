@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -20,6 +22,7 @@ from marc_agent.perception.stage1_pipeline import (
     run_stage1_round,
     start_qwen_warmup,
     static_scene_key,
+    warm_up_qwen_before_registering,
 )
 from marc_agent.experiment_log import decision_scope
 from marc_agent.perception.object_selection import ObjectSelection
@@ -227,6 +230,34 @@ class Stage1RoundTests(unittest.TestCase):
         ), patch("marc_agent.perception.stage1_pipeline.note_decision") as note:
             start_qwen_warmup().join(5.0)
         self.assertFalse(note.call_args.kwargs["ok"])
+
+    def test_registration_waits_for_the_warmup(self):
+        order = []
+        verifier = Mock()
+        verifier.warm_up.side_effect = lambda: order.append("warm")
+        with patch.dict(os.environ, {"MARC_SAR_DETECTOR": "qwen-remote"}), patch(
+            "marc_agent.perception.stage1_pipeline.RemoteQwenSarVerifier",
+            return_value=verifier,
+        ), patch("marc_agent.perception.stage1_pipeline.note_decision"):
+            warm_up_qwen_before_registering()
+            order.append("register")
+        self.assertEqual(["warm", "register"], order)
+
+    def test_registration_wait_is_bounded(self):
+        release = threading.Event()
+        verifier = Mock()
+        verifier.warm_up.side_effect = lambda: release.wait(5.0)
+        with patch.dict(os.environ, {"MARC_SAR_DETECTOR": "qwen-remote",
+                                     "MARC_QWEN_WARMUP_MAX_S": "0.05"}), patch(
+            "marc_agent.perception.stage1_pipeline.RemoteQwenSarVerifier",
+            return_value=verifier,
+        ), patch("marc_agent.perception.stage1_pipeline.note_decision") as note:
+            started = time.monotonic()
+            warm_up_qwen_before_registering()
+            waited = time.monotonic() - started
+        release.set()
+        self.assertLess(waited, 1.0)
+        self.assertEqual("qwen_warmup_wait", note.call_args.args[0])
 
     def test_no_qwen_warmup_without_the_remote_backend(self):
         with patch.dict(os.environ, {"MARC_SAR_DETECTOR": "fallback"}):
