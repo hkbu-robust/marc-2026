@@ -75,8 +75,6 @@ def k_from_camera_info(info) -> Optional[tuple[float, float, float, float]]:
     return fx, fy, cx, cy
 
 
-# Inset from y_max for long prone/lying boxes so the ray hits torso, not padded feet.
-PROSTRATE_CONTACT_INSET = 0.2
 LOWER_HALF_CENTER = 0.75
 PROSTRATE_HALF_CENTER = 0.60
 BENDING_CONTACT_CENTER = 1.05

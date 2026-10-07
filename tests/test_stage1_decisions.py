@@ -34,7 +34,7 @@ class SummaryTests(unittest.TestCase):
     def _play(self, tmp):
         """Four rounds through the participant's logging path."""
         run = start_experiment(tmp, environ={})
-        cache = StaticSceneCache()
+        cache = StaticSceneCache(enabled=True)
         plays = [
             ("Find the mug on the picnic table.", _geometry(), _raise, 40.0),
             ("Find the mug on the picnic table.", _geometry(), None, 95.0),

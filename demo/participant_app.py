@@ -55,6 +55,7 @@ from marc_agent.perception.stage1_pipeline import (
     get_default_verifier,
     log_qwen_startup_status,
     run_stage1_round,
+    start_qwen_warmup,
 )
 from marc_agent.pick_runtime import PickRuntime, pick_policy_name
 from marc_agent.retrieval_state import (
@@ -982,6 +983,7 @@ def main():
     experiment.attach_python_logging()
     try:
         log_qwen_startup_status()
+        start_qwen_warmup()
         DemoParticipant().run()
     except BaseException as exc:
         log.exception("Participant terminated")

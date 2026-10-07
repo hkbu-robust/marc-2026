@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -28,7 +29,6 @@ from marc_agent.perception.cctv_project import (
 )
 from marc_agent.perception.cctv_yolo import (
     refine_detection_round,
-    refresh_detection_camera,
 )
 from marc_agent.perception.object_selection import (
     ObjectSelection,
@@ -68,7 +68,8 @@ log = logging.getLogger("marc_agent.stage1_pipeline")
 _GroundingResult = None
 _CACHED_VERIFIER: Optional[Verifier] = None
 
-# Far-off non-zero stand-in until ignored classes (umbrella) have a detector.
+# Protocol filler so a round with no projectable candidate still submits. It is
+# scene-agnostic, not a position estimate; the regression gate counts it.
 IGNORED_CLASS_DUMMY_XYZ = (1.0, 1.0, 0.1)
 
 
@@ -157,6 +158,39 @@ def log_qwen_startup_status() -> None:
             type(exc).__name__,
             exc,
         )
+
+
+def start_qwen_warmup() -> Optional[threading.Thread]:
+    """Warm the remote vLLM server in the background from agent start (#111).
+
+    Runs on its own verifier instance and only logs. Returns the thread, or
+    None when Qwen is not served remotely.
+    """
+    mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
+    if mode != "qwen-remote":
+        return None
+
+    def run() -> None:
+        started = time.perf_counter()
+        try:
+            RemoteQwenSarVerifier().warm_up()
+        except Exception as exc:
+            latency_s = time.perf_counter() - started
+            log.warning(
+                "[qwen-warmup] failed after %.1fs error=%s detail=%s",
+                latency_s, type(exc).__name__, exc,
+            )
+            note_decision(
+                "qwen_warmup", ok=False, latency_s=latency_s, error=type(exc).__name__
+            )
+            return
+        latency_s = time.perf_counter() - started
+        log.info("[qwen-warmup] ok latency=%.1fs", latency_s)
+        note_decision("qwen_warmup", ok=True, latency_s=latency_s)
+
+    thread = threading.Thread(target=run, name="qwen-warmup", daemon=True)
+    thread.start()
+    return thread
 
 
 @dataclass(frozen=True)
@@ -445,23 +479,6 @@ def run_stage1_candidate_pipeline(
                 exc,
             )
             note_decision("scene_description_failed", error=type(exc).__name__)
-    point_objects = getattr(selected_verifier, "point_object_candidates", None)
-    if parsed.target_type != "person" and callable(point_objects):
-        try:
-            extra_objects = point_objects(parsed, detections, command_text)
-            if extra_objects:
-                detections = replace(
-                    detections,
-                    objects=list(detections.objects) + list(extra_objects),
-                )
-            selected_verifier = _select_verifier(selected_verifier, clock, client)
-        except Exception as exc:
-            log.warning(
-                "[vlm] point refinement failed error=%s detail=%s; "
-                "continuing with detector candidates",
-                type(exc).__name__,
-                exc,
-            )
     selection = None
     object_selection = None
     failure_reason = None
@@ -532,54 +549,6 @@ def run_stage1_candidate_pipeline(
     )
 
 
-def _refresh_selected_candidates(
-    candidates: Stage1CandidateResult,
-) -> Stage1CandidateResult:
-    """Refresh Qwen's target camera and carry new boxes into projection."""
-    camera_id = None
-    if candidates.sar_selection and candidates.sar_selection.selected:
-        camera_id = candidates.sar_selection.selected.camera_id
-    elif candidates.object_selection is not None:
-        camera_id = candidates.object_selection.target.camera_id
-    if camera_id is None:
-        return candidates
-
-    detections = refresh_detection_camera(candidates.detections, camera_id)
-    if detections is candidates.detections:
-        return candidates
-    objects = {item.candidate_id: item for item in detections.objects}
-    people = {item.candidate_id: item for item in detections.people}
-    sar_selection = candidates.sar_selection
-    if sar_selection is not None and sar_selection.selected is not None:
-        sar_selection = replace(
-            sar_selection,
-            selected=people.get(
-                sar_selection.selected.candidate_id,
-                sar_selection.selected,
-            ),
-        )
-    object_selection = candidates.object_selection
-    if object_selection is not None:
-        object_selection = replace(
-            object_selection,
-            target=objects.get(
-                object_selection.target.candidate_id,
-                object_selection.target,
-            ),
-            anchor=(
-                objects.get(object_selection.anchor.candidate_id, object_selection.anchor)
-                if object_selection.anchor is not None
-                else None
-            ),
-        )
-    return replace(
-        candidates,
-        detections=detections,
-        sar_selection=sar_selection,
-        object_selection=object_selection,
-    )
-
-
 @dataclass(frozen=True)
 class Stage1RoundResult:
     """Candidate collection plus an optional world-coordinate GroundingResult."""
@@ -631,17 +600,18 @@ class StaticSceneCache:
 
     An answer is stored only when every discovered camera sent a frame. A hit
     replaces the submitted grounding; the fresh one is recorded, not used.
-    ``MARC_STAGE1_SCENE_CACHE=0`` turns reuse off for experiments.
+    Off unless ``MARC_STAGE1_SCENE_CACHE=1``: copying an earlier round's answer
+    is not realistic for deployment (#88).
     """
 
-    def __init__(self, enabled: bool = True):
+    def __init__(self, enabled: bool = False):
         self.enabled = enabled
         self._entries: dict[tuple, tuple[Optional[int], "Stage1RoundResult"]] = {}
 
     @classmethod
     def from_env(cls, environ=None) -> "StaticSceneCache":
         env = os.environ if environ is None else environ
-        return cls(env.get("MARC_STAGE1_SCENE_CACHE", "1") != "0")
+        return cls(env.get("MARC_STAGE1_SCENE_CACHE", "0") == "1")
 
     def apply(
         self, result: "Stage1RoundResult", round_number: Optional[int] = None
@@ -1200,7 +1170,6 @@ def run_stage1_round(
         expected_intent=expected_intent,
         clock=clock,
     )
-    candidates = _refresh_selected_candidates(candidates)
     projection_started = time.perf_counter()
     result = compose_stage1_grounding(candidates, projector)
     return replace(

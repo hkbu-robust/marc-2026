@@ -1,0 +1,1047 @@
+{
+ "command": "Find the person lying face-down on the bench near the taxi.",
+ "camera_ids": [
+  "rig_1_a",
+  "rig_2_b",
+  "rig_2_c",
+  "rig_3_b",
+  "rig_3_c",
+  "rig_7_a"
+ ],
+ "candidates": [
+  {
+   "bbox_xyxy": [
+    106.75,
+    31.666667938232422,
+    276.0,
+    121.83333587646484
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:bench:0",
+   "class_name": "bench",
+   "confidence": 0.9658203125
+  },
+  {
+   "bbox_xyxy": [
+    198.6666717529297,
+    7.0416669845581055,
+    288.66668701171875,
+    65.20833587646484
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:bicycle:0",
+   "class_name": "bicycle",
+   "confidence": 0.90576171875
+  },
+  {
+   "bbox_xyxy": [
+    200.6666717529297,
+    73.41667175292969,
+    210.0,
+    79.91667175292969
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:tumbler:0",
+   "class_name": "tumbler",
+   "confidence": 0.5869140625
+  },
+  {
+   "bbox_xyxy": [
+    350.0,
+    34.145835876464844,
+    439.3333435058594,
+    87.16667175292969
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:trash_can:0",
+   "class_name": "trash_can",
+   "confidence": 0.97509765625
+  },
+  {
+   "bbox_xyxy": [
+    417.0,
+    90.08333587646484,
+    431.0,
+    95.91667175292969
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:cola_can:0",
+   "class_name": "cola_can",
+   "confidence": 0.87841796875
+  },
+  {
+   "bbox_xyxy": [
+    449.3333435058594,
+    73.0,
+    462.66668701171875,
+    79.5
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:cola_can:1",
+   "class_name": "cola_can",
+   "confidence": 0.8642578125
+  },
+  {
+   "bbox_xyxy": [
+    528.3333740234375,
+    0.0,
+    642.3333740234375,
+    60.083335876464844
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:bench:1",
+   "class_name": "bench",
+   "confidence": 0.97265625
+  },
+  {
+   "bbox_xyxy": [
+    542.0,
+    163.0,
+    950.0,
+    415.0
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:picnic_table:0",
+   "class_name": "picnic_table",
+   "confidence": 0.95361328125
+  },
+  {
+   "bbox_xyxy": [
+    581.0,
+    377.0,
+    587.0,
+    389.0
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:sunblock:0",
+   "class_name": "sunblock",
+   "confidence": 0.90380859375
+  },
+  {
+   "bbox_xyxy": [
+    616.0,
+    47.04166793823242,
+    620.0,
+    50.875
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:umbrella:0",
+   "class_name": "umbrella",
+   "confidence": 0.338134765625
+  },
+  {
+   "bbox_xyxy": [
+    694.6666870117188,
+    180.33334350585938,
+    713.3333740234375,
+    200.33334350585938
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:mug:0",
+   "class_name": "mug",
+   "confidence": 0.8896484375
+  },
+  {
+   "bbox_xyxy": [
+    731.3333740234375,
+    184.83334350585938,
+    744.6666870117188,
+    206.1666717529297
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:juice:0",
+   "class_name": "juice",
+   "confidence": 0.93505859375
+  },
+  {
+   "bbox_xyxy": [
+    778.6666870117188,
+    156.83334350585938,
+    792.0,
+    169.1666717529297
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:juice:1",
+   "class_name": "juice",
+   "confidence": 0.8662109375
+  },
+  {
+   "bbox_xyxy": [
+    1024.666748046875,
+    0.3333333432674408,
+    1144.666748046875,
+    51.083335876464844
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:bench:2",
+   "class_name": "bench",
+   "confidence": 0.970703125
+  },
+  {
+   "bbox_xyxy": [
+    0.1666666716337204,
+    173.0,
+    141.0,
+    321.66668701171875
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:normal_car_1:0",
+   "class_name": "normal_car_1",
+   "confidence": 0.8955078125
+  },
+  {
+   "bbox_xyxy": [
+    12.166666984558105,
+    204.6666717529297,
+    228.83334350585938,
+    363.3333435058594
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:bench:0",
+   "class_name": "bench",
+   "confidence": 0.9833984375
+  },
+  {
+   "bbox_xyxy": [
+    246.1666717529297,
+    280.8333435058594,
+    252.1666717529297,
+    290.8333435058594
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:umbrella:0",
+   "class_name": "umbrella",
+   "confidence": 0.7841796875
+  },
+  {
+   "bbox_xyxy": [
+    312.8333435058594,
+    129.25,
+    394.0,
+    150.9166717529297
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:kick_scooter:0",
+   "class_name": "kick_scooter",
+   "confidence": 0.9462890625
+  },
+  {
+   "bbox_xyxy": [
+    444.66668701171875,
+    127.16667175292969,
+    532.6666870117188,
+    180.1666717529297
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:trash_can:0",
+   "class_name": "trash_can",
+   "confidence": 0.9375
+  },
+  {
+   "bbox_xyxy": [
+    486.0,
+    223.0,
+    492.66668701171875,
+    226.33334350585938
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:tissue:0",
+   "class_name": "tissue",
+   "confidence": 0.39599609375
+  },
+  {
+   "bbox_xyxy": [
+    532.6666870117188,
+    185.0,
+    539.3333740234375,
+    197.0
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:juice:0",
+   "class_name": "juice",
+   "confidence": 0.9013671875
+  },
+  {
+   "bbox_xyxy": [
+    543.6666870117188,
+    180.0,
+    557.0,
+    185.33334350585938
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:cola_can:0",
+   "class_name": "cola_can",
+   "confidence": 0.85009765625
+  },
+  {
+   "bbox_xyxy": [
+    544.6666870117188,
+    182.1666717529297,
+    551.3333740234375,
+    193.1666717529297
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:cola_can:1",
+   "class_name": "cola_can",
+   "confidence": 0.67236328125
+  },
+  {
+   "bbox_xyxy": [
+    556.6666870117188,
+    168.0,
+    570.0,
+    173.33334350585938
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:cola_can:2",
+   "class_name": "cola_can",
+   "confidence": 0.85205078125
+  },
+  {
+   "bbox_xyxy": [
+    567.0,
+    197.0,
+    581.0,
+    202.0
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:cola_can:3",
+   "class_name": "cola_can",
+   "confidence": 0.87255859375
+  },
+  {
+   "bbox_xyxy": [
+    574.0,
+    177.0,
+    584.6666870117188,
+    185.0
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:cracker_box:0",
+   "class_name": "cracker_box",
+   "confidence": 0.9013671875
+  },
+  {
+   "bbox_xyxy": [
+    581.3333740234375,
+    4.8541669845581055,
+    664.0,
+    77.66667175292969
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:bench:1",
+   "class_name": "bench",
+   "confidence": 0.947265625
+  },
+  {
+   "bbox_xyxy": [
+    596.6666870117188,
+    177.83334350585938,
+    601.3333740234375,
+    181.5
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:disposable_cup:0",
+   "class_name": "disposable_cup",
+   "confidence": 0.708984375
+  },
+  {
+   "bbox_xyxy": [
+    596.6666870117188,
+    196.0,
+    603.3333740234375,
+    199.33334350585938
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:disposable_cup:1",
+   "class_name": "disposable_cup",
+   "confidence": 0.57763671875
+  },
+  {
+   "bbox_xyxy": [
+    622.0,
+    165.4166717529297,
+    630.0,
+    176.0
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:juice:1",
+   "class_name": "juice",
+   "confidence": 0.87255859375
+  },
+  {
+   "bbox_xyxy": [
+    9.333333969116211,
+    0.0,
+    276.66668701171875,
+    77.91667175292969
+   ],
+   "camera_id": "rig_2_c",
+   "candidate_id": "rig_2_c:suv:0",
+   "class_name": "suv",
+   "confidence": 0.962890625
+  },
+  {
+   "bbox_xyxy": [
+    706.6666870117188,
+    266.0,
+    725.3333740234375,
+    272.0
+   ],
+   "camera_id": "rig_2_c",
+   "candidate_id": "rig_2_c:umbrella:0",
+   "class_name": "umbrella",
+   "confidence": 0.884765625
+  },
+  {
+   "bbox_xyxy": [
+    764.0,
+    60.0,
+    965.3333740234375,
+    369.0
+   ],
+   "camera_id": "rig_2_c",
+   "candidate_id": "rig_2_c:vending_machine:0",
+   "class_name": "vending_machine",
+   "confidence": 0.9765625
+  },
+  {
+   "bbox_xyxy": [
+    960.6666870117188,
+    250.0,
+    1059.3333740234375,
+    385.66668701171875
+   ],
+   "camera_id": "rig_2_c",
+   "candidate_id": "rig_2_c:trash_can:0",
+   "class_name": "trash_can",
+   "confidence": 0.9794921875
+  },
+  {
+   "bbox_xyxy": [
+    1042.666748046875,
+    461.3333435058594,
+    1212.0,
+    713.3333740234375
+   ],
+   "camera_id": "rig_2_c",
+   "candidate_id": "rig_2_c:bicycle:0",
+   "class_name": "bicycle",
+   "confidence": 0.966796875
+  },
+  {
+   "bbox_xyxy": [
+    2.0,
+    220.1666717529297,
+    286.66668701171875,
+    336.5
+   ],
+   "camera_id": "rig_3_b",
+   "candidate_id": "rig_3_b:bicycle:0",
+   "class_name": "bicycle",
+   "confidence": 0.97705078125
+  },
+  {
+   "bbox_xyxy": [
+    325.0,
+    340.0,
+    359.0,
+    360.0
+   ],
+   "camera_id": "rig_3_b",
+   "candidate_id": "rig_3_b:cola_can:0",
+   "class_name": "cola_can",
+   "confidence": 0.9482421875
+  },
+  {
+   "bbox_xyxy": [
+    704.0,
+    306.66668701171875,
+    1280.0,
+    720.0
+   ],
+   "camera_id": "rig_3_b",
+   "candidate_id": "rig_3_b:picnic_table:0",
+   "class_name": "picnic_table",
+   "confidence": 0.90625
+  },
+  {
+   "bbox_xyxy": [
+    1020.0,
+    60.208335876464844,
+    1142.666748046875,
+    224.5
+   ],
+   "camera_id": "rig_3_b",
+   "candidate_id": "rig_3_b:trash_can:0",
+   "class_name": "trash_can",
+   "confidence": 0.97705078125
+  },
+  {
+   "bbox_xyxy": [
+    110.0,
+    109.33333587646484,
+    200.5,
+    226.6666717529297
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:trash_can:0",
+   "class_name": "trash_can",
+   "confidence": 0.962890625
+  },
+  {
+   "bbox_xyxy": [
+    181.0,
+    269.0,
+    190.0,
+    281.0
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:tumbler:0",
+   "class_name": "tumbler",
+   "confidence": 0.91943359375
+  },
+  {
+   "bbox_xyxy": [
+    204.0,
+    120.16667175292969,
+    317.66668701171875,
+    250.83334350585938
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:kick_scooter:0",
+   "class_name": "kick_scooter",
+   "confidence": 0.92529296875
+  },
+  {
+   "bbox_xyxy": [
+    215.33334350585938,
+    241.0,
+    226.6666717529297,
+    264.66668701171875
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:umbrella:0",
+   "class_name": "umbrella",
+   "confidence": 0.9140625
+  },
+  {
+   "bbox_xyxy": [
+    260.66668701171875,
+    304.66668701171875,
+    848.0,
+    717.3333740234375
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:taxi:0",
+   "class_name": "taxi",
+   "confidence": 0.90087890625
+  },
+  {
+   "bbox_xyxy": [
+    281.0,
+    74.29167175292969,
+    433.66668701171875,
+    166.6666717529297
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:bench:0",
+   "class_name": "bench",
+   "confidence": 0.9580078125
+  },
+  {
+   "bbox_xyxy": [
+    656.0,
+    0.0,
+    708.0,
+    10.270833969116211
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:bench:1",
+   "class_name": "bench",
+   "confidence": 0.35400390625
+  },
+  {
+   "bbox_xyxy": [
+    16.125,
+    510.66668701171875,
+    25.95833396911621,
+    520.0
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:disposable_cup:0",
+   "class_name": "disposable_cup",
+   "confidence": 0.42626953125
+  },
+  {
+   "bbox_xyxy": [
+    17.916667938232422,
+    458.66668701171875,
+    87.75,
+    570.0
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:hydrant:0",
+   "class_name": "hydrant",
+   "confidence": 0.97119140625
+  },
+  {
+   "bbox_xyxy": [
+    77.33333587646484,
+    393.0,
+    169.83334350585938,
+    629.6666870117188
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:kick_scooter:0",
+   "class_name": "kick_scooter",
+   "confidence": 0.919921875
+  },
+  {
+   "bbox_xyxy": [
+    83.875,
+    396.66668701171875,
+    106.16667175292969,
+    403.3333435058594
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:tumbler:0",
+   "class_name": "tumbler",
+   "confidence": 0.53515625
+  },
+  {
+   "bbox_xyxy": [
+    192.6666717529297,
+    0.0,
+    321.3333435058594,
+    60.25
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:police_car:0",
+   "class_name": "police_car",
+   "confidence": 0.90380859375
+  },
+  {
+   "bbox_xyxy": [
+    230.0,
+    342.0,
+    244.6666717529297,
+    356.0
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:cracker_box:0",
+   "class_name": "cracker_box",
+   "confidence": 0.9013671875
+  },
+  {
+   "bbox_xyxy": [
+    246.1666717529297,
+    48.0,
+    250.1666717529297,
+    51.91666793823242
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:pencilcase:0",
+   "class_name": "pencilcase",
+   "confidence": 0.7646484375
+  },
+  {
+   "bbox_xyxy": [
+    450.0,
+    43.16666793823242,
+    458.0,
+    48.16666793823242
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:tumbler:1",
+   "class_name": "tumbler",
+   "confidence": 0.8984375
+  },
+  {
+   "bbox_xyxy": [
+    487.3333435058594,
+    0.0,
+    610.0,
+    57.833335876464844
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:suv:0",
+   "class_name": "suv",
+   "confidence": 0.935546875
+  },
+  {
+   "bbox_xyxy": [
+    491.66668701171875,
+    282.66668701171875,
+    510.3333435058594,
+    292.0
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:tumbler:2",
+   "class_name": "tumbler",
+   "confidence": 0.9013671875
+  },
+  {
+   "bbox_xyxy": [
+    550.6666870117188,
+    167.0,
+    825.3333740234375,
+    411.3333435058594
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:normal_car_1:0",
+   "class_name": "normal_car_1",
+   "confidence": 0.95654296875
+  },
+  {
+   "bbox_xyxy": [
+    817.3333740234375,
+    159.0,
+    1233.3333740234375,
+    389.66668701171875
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:sports_car:0",
+   "class_name": "sports_car",
+   "confidence": 0.72314453125
+  },
+  {
+   "bbox_xyxy": [
+    954.6666870117188,
+    24.4375,
+    1061.3333740234375,
+    78.75
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:bicycle:0",
+   "class_name": "bicycle",
+   "confidence": 0.97265625
+  },
+  {
+   "bbox_xyxy": [
+    1041.3333740234375,
+    516.6666870117188,
+    1049.3333740234375,
+    530.0
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:disposable_cup:1",
+   "class_name": "disposable_cup",
+   "confidence": 0.90185546875
+  },
+  {
+   "bbox_xyxy": [
+    1064.0,
+    324.5,
+    1224.0,
+    518.0
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:trash_can:0",
+   "class_name": "trash_can",
+   "confidence": 0.95166015625
+  },
+  {
+   "bbox_xyxy": [
+    1094.666748046875,
+    590.0,
+    1109.3333740234375,
+    606.0
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:disposable_cup:2",
+   "class_name": "disposable_cup",
+   "confidence": 0.9072265625
+  },
+  {
+   "bbox_xyxy": [
+    1097.3333740234375,
+    560.0,
+    1137.3333740234375,
+    577.3333740234375
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:cola_can:0",
+   "class_name": "cola_can",
+   "confidence": 0.943359375
+  },
+  {
+   "bbox_xyxy": [
+    1149.3333740234375,
+    614.0,
+    1161.3333740234375,
+    632.6666870117188
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:disposable_cup:3",
+   "class_name": "disposable_cup",
+   "confidence": 0.9306640625
+  },
+  {
+   "bbox_xyxy": [
+    204.6666717529297,
+    19.0,
+    258.0,
+    110.33333587646484
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:person_sitting:0",
+   "class_name": "person_sitting",
+   "confidence": 0.9697265625
+  },
+  {
+   "bbox_xyxy": [
+    464.0,
+    39.91666793823242,
+    546.0,
+    78.83333587646484
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:person_bending:0",
+   "class_name": "person_bending",
+   "confidence": 0.97119140625
+  },
+  {
+   "bbox_xyxy": [
+    612.6666870117188,
+    75.0,
+    682.0,
+    272.3333435058594
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:person_walking_away:0",
+   "class_name": "person_walking_away",
+   "confidence": 0.97607421875
+  },
+  {
+   "bbox_xyxy": [
+    861.3333740234375,
+    154.6666717529297,
+    949.3333740234375,
+    352.66668701171875
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:person_sitting:1",
+   "class_name": "person_sitting",
+   "confidence": 0.97802734375
+  },
+  {
+   "bbox_xyxy": [
+    1081.3333740234375,
+    115.83333587646484,
+    1238.666748046875,
+    179.1666717529297
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:person_lying_down:0",
+   "class_name": "person_lying_down",
+   "confidence": 0.96533203125
+  },
+  {
+   "bbox_xyxy": [
+    223.6666717529297,
+    105.5,
+    324.0,
+    174.33334350585938
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:person_prone:0",
+   "class_name": "person_prone",
+   "confidence": 0.9716796875
+  },
+  {
+   "bbox_xyxy": [
+    344.3333435058594,
+    195.33334350585938,
+    415.66668701171875,
+    406.0
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:person_walking:0",
+   "class_name": "person_walking",
+   "confidence": 0.978515625
+  },
+  {
+   "bbox_xyxy": [
+    445.0,
+    69.16667175292969,
+    497.0,
+    164.6666717529297
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:person_sitting:0",
+   "class_name": "person_sitting",
+   "confidence": 0.93408203125
+  },
+  {
+   "bbox_xyxy": [
+    520.0,
+    0.0,
+    553.3333740234375,
+    107.25
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:person_walking:1",
+   "class_name": "person_walking",
+   "confidence": 0.81298828125
+  },
+  {
+   "bbox_xyxy": [
+    634.0,
+    0.0,
+    683.3333740234375,
+    65.0
+   ],
+   "camera_id": "rig_2_b",
+   "candidate_id": "rig_2_b:person_reclining:0",
+   "class_name": "person_reclining",
+   "confidence": 0.9599609375
+  },
+  {
+   "bbox_xyxy": [
+    558.6666870117188,
+    136.5,
+    636.0,
+    296.8333435058594
+   ],
+   "camera_id": "rig_2_c",
+   "candidate_id": "rig_2_c:person_walking:0",
+   "class_name": "person_walking",
+   "confidence": 0.9736328125
+  },
+  {
+   "bbox_xyxy": [
+    754.6666870117188,
+    0.0,
+    842.6666870117188,
+    105.25
+   ],
+   "camera_id": "rig_2_c",
+   "candidate_id": "rig_2_c:person_sitting:0",
+   "class_name": "person_sitting",
+   "confidence": 0.9697265625
+  },
+  {
+   "bbox_xyxy": [
+    215.0,
+    124.0,
+    364.66668701171875,
+    204.0
+   ],
+   "camera_id": "rig_3_b",
+   "candidate_id": "rig_3_b:person_bending:0",
+   "class_name": "person_bending",
+   "confidence": 0.97900390625
+  },
+  {
+   "bbox_xyxy": [
+    809.3333740234375,
+    201.0,
+    1278.666748046875,
+    396.0
+   ],
+   "camera_id": "rig_3_b",
+   "candidate_id": "rig_3_b:person_lying_down:0",
+   "class_name": "person_lying_down",
+   "confidence": 0.830078125
+  },
+  {
+   "bbox_xyxy": [
+    328.16668701171875,
+    57.0,
+    422.66668701171875,
+    104.66667175292969
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:person_bending:0",
+   "class_name": "person_bending",
+   "confidence": 0.97412109375
+  },
+  {
+   "bbox_xyxy": [
+    659.3333740234375,
+    0.0,
+    685.3333740234375,
+    9.197916984558105
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:person_reclining:0",
+   "class_name": "person_reclining",
+   "confidence": 0.7890625
+  },
+  {
+   "bbox_xyxy": [
+    1042.666748046875,
+    4.1666669845581055,
+    1173.3333740234375,
+    285.0
+   ],
+   "camera_id": "rig_3_c",
+   "candidate_id": "rig_3_c:person_reaching:0",
+   "class_name": "person_reaching",
+   "confidence": 0.97509765625
+  },
+  {
+   "bbox_xyxy": [
+    194.0,
+    272.0,
+    350.66668701171875,
+    405.3333435058594
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:person_lying_down:0",
+   "class_name": "person_lying_down",
+   "confidence": 0.97607421875
+  },
+  {
+   "bbox_xyxy": [
+    195.83334350585938,
+    0.0,
+    245.5,
+    61.958335876464844
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:person_reaching:0",
+   "class_name": "person_reaching",
+   "confidence": 0.96337890625
+  },
+  {
+   "bbox_xyxy": [
+    858.6666870117188,
+    0.4166666865348816,
+    954.6666870117188,
+    48.625
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:person_prone:0",
+   "class_name": "person_prone",
+   "confidence": 0.95703125
+  },
+  {
+   "bbox_xyxy": [
+    1054.0,
+    188.6666717529297,
+    1190.0,
+    418.66668701171875
+   ],
+   "camera_id": "rig_7_a",
+   "candidate_id": "rig_7_a:person_sitting:0",
+   "class_name": "person_sitting",
+   "confidence": 0.970703125
+  },
+  {
+   "bbox_xyxy": [
+    511.0,
+    39.54375076293945,
+    546.9593772888184,
+    76.890625
+   ],
+   "camera_id": "rig_1_a",
+   "candidate_id": "rig_1_a:person_bending:1",
+   "class_name": "person_bending",
+   "confidence": 0.93994140625
+  }
+ ],
+ "source": "#88 cache-off run-03 round 22 (sar03), stage1.pipeline.completed",
+ "qwen_pick": "rig_1_a:person_lying_down:0"
+}

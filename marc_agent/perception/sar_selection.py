@@ -1060,25 +1060,37 @@ def select_sar_candidate(
                         candidate_id,
                         selected.candidate_id,
                     )
+            def situation_of(item: CandidateEvidence) -> Optional[str]:
+                return situation_for_pose(
+                    item.person.pose_class,
+                    support=item.anchor.class_name if item.anchor is not None else None,
+                    surface=command.scene_hint,
+                )
+
+            def has_place(item: CandidateEvidence) -> bool:
+                return any(cue.startswith("place:") for cue in item.camera_evidence)
+
+            # Same eligibility as the support and landmark guards (#118): a person
+            # in the named place must also match the pose, support and situation.
             place_matches = tuple(
                 item
                 for item in contenders
-                if any(cue.startswith("place:") for cue in item.camera_evidence)
+                if has_place(item)
+                and (not poses or item.person.pose_class in poses)
+                and (not requires_support or item.horizontal_overlap >= 0.5)
+                and (requested is None or situation_of(item) == requested)
             )
-            if place_matches and not any(
-                cue.startswith("place:") for cue in selected_item.camera_evidence
-            ):
+            place_guard = not has_place(selected_item) and any(map(has_place, contenders))
+            if place_guard and not place_matches:
+                log.info("[vlm] place guard kept=%s reason=no_eligible_person", candidate_id)
+                note_decision(
+                    "guard_skipped", path="sar", guard="place_geometry_override",
+                    reason="place_guard_no_eligible", qwen_target=candidate_id,
+                )
+            elif place_guard:
                 selected_item = _fallback_pick(place_matches, place_matches)
                 selected = selected_item.person
-                evidence_situation = situation_for_pose(
-                    selected.pose_class,
-                    support=(
-                        selected_item.anchor.class_name
-                        if selected_item.anchor is not None
-                        else None
-                    ),
-                    surface=command.scene_hint,
-                )
+                evidence_situation = situation_of(selected_item)
                 reason = "place_geometry_override"
                 guards.append(reason)
                 log.info(
@@ -1098,16 +1110,7 @@ def select_sar_candidate(
                     if item.world_dist_m is not None
                     and (not poses or item.person.pose_class in poses)
                     and (not requires_support or item.horizontal_overlap >= 0.5)
-                    and situation_for_pose(
-                        item.person.pose_class,
-                        support=(
-                            item.anchor.class_name
-                            if item.anchor is not None
-                            else None
-                        ),
-                        surface=command.scene_hint,
-                    )
-                    == requested
+                    and situation_of(item) == requested
                 )
                 if nearby:
                     closest = min(
