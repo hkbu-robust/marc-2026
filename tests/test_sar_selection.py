@@ -17,6 +17,7 @@ from marc_agent.perception.sar_selection import (
     build_candidate_board,
     candidate_evidence,
     parse_verifier_output,
+    resolve_sar_anchor,
     select_sar_candidate,
     shortlist_for_verifier,
 )
@@ -1312,6 +1313,26 @@ class SarSelectionTests(unittest.TestCase):
             "place_guard_no_eligible",
             [note.get("reason") for note in notes if note["decision"] == "guard_skipped"],
         )
+
+    def test_unnamed_landmark_anchor_is_nearest_on_the_ground_sar06(self):
+        """#121: a scooter nearer in the image, a hydrant nearer on the ground."""
+        command = parse_command("Find the person who collapsed on the parking lot floor.")
+        person = _person("rig_a:person_lying_down:0", "person_lying_down", (300, 300, 400, 340))
+        scooter = _object("rig_a:kick_scooter:0", "kick_scooter", (300, 260, 360, 300))
+        hydrant = _object("rig_a:hydrant:0", "hydrant", (420, 200, 450, 260))
+        round_ = CctvDetectionRound(objects=[scooter, hydrant], people=[person],
+                                    camera_ids=["rig_a"])
+
+        class Projector:
+            def project_contact(self, camera_id, box, **kwargs):
+                return (0.0, 0.0, 0.0)
+
+            def project_landmark(self, camera_id, box, class_name, image_size):
+                return {"kick_scooter": (3.0, 0.0, 0.0), "hydrant": (0.0, 1.0, 0.0)}[class_name]
+
+        self.assertEqual(hydrant, resolve_sar_anchor(command, person, round_, Projector()))
+        # Without a projector it keeps the image-nearest object.
+        self.assertEqual(scooter, resolve_sar_anchor(command, person, round_))
 
     def test_fallen_by_bicycle_ranks_prostrate_before_walking(self):
         text = "Find the person fallen on the ground next to the toppled bicycle."

@@ -839,7 +839,7 @@ def _compose_person(
     )
     anchor = item.anchor if item is not None else None
     if anchor is None:
-        anchor = resolve_sar_anchor(parsed, person, candidates.detections)
+        anchor = resolve_sar_anchor(parsed, person, candidates.detections, projector)
     projected = _project_pair(
         projector,
         person.camera_id,
