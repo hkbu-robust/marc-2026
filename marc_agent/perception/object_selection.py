@@ -121,8 +121,6 @@ def _relation_score(
         elif relation is Relation.NEAR:
             on_contact = max(0.0, 1.0 - abs(contact) * 8.0)
             score -= 0.8 * overlap * (0.5 + 0.5 * on_contact)
-        if anchor.class_name == "police_car":
-            score += 0.5
         return score + conf
 
     if relation in (Relation.ON, Relation.ABOVE):
@@ -419,19 +417,7 @@ def _finish_rank(
         if target_id in seen_targets:
             continue
         seen_targets.add(target_id)
-        preferred = item
-        if parsed.scene_hint in PARKING_SCENES:
-            preferred = next(
-                (
-                    candidate
-                    for candidate in ranked
-                    if candidate.target.candidate_id == target_id
-                    and candidate.anchor is not None
-                    and candidate.anchor.class_name == "police_car"
-                ),
-                item,
-            )
-        unique.append(preferred)
+        unique.append(item)
     return tuple(unique[:OBJECT_BOARD_LIMIT])
 
 
@@ -1115,6 +1101,48 @@ def _resolve_target_only(
     )
 
 
+def infer_anchor(
+    selection: ObjectSelection,
+    parsed: ParsedCommand,
+    command_text: str,
+    objects: Iterable[ObjectCandidate],
+    projector,
+) -> ObjectSelection:
+    """The anchor for a command that names no landmark (#113).
+
+    It is the object of an implied class (vehicles for a car or parking cue,
+    seating for a park, any landmark class otherwise) in the target's camera
+    whose projected point is nearest the target in world metres. No class is
+    preferred: which car is "my car" is not in the command or the scene.
+    """
+    if parsed.landmark is not None or projector is None:
+        return selection
+    classes = implicit_anchor_classes(parsed, command_text) or LANDMARK_TYPES
+    target = selection.target
+    target_xy = _target_world_xy(projector, target)
+    if target_xy is None:
+        return selection
+    scored = []
+    for item in objects:
+        if item.camera_id != target.camera_id or item.class_name not in classes:
+            continue
+        if item.candidate_id == target.candidate_id:
+            continue
+        anchor_xy = _target_world_xy(projector, item)
+        if anchor_xy is not None:
+            dist = math.hypot(anchor_xy[0] - target_xy[0], anchor_xy[1] - target_xy[1])
+            scored.append((dist, -item.confidence, item.candidate_id, item))
+    if not scored:
+        return selection
+    dist, _, _, anchor = min(scored)
+    note_decision(
+        "implied_anchor", classes=sorted(classes), chosen=anchor.candidate_id,
+        dist_m=round(dist, 3),
+        replaced=selection.anchor.candidate_id if selection.anchor is not None else None,
+    )
+    return replace(selection, anchor=anchor)
+
+
 def select_object_candidate(
     parsed: ParsedCommand,
     round_: CctvDetectionRound,
@@ -1124,7 +1152,32 @@ def select_object_candidate(
     projector=None,
     occupancy_at: Optional[OccupancyAt] = None,
 ) -> Optional[ObjectSelection]:
-    """Return the best matching object, optionally verified, or None."""
+    """Return the best matching object, optionally verified, or None.
+
+    A command that names no landmark gets its anchor from ``infer_anchor``.
+    """
+    selection = _select_object_candidate(
+        parsed,
+        round_,
+        command_text=command_text,
+        verifier=verifier,
+        projector=projector,
+        occupancy_at=occupancy_at,
+    )
+    if selection is None:
+        return None
+    return infer_anchor(selection, parsed, command_text, round_.objects, projector)
+
+
+def _select_object_candidate(
+    parsed: ParsedCommand,
+    round_: CctvDetectionRound,
+    *,
+    command_text: str = "",
+    verifier: Optional[ObjectVerifier] = None,
+    projector=None,
+    occupancy_at: Optional[OccupancyAt] = None,
+) -> Optional[ObjectSelection]:
     ranked = rank_object_candidates(
         parsed,
         round_,

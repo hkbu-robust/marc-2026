@@ -117,7 +117,9 @@ VEHICLE_LANDMARKS = frozenset(
         "suv",
     }
 )
-PARKED_VEHICLE_LANDMARKS = VEHICLE_LANDMARKS - {"taxi"}
+# Any vehicle class may be parked: where a class stands is the scene's business,
+# not a fixed rule (chungmu's taxi happens to be on the road; #113).
+PARKED_VEHICLE_LANDMARKS = VEHICLE_LANDMARKS
 PARKING_SCENES = frozenset({"parking", "parking_space"})
 
 _SCENE_HINTS = (
@@ -541,8 +543,10 @@ def uses_vehicle_anchor(parsed: ParsedCommand, text: str = "") -> bool:
     """True when ranking should pair the target with YOLO vehicle classes.
 
     Parking/lot scene hints are not vehicles. Only explicit car cues (got out of
-    the car, the car) request a vehicle pair, and even then the parser landmark
-    stays empty so submit does not invent a car name.
+    the car, the car) request a vehicle pair. The parser landmark stays empty:
+    the command does not name the car. The submission then takes the landmark
+    from the scene, the class of the vehicle nearest the target in world metres
+    (``object_selection.infer_anchor``), never a fixed class (#6, #113).
     """
     if parsed.landmark is not None or parsed.target_type == "person":
         return False

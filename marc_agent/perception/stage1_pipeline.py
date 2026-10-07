@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from marc_agent.command_parser import (
+    LANDMARK_TYPES,
     CommandParseError,
     Intent,
     ParseErrorCode,
@@ -752,36 +753,48 @@ def _grounding_payload(
     target_xyz: tuple[float, float, float],
     anchor_xyz: tuple[float, float, float],
     *,
-    selection: Optional[ObjectSelection] = None,
-    fallback_class: Optional[str] = None,
-    relation: Optional[Relation] = None,
     anchor_class: Optional[str] = None,
 ) -> GroundingResult:
-    del fallback_class
-    implied_anchor = (
-        selection is not None
-        and selection.anchor is not None
-        and (parsed.landmark is not None or parsed.scene_hint is not None)
-    )
-    landmark = parsed.landmark or anchor_class or (
-        selection.anchor.class_name
-        if implied_anchor
-        else ""
-    )
-    submitted_relation = relation if relation is not None else parsed.relation
-    if submitted_relation is None and implied_anchor:
-        submitted_relation = (
-            Relation.BESIDE if parsed.scene_hint == "park" else Relation.NEAR
-        )
+    """The submitted fields, filled where the scorer needs what the command omits.
+
+    The scorer weighs landmark and relation on every object round, stated or
+    not (#113), so an object round always submits both: the stated landmark,
+    else the anchor's class (inferred from the scene); the stated relation,
+    else ``near``. ``parsed`` keeps only what the text said, and the
+    ``field_source`` decision records where each submitted field came from.
+    """
+    is_object = parsed.target_type != "person"
+    if parsed.landmark:
+        landmark, landmark_source = parsed.landmark, "stated"
+    elif anchor_class:
+        landmark, landmark_source = anchor_class, "inferred"
+    else:
+        landmark, landmark_source = "", "none"
+    if parsed.relation is not None:
+        relation, relation_source = parsed.relation, "stated"
+    elif is_object:
+        relation, relation_source = Relation.NEAR, "default"
+    else:
+        relation, relation_source = None, "none"
+    note_decision("field_source", landmark=landmark_source, relation=relation_source)
     return _grounding_result_cls()(
         camera_id=camera_id,
         target_type=parsed.target_type,
         anchor_coord=_xyz_list(anchor_xyz),
         target_coord=_xyz_list(target_xyz),
         landmark=landmark,
-        relation=submitted_relation.value if submitted_relation else None,
+        relation=relation.value if relation is not None else None,
         situation=parsed.situation.value if parsed.situation else None,
     )
+
+
+def _scene_landmark_class(detections: CctvDetectionRound, camera_id: str) -> Optional[str]:
+    """Class of the most confident landmark detection, preferring this camera."""
+    landmarks = [item for item in detections.objects if item.class_name in LANDMARK_TYPES]
+    for pool in ([item for item in landmarks if item.camera_id == camera_id], landmarks):
+        if pool:
+            return max(pool, key=lambda item: (item.confidence, item.candidate_id)).class_name
+    return None
 
 
 def _compose_person(
@@ -1046,7 +1059,13 @@ def _compose_object(
         target_xyz, anchor_xyz = projected
         grounding = _grounding_payload(
             parsed, selection.target.camera_id, target_xyz, anchor_xyz,
-            selection=selection,
+            anchor_class=(
+                selection.anchor.class_name
+                if selection.anchor is not None
+                else _scene_landmark_class(
+                    candidates.detections, selection.target.camera_id
+                )
+            ),
         )
         anchor_id = (
             selection.anchor.candidate_id if selection.anchor is not None else None
@@ -1120,6 +1139,7 @@ def _compose_last_resort(
         camera_id,
         xyz,
         xyz,
+        anchor_class=_scene_landmark_class(candidates.detections, camera_id),
     )
     log.info(
         "[stage1] grounding camera=%s target_id=%s method=ignored_class_dummy "

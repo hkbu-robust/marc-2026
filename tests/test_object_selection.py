@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 import numpy as np
 
 from marc_agent.command_parser import Intent, ParsedCommand, parse_command
+from marc_agent.experiment_log import decision_scope
 from marc_agent.perception.object_selection import (
+    ObjectSelection,
     _context_crop,
     build_object_board,
     format_object_verifier_prompt,
+    infer_anchor,
     parse_object_verifier_output,
     rank_object_candidates,
     select_object_candidate,
@@ -1028,11 +1032,28 @@ class ObjectSelectionTests(unittest.TestCase):
             round_,
             command_text="Find the tumbler dropped in the empty parking space.",
         )
-        self.assertEqual("rig_a:tumbler:1", ranked[0].target.candidate_id)
         self.assertIsNotNone(ranked[0].anchor)
         self.assertIn(ranked[0].anchor.class_name, {"police_car", "normal_car_1"})
+        # No vehicle class is preferred: renaming the cars changes nothing.
+        renamed = CctvDetectionRound(
+            objects=[
+                replace(item, class_name={"police_car": "suv", "normal_car_1": "sports_car"}.get(
+                    item.class_name, item.class_name))
+                for item in round_.objects
+            ],
+            people=round_.people,
+            camera_ids=round_.camera_ids,
+        )
+        swapped = rank_object_candidates(
+            parsed, renamed,
+            command_text="Find the tumbler dropped in the empty parking space.",
+        )
+        self.assertEqual(
+            [(item.target.candidate_id, item.anchor.candidate_id) for item in ranked],
+            [(item.target.candidate_id, item.anchor.candidate_id) for item in swapped],
+        )
 
-    def test_parking_keeps_target_rank_but_uses_preferred_police_anchor(self):
+    def test_parking_anchor_is_the_nearest_vehicle_whatever_its_class(self):
         text = "Find the tumbler dropped in the empty parking space."
         parsed = parse_command(text)
         target = (300.0, 200.0, 320.0, 240.0)
@@ -1059,7 +1080,35 @@ class ObjectSelectionTests(unittest.TestCase):
             parsed, round_, command_text=text, projector=Projector()
         )
         self.assertEqual("cam:tumbler:0", ranked[0].target.candidate_id)
-        self.assertEqual("cam:police_car:0", ranked[0].anchor.candidate_id)
+        self.assertEqual("cam:suv:0", ranked[0].anchor.candidate_id)
+        with decision_scope("stage1", 1) as notes:
+            selected = select_object_candidate(
+                parsed, round_, command_text=text, projector=Projector()
+            )
+        self.assertEqual("cam:suv:0", selected.anchor.candidate_id)
+        implied = [note for note in notes if note["decision"] == "implied_anchor"]
+        self.assertEqual("cam:suv:0", implied[0]["chosen"])
+        self.assertAlmostEqual(1.0, implied[0]["dist_m"])
+
+    def test_implied_anchor_replaces_a_farther_ranked_anchor(self):
+        text = "I think I dropped my tumbler on the ground as I got out of my car in the parking lot."
+        parsed = parse_command(text, expected_intent=Intent.FIND)
+        target = ObjectCandidate("cam:tumbler:0", "tumbler", (300.0, 200.0, 320.0, 240.0), 0.9, "cam", (640, 480))
+        far = ObjectCandidate("cam:police_car:0", "police_car", (10.0, 100.0, 200.0, 300.0), 0.9, "cam", (640, 480))
+        near = ObjectCandidate("cam:suv:0", "suv", (330.0, 100.0, 600.0, 300.0), 0.5, "cam", (640, 480))
+        other_camera = ObjectCandidate("cam2:taxi:0", "taxi", (300.0, 200.0, 320.0, 240.0), 0.9, "cam2", (640, 480))
+
+        class Projector:
+            def project_contact(self, camera_id, box, **_kwargs):
+                return {far.bbox_xyxy: (5.0, 0.0, 0.0), near.bbox_xyxy: (0.0, 2.0, 0.0)}.get(
+                    tuple(box), (0.0, 0.0, 0.0)
+                )
+
+        selection = ObjectSelection(target=target, anchor=far, score=1.0)
+        result = infer_anchor(selection, parsed, text, [target, far, near, other_camera], Projector())
+        self.assertEqual("cam:suv:0", result.anchor.candidate_id)
+        named = parse_command("Find the tumbler near the police car.")
+        self.assertIs(selection, infer_anchor(selection, named, "", [near], Projector()))
 
     def test_same_camera_floor_drop_prefers_lower_box(self):
         text = (
@@ -1675,7 +1724,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertIn("visual=IMAGE_1:tile=O01", board.prompt)
         self.assertNotIn("visual=IMAGE_1:tile=O02", board.prompt)
 
-    def test_parking_lot_camera_beats_park_camera_with_taxi(self):
+    def test_a_taxi_counts_like_any_other_vehicle_for_parking(self):
         text = "Find the tumbler dropped in the empty parking space."
         parsed = parse_command(text)
         round_ = CctvDetectionRound(
@@ -1723,15 +1772,28 @@ class ObjectSelectionTests(unittest.TestCase):
             ],
             camera_ids=["cam_park", "cam_lot"],
         )
-        ranked = rank_object_candidates(
-            parsed,
-            round_,
-            command_text=text,
-            occupancy_at=lambda _x, _y: 0,
-            visual_proposals=True,
+        def ranking(round_):
+            ranked = rank_object_candidates(
+                parsed,
+                round_,
+                command_text=text,
+                occupancy_at=lambda _x, _y: 0,
+                visual_proposals=True,
+            )
+            return [(item.target.candidate_id, item.anchor and item.anchor.camera_id)
+                    for item in ranked]
+
+        # Where a vehicle class stands is the scene's business (#113): a taxi
+        # ranks exactly as another car would in its place.
+        as_car = CctvDetectionRound(
+            objects=[
+                replace(item, class_name="normal_car_2") if item.class_name == "taxi" else item
+                for item in round_.objects
+            ],
+            camera_ids=round_.camera_ids,
         )
-        self.assertEqual("cam_lot:tumbler:0", ranked[0].target.candidate_id)
-        self.assertTrue(all(item.target.camera_id == "cam_lot" for item in ranked))
+        self.assertEqual(ranking(as_car), ranking(round_))
+        self.assertIn("cam_park:tumbler:0", [target for target, _ in ranking(round_)])
 
     def test_more_parked_cars_beats_higher_confidence_when_occupancy_ties(self):
         text = "Find the tumbler in the parking lot."
