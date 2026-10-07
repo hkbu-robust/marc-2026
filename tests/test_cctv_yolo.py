@@ -7,14 +7,22 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
 
-from marc_agent.command_parser import PARKED_VEHICLE_LANDMARKS, parse_command
+from marc_agent.command_parser import (
+    LANDMARK_TYPES,
+    MISSION_OBJECT_TYPES,
+    PARKED_VEHICLE_LANDMARKS,
+    parse_command,
+)
 from marc_agent.perception.bundle_paths import STAGE1_CCTV_CONTRACT
 from marc_agent.perception.cctv_yolo import (
+    ZOOM,
+    ZOOM_CONF,
     CctvYoloDetector,
     RuntimeContract,
     _pad_box,
@@ -161,44 +169,58 @@ class CctvYoloTests(unittest.TestCase):
         self.assertTrue(people)
         self.assertTrue(all(item.camera_id == payload["camera"] for item in people))
 
-    def test_tiny_target_refine_runs_on_full_frames_and_keeps_only_target_class(self):
+    def test_small_targets_are_the_mission_objects_from_training_labels(self):
+        small = set(RuntimeContract.load().small_target_classes)
+        self.assertTrue(small)
+        self.assertLessEqual(small, set(MISSION_OBJECT_TYPES))
+        self.assertFalse(small & set(LANDMARK_TYPES))
+
+    def test_zoomed_refine_keeps_new_target_boxes_at_twice_the_contract_size(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
         detector.contract = RuntimeContract.load()
         detector.model = object()
-        detector.names = {8: "pencilcase"}
+        calls = []
 
         def fake_predict(rgb, *, confidence=None, imgsz=None, **_kwargs):
-            self.assertEqual(0.005, confidence)
-            self.assertEqual(1600, imgsz)
-            if rgb.shape[:2] != (720, 1280):
-                return [("pencilcase", 0.4, (20.0, 20.0, 40.0, 40.0))]
+            calls.append((confidence, imgsz))
             return [
-                ("umbrella", 0.02, (5.0, 6.0, 15.0, 18.0)),
-                ("pencilcase", 0.4, (20.0, 20.0, 40.0, 40.0)),
+                ("disposable_cup", 0.9, (1.0, 1.0, 5.0, 5.0)),
+                ("tumbler", 0.7, (330.0, 190.0, 338.0, 198.0)),  # new
+                ("tumbler", 0.8, (900.0, 500.0, 921.0, 521.0)),  # the full-frame one
+                ("tumbler", 0.6, (905.0, 505.0, 909.0, 509.0)),  # centre inside it
             ]
 
         detector._predict_frame = fake_predict
-        frame = CctvFrame(
-            "rig_3_b",
-            1280,
-            720,
-            np.zeros((720, 1280, 3), dtype=np.uint8),
-        )
-        table = detections_to_candidates(
-            "rig_3_b",
-            (1280, 720),
-            [("picnic_table", 0.9, (100.0, 200.0, 400.0, 500.0))],
-        )[0][0]
-        extra = detector.refine_around_landmarks(
-            {"rig_3_b": frame},
-            [table],
-            "umbrella",
-            frozenset({"picnic_table"}),
-        )
-        self.assertEqual(1, len(extra))
-        self.assertEqual("umbrella", extra[0].class_name)
-        self.assertEqual("rig_3_b", extra[0].camera_id)
-        self.assertEqual((5.0, 6.0, 15.0, 18.0), extra[0].bbox_xyxy)
+        frame = CctvFrame("cam", 1280, 720, np.zeros((720, 1280, 3), dtype=np.uint8))
+        found = ObjectCandidate("cam:tumbler:0", "tumbler", (899.0, 499.0, 921.0, 521.0),
+                                0.8, "cam", (1280, 720))
+
+        extra = detector.refine_zoomed({"cam": frame}, [found], "tumbler")
+
+        self.assertEqual([(ZOOM_CONF, ZOOM * detector.contract.imgsz)], calls)
+        self.assertEqual(["cam:tumbler:1"], [item.candidate_id for item in extra])
+        self.assertEqual((330.0, 190.0, 338.0, 198.0), extra[0].bbox_xyxy)
+        self.assertEqual("zoom", extra[0].source)
+
+    def test_zoomed_pass_runs_only_for_small_targets_when_enabled(self):
+        detector = Mock()
+        detector.contract = RuntimeContract.load()
+        detector.refine_zoomed.return_value = []
+        detector.refine_around_landmarks.return_value = []
+        round_ = CctvDetectionRound(camera_ids=["cam"])
+        command = parse_command("Find the tumbler on the bench.")
+        with patch("marc_agent.perception.cctv_yolo._detector", detector):
+            with patch.dict(os.environ, {"MARC_TILED_REFINE": "1"}):
+                refine_detection_round(command, round_)
+            self.assertEqual(1, detector.refine_zoomed.call_count)
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("MARC_TILED_REFINE", None)
+                refine_detection_round(command, round_)  # off by default
+            self.assertEqual(1, detector.refine_zoomed.call_count)
+            detector.contract = replace(detector.contract, small_target_classes=())
+            with patch.dict(os.environ, {"MARC_TILED_REFINE": "1"}):
+                refine_detection_round(command, round_)
+            self.assertEqual(1, detector.refine_zoomed.call_count)
 
     def test_landmark_crop_keeps_similar_mission_class_as_visual_proposal(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
@@ -319,7 +341,11 @@ class CctvYoloTests(unittest.TestCase):
             frames, objects, "pencilcase", frozenset({"picnic_table"})
         )
         self.assertEqual([], extra)
-        self.assertEqual(4, detector._predict_frame.call_count)
+        # One crop per table, at the same settings as every other class (#115).
+        self.assertEqual(2, detector._predict_frame.call_count)
+        for call in detector._predict_frame.call_args_list:
+            self.assertEqual(0.05, call.kwargs["confidence"])
+            self.assertEqual(960, call.kwargs["imgsz"])
 
     def test_unique_missing_tiny_target_uses_landmark_occlusion_proxy(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
@@ -391,6 +417,8 @@ class CctvYoloTests(unittest.TestCase):
             camera_ids=["rig_3", "rig_1"],
         )
         detector = Mock()
+        detector.contract = RuntimeContract.load()
+        detector.refine_zoomed.return_value = []
         detector.refine_around_landmarks.return_value = [missed]
         with patch("marc_agent.perception.cctv_yolo._detector", detector):
             refined = refine_detection_round(parsed, round_)
@@ -400,6 +428,8 @@ class CctvYoloTests(unittest.TestCase):
     def test_parking_refine_uses_parked_vehicles(self):
         parsed = parse_command("Find the umbrella in the empty parking space.")
         detector = Mock()
+        detector.contract = RuntimeContract.load()
+        detector.refine_zoomed.return_value = []
         detector.refine_around_landmarks.return_value = []
 
         with patch("marc_agent.perception.cctv_yolo._detector", detector):

@@ -116,7 +116,9 @@ def _detections(round_: LoggedRound) -> CctvDetectionRound:
         if item["class_name"].startswith("person_"):
             people.append(PersonCandidate(pose_class=item["class_name"], **common))
         else:
-            objects.append(ObjectCandidate(class_name=item["class_name"], **common))
+            objects.append(ObjectCandidate(
+                class_name=item["class_name"], source=item.get("source", "detector"), **common
+            ))
     return CctvDetectionRound(
         objects=objects, people=people, camera_ids=list(round_.pipeline["camera_ids"])
     )
@@ -484,6 +486,12 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+# Flags that act before selection (on the candidate lists). The replay holds the
+# logged candidates fixed, so it cannot show their effect; measure them offline on
+# frames (#115: ablations/final-system/115-tiled-refinement) or in a smoke run.
+DETECTION_FLAGS = frozenset({"MARC_TILED_REFINE"})
+
+
 def unread_flags(env: dict[str, str]) -> list[str]:
     """Keys no runtime module mentions: a typo, or a flag its ticket has not added yet."""
     paths = (REPO / "marc_agent").rglob("*.py")
@@ -516,6 +524,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     env = _env(args.env)
     for key in unread_flags(env):
         print(f"warning: no marc_agent module reads {key}; it has no effect", file=sys.stderr)
+    for key in DETECTION_FLAGS & set(env):
+        print(f"warning: {key} acts on detection; the replay keeps the logged candidates, "
+              "so it has no effect here", file=sys.stderr)
     projector = projector_for(args.geometry)
     runs = [read_run(path) for path in args.runs]
     started = time.perf_counter()

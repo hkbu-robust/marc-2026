@@ -12,6 +12,8 @@ All of them read #85 harness run folders (`run-NN/` with `robust_*.json` and
 | `stage1_decisions.py` | which decision paths the rounds took (#85) |
 | `stage1_replay.py` | what a projection change does to logged rounds, on CPU (#110) |
 | `stage1_regress.py` | whether a fresh run regressed against baseline runs (#110) |
+| `heldout_selection.py` | what the whole runtime round (detector, refinement, Qwen, guards, projection) does on #87 held-out cases (#115, #117) |
+| `small_target_classes.py` | which detector classes count as small (from the training labels; #115) |
 
 `stage1_runs.py` holds what the replay and the gate share: the loader for logged
 rounds and the reverse-engineered scoring kernel.
@@ -67,6 +69,37 @@ rounds and the reverse-engineered scoring kernel.
    summary's largest coordinate change stays below 1 mm and `test_stage1_replay`
    passes. The "on" summary gives the point delta (Stage 1 average, anchor and
    target credit, target-credit flips) and the held-out anchor error.
+
+## Held-out selection
+
+Detection changes (#115) and selection changes (#117) act before projection, so the
+replay cannot show them, and the 33 public rounds are what the old rules were fitted
+on. `heldout_selection.py run` replays each #87 held-out object case through
+`run_stage1_round` inside the agent image, with this checkout's sources mounted and a
+capped vLLM; `summarise` compares two runs (target credit within 1 m x 0.40 + anchor
+credit x 0.15, gold-target rate, paired bootstrap CI; all, detector-miss, other).
+
+```bash
+docker run -d --name harness-qwen --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all \
+    --network host --ipc host -e VLLM_PORT=8014 -e VLLM_GPU_MEMORY_UTILIZATION=0.37 \
+    -e VLLM_API_KEY=marc-qwen-secret -e VLLM_MODEL_NAME=qwen3-vl-8b \
+    -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 marc-qwen-vllm:qualifier-b2360c86
+# then, per arm (an example wrapper: ablations/final-system/115-tiled-refinement/selection/run.sh)
+docker run --rm --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all --network host --entrypoint '' \
+    -e MARC_SAR_DETECTOR=qwen-remote -e MARC_QWEN_BACKEND=remote \
+    -e MARC_QWEN_BASE_URL=http://127.0.0.1:8014/v1 -e MARC_QWEN_API_KEY=marc-qwen-secret \
+    -e MARC_QWEN_MODEL=qwen3-vl-8b -e HOME=/root \
+    -v <worktree>/marc_agent:/agent/marc_agent:ro -v <worktree>/scripts:/agent/scripts:ro \
+    -v <sets>:/root/marc-2026-work/experiments/ablations/05-frozen-eval-sets:ro -v <out>:/out \
+    -w /agent marc-agent:frozen-logging python3 -m scripts.heldout_selection run \
+    --out /out/<arm>.jsonl --env MARC_TILED_REFINE=1
+python -m scripts.heldout_selection summarise --off <off>.jsonl --on <arm>.jsonl --cases odd
+```
+
+Mount a git worktree pinned at the commit under test, not the working clone, so the
+code cannot change under a running arm. Send one warm-up request first: the first
+vLLM request compiles kernels for about a minute. Held-out cases have one camera, so
+camera choice is not measured; report anchor-geometry results on odd scenes (#112).
 
 ## Sharing the GPU
 
