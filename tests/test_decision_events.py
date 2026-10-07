@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import marc_agent.experiment_log as experiment_log
-from marc_agent.command_parser import parse_command
+from marc_agent.command_parser import Relation, parse_command
 from marc_agent.experiment_log import decision_scope, note_decision, start_experiment
 from marc_agent.perception.cctv_project import CctvProjector, static_lookup
 from marc_agent.perception.cctv_yolo import RuntimeContract, refine_detection_round
@@ -427,11 +427,12 @@ class NoProxyTests(unittest.TestCase):
             ],
             camera_ids=["rig_a"],
         )
-        _, notes = _notes(
+        result, notes = _notes(
             run_stage1_round, object(), "Find the pencil case near the picnic table.",
             detector=_fixed(round_), projector=_geometry(),
         )
         self.assertFalse([n for n in notes if n["decision"] == "projection_proxy"])
+        self._assert_own_box(result, round_)
 
     def test_no_occluded_target_swap(self):
         round_ = CctvDetectionRound(
@@ -445,11 +446,23 @@ class NoProxyTests(unittest.TestCase):
             ],
             camera_ids=["rig_a"],
         )
-        _, notes = _notes(
+        result, notes = _notes(
             run_stage1_round, object(), "Find the umbrella near the taxi.",
             detector=_fixed(round_), projector=_geometry(),
         )
         self.assertFalse([n for n in notes if n["decision"] == "projection_proxy"])
+        self._assert_own_box(result, round_)
+
+    def _assert_own_box(self, result, round_):
+        """The submitted target is the selected candidate's own box, projected."""
+        by_id = {item.candidate_id: item for item in round_.objects}
+        target, anchor = by_id[result.target_id], by_id[result.anchor_id]
+        expected, _ = _project_pair(
+            _geometry(), target.camera_id, target.bbox_xyxy, anchor.bbox_xyxy,
+            relation=Relation.NEAR, support_class=anchor.class_name,
+            anchor_image_size=anchor.image_size,
+        )
+        self.assertEqual(list(expected), list(result.grounding.target_coord))
 
 
 class ProjectionTests(unittest.TestCase):
