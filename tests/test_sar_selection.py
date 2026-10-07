@@ -167,7 +167,7 @@ class _BoxProjector:
             for (cam, box), xy in xy_by_box.items()
         }
 
-    def project_contact(self, camera_id, box, pose_class=None):
+    def project_contact(self, camera_id, box, pose_class=None, **_kwargs):
         del pose_class
         return self._xy.get((camera_id, tuple(box)))
 
