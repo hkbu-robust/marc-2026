@@ -203,13 +203,12 @@ def _object_round() -> CctvDetectionRound:
 
 class Stage1RoundTests(unittest.TestCase):
     def test_qwen_warmup_runs_in_the_background_and_logs_its_outcome(self):
-        frames = {"rig_a": object(), "rig_b": object()}
         verifier = Mock()
         with patch.dict(os.environ, {"MARC_SAR_DETECTOR": "qwen-remote"}), patch(
             "marc_agent.perception.stage1_pipeline.RemoteQwenSarVerifier",
             return_value=verifier,
         ), patch("marc_agent.perception.stage1_pipeline.note_decision") as note:
-            thread = start_qwen_warmup(frames, ["rig_a", "rig_b"])
+            thread = start_qwen_warmup()
             thread.join(5.0)
         verifier.warm_up.assert_called_once()
         self.assertEqual("qwen_warmup", note.call_args.args[0])
@@ -223,12 +222,12 @@ class Stage1RoundTests(unittest.TestCase):
             "marc_agent.perception.stage1_pipeline.RemoteQwenSarVerifier",
             return_value=verifier,
         ), patch("marc_agent.perception.stage1_pipeline.note_decision") as note:
-            start_qwen_warmup({"rig_a": object()}, ["rig_a"]).join(5.0)
+            start_qwen_warmup().join(5.0)
         self.assertFalse(note.call_args.kwargs["ok"])
 
     def test_no_qwen_warmup_without_the_remote_backend(self):
         with patch.dict(os.environ, {"MARC_SAR_DETECTOR": "fallback"}):
-            self.assertIsNone(start_qwen_warmup({"rig_a": object()}, ["rig_a"]))
+            self.assertIsNone(start_qwen_warmup())
 
     def test_selected_boxes_drive_target_and_anchor_projection(self):
         def detector(client, *, stub_path=None):

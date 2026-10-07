@@ -963,8 +963,7 @@ class DemoParticipant:
     def run(self):
         if not self.client.connect():
             raise SystemExit("Registration failed -- check the runtime and the token.")
-        frames, camera_ids = fetch_cctv_round(self.client)
-        start_qwen_warmup(frames, camera_ids)
+        fetch_cctv_round(self.client)
         self.client.run()
         if self._final_score_payload is not None:
             self._experiment.finish(
@@ -984,6 +983,7 @@ def main():
     experiment.attach_python_logging()
     try:
         log_qwen_startup_status()
+        start_qwen_warmup()
         DemoParticipant().run()
     except BaseException as exc:
         log.exception("Participant terminated")

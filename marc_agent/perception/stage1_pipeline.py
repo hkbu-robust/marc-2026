@@ -159,22 +159,20 @@ def log_qwen_startup_status() -> None:
         )
 
 
-def start_qwen_warmup(frames: dict, camera_ids: list[str]) -> Optional[threading.Thread]:
-    """Warm the remote vLLM server in the background before round 1 (#111).
+def start_qwen_warmup() -> Optional[threading.Thread]:
+    """Warm the remote vLLM server in the background from agent start (#111).
 
-    Uses the startup frames, runs on its own verifier instance and only logs.
-    Returns the thread, or None when Qwen is not served remotely.
+    Runs on its own verifier instance and only logs. Returns the thread, or
+    None when Qwen is not served remotely.
     """
     mode = (os.environ.get("MARC_SAR_DETECTOR") or "fallback").strip().lower()
-    if mode != "qwen-remote" or not frames:
+    if mode != "qwen-remote":
         return None
 
     def run() -> None:
         started = time.perf_counter()
         try:
-            RemoteQwenSarVerifier().warm_up(
-                CctvDetectionRound(frames=dict(frames), camera_ids=list(camera_ids))
-            )
+            RemoteQwenSarVerifier().warm_up()
         except Exception as exc:
             latency_s = time.perf_counter() - started
             log.warning(
@@ -186,8 +184,8 @@ def start_qwen_warmup(frames: dict, camera_ids: list[str]) -> Optional[threading
             )
             return
         latency_s = time.perf_counter() - started
-        log.info("[qwen-warmup] ok latency=%.1fs cameras=%d", latency_s, len(frames))
-        note_decision("qwen_warmup", ok=True, latency_s=latency_s, cameras=len(frames))
+        log.info("[qwen-warmup] ok latency=%.1fs", latency_s)
+        note_decision("qwen_warmup", ok=True, latency_s=latency_s)
 
     thread = threading.Thread(target=run, name="qwen-warmup", daemon=True)
     thread.start()

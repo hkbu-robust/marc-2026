@@ -327,20 +327,25 @@ class RemoteQwenSarVerifier:
             timeout_s = min(timeout_s, scene_budget_fraction() * remaining)
         return timeout_s
 
-    def warm_up(self, round_: "CctvDetectionRound") -> None:
-        """Send one all-camera scene board and one single-image board; discard replies.
+    def warm_up(self) -> None:
+        """Make vLLM compile its kernels before round 1; the replies are discarded.
 
-        The first requests after vLLM starts take 15-25 s (#111), so a round that
-        meets a cold server falls back to geometry. Use a dedicated instance: the
-        replies and metrics of this call must not mix with a round's.
+        vLLM runs eagerly, so its first real request JIT-compiles Triton kernels
+        (#111: 74 s with a full board, so round 1 fell back to geometry). The
+        kernels depend on the request's configuration, not on what the images
+        show, so synthetic frames suffice: one small image first (compiles
+        cheaply), then a six-camera scene-sized board. Use a dedicated instance,
+        so these calls cannot mix with a round's replies or metrics.
         """
-        prepared = _scene_board(round_, "")
-        if prepared is None:
-            raise QwenRemoteResponseError("no camera frame to warm up with")
-        _, scene = prepared
+        from PIL import Image
+
+        small = _SceneBoard((Image.new("RGB", (320, 180), (128, 128, 128)),),
+                            "Reply with the single word READY.")
+        self._complete(small, max_tokens=8, timeout_s=WARMUP_TIMEOUT_S)
+        frame = Image.new("RGB", (960, 540), (128, 128, 128))
+        scene = _SceneBoard(tuple(frame for _ in range(6)),
+                            "Describe each image in at most five words, one line per image.")
         self._complete(scene, max_tokens=SCENE_MAX_TOKENS, timeout_s=WARMUP_TIMEOUT_S)
-        single = _SceneBoard(scene.images[:1], "Reply with the single word READY.")
-        self._complete(single, max_tokens=8, timeout_s=WARMUP_TIMEOUT_S)
 
     def _with_scene_reference(self, board: "CandidateBoard") -> "CandidateBoard":
         description = self._scene_description

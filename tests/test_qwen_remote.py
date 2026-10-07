@@ -339,7 +339,7 @@ class QwenRemoteTests(unittest.TestCase):
             verifier.set_budget_timeout(4.0)
             self.assertAlmostEqual(1.6, verifier._scene_timeout_s())
 
-    def test_warm_up_sends_a_scene_and_a_single_image_board(self):
+    def test_warm_up_sends_a_small_then_a_six_image_board(self):
         calls = []
 
         def post(_url, body, _headers, timeout):
@@ -349,14 +349,8 @@ class QwenRemoteTests(unittest.TestCase):
             calls.append((timeout, images))
             return json.dumps({"choices": [{"message": {"content": "READY"}}]}).encode()
 
-        frames = {
-            camera: CctvFrame(camera, 32, 24, Image.new("RGB", (32, 24)))
-            for camera in ("rig_a", "rig_b")
-        }
-        RemoteQwenSarVerifier(_config(), post=post).warm_up(
-            CctvDetectionRound(frames=frames, camera_ids=["rig_a", "rig_b"])
-        )
-        self.assertEqual([(90.0, 2), (90.0, 1)], calls)
+        RemoteQwenSarVerifier(_config(), post=post).warm_up()
+        self.assertEqual([(90.0, 1), (90.0, 6)], calls)
 
     def test_timeout_retry_exhausted_raises(self):
         calls = []
