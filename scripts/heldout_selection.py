@@ -102,7 +102,9 @@ def _record(case: dict, result, seconds: float) -> dict:
         "target_box": list(target.bbox_xyxy) if target else None,
         "target_m": float(np.linalg.norm(np.subtract(grounding.target_coord, gold["target_xyz"]))),
         "anchor_m": float(np.linalg.norm(np.subtract(grounding.anchor_coord, gold["anchor_xyz"]))),
-        "gold_target": bool(target and _iou(target.bbox_xyxy, gold["target_gt"]["bbox"]) >= MATCH_IOU),
+        # Public cases have the expected point but no GT box.
+        "gold_target": bool(target and "target_gt" in gold
+                            and _iou(target.bbox_xyxy, gold["target_gt"]["bbox"]) >= MATCH_IOU),
     })
     return row
 
