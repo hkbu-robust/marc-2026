@@ -131,19 +131,27 @@ def contact_pixel(
     return ((float(x1) + float(x2)) / 2.0, float(y1) + frac * height)
 
 
+def support_lift(
+    support_class: Optional[str],
+    relation: Optional[Relation | str],
+) -> float:
+    """Height above the ground for ``on`` / ``above`` a known support, else 0."""
+    rel = relation.value if isinstance(relation, Relation) else relation
+    if rel not in {"on", "above"} or not support_class:
+        return 0.0
+    return SUPPORT_HEIGHT_M.get(support_class, 0.0)
+
+
 def raised_plane_z(
     ground_height: float,
     support_class: Optional[str],
     relation: Optional[Relation | str],
 ) -> float:
     """Ground plane, or ground + class height for ``on`` / ``above`` when known."""
-    rel = relation.value if isinstance(relation, Relation) else relation
-    if rel not in {"on", "above"} or not support_class:
+    lift = support_lift(support_class, relation)
+    if lift == 0.0:
         return float(ground_height)
-    extra = SUPPORT_HEIGHT_M.get(support_class)
-    if extra is None:
-        return float(ground_height)
-    return float(ground_height) + extra
+    return float(ground_height) + lift
 
 
 def _quat_to_rotation(
@@ -234,12 +242,15 @@ def intersect_ray_surface(
     Fixed point: hit the plane at the current height, look the ground up at that
     XY, repeat until the height settles (at most ``SURFACE_ITERATIONS``).
     """
-    z = float(geometry.ground_height) + lift
+    plane_z = float(geometry.ground_height) + lift
+    z = plane_z
     for _ in range(SURFACE_ITERATIONS):
         hit = intersect_ray_plane(geometry, u, v, z)
-        if hit is None:
-            return None
-        z_next = surface.z(hit[0], hit[1]) + lift
+        ground = None if hit is None else surface.z(hit[0], hit[1])
+        if ground is None:
+            # Outside the calibrated area (or behind the camera): the flat plane.
+            return intersect_ray_plane(geometry, u, v, plane_z)
+        z_next = ground + lift
         settled = abs(z_next - z) < SURFACE_TOLERANCE_M
         z = z_next
         if settled:
@@ -364,6 +375,7 @@ def pair_alignment_score(
     anchor_box: tuple[float, float, float, float],
     relation: Optional[Relation | str],
     support_class: Optional[str],
+    anchor_image_size: Optional[tuple[int, int]] = None,
 ) -> Optional[float]:
     """Score one target/landmark pair in world metres. Higher is better.
 
@@ -387,7 +399,9 @@ def pair_alignment_score(
         z_plane = raised_plane_z(geometry.ground_height, support_class, relation)
         footprint = _support_footprint_xy(projector, camera_id, anchor_box, z_plane)
         if footprint is None:
-            anchor_xyz = projector.project_contact(camera_id, anchor_box)
+            anchor_xyz = projector.project_landmark(
+                camera_id, anchor_box, support_class, anchor_image_size
+            )
             if anchor_xyz is None:
                 return None
             dist = _xy_dist(target_xyz, anchor_xyz)
@@ -397,7 +411,7 @@ def pair_alignment_score(
                 target_xyz[0], target_xyz[1], xmin, ymin, xmax, ymax
             )
         return 1.0 / (1.0 + dist)
-    anchor_xyz = projector.project_contact(camera_id, anchor_box)
+    anchor_xyz = projector.project_landmark(camera_id, anchor_box, support_class, anchor_image_size)
     if anchor_xyz is None:
         return None
     if rel in {"left", "right", "front", "behind"} and isinstance(relation, Relation):
@@ -432,7 +446,10 @@ class CctvProjector:
         """Return the process-wide projector for this client (one tf2 listener)."""
         projector = _CLIENT_PROJECTORS.get(client)
         if projector is None:
-            projector = cls(Tf2ClientLookup(client), default_ground_model())
+            ground = default_ground_model()
+            if ground is None:
+                log.warning("[cctv-project] no ground model shipped; flat planes only")
+            projector = cls(Tf2ClientLookup(client), ground)
             try:
                 _CLIENT_PROJECTORS[client] = projector
             except TypeError:
@@ -456,18 +473,21 @@ class CctvProjector:
         return self.ground.for_camera(camera_id, geometry)[0]
 
     def _hit(
-        self, camera_id: str, geometry: CameraGeometry, u: float, v: float, z_plane: float
+        self,
+        camera_id: str,
+        geometry: CameraGeometry,
+        u: float,
+        v: float,
+        z_plane: float,
+        *,
+        ground_contact: bool,
     ) -> Optional[tuple[float, float, float]]:
         """The pixel on the calibrated ground, else on the plane ``z = z_plane``.
 
         Only ground contact uses the surface. A raised plane (on/above a support)
-        stays flat: SUPPORT_HEIGHT_M was set against the flat plane, and no
-        held-out data calibrates it (#112: the generator's "on" objects mostly
-        rest on the ground).
+        stays flat: SUPPORT_HEIGHT_M was set against the flat plane (#112).
         """
-        surface = None if z_plane != geometry.ground_height else self._surface(
-            camera_id, geometry
-        )
+        surface = self._surface(camera_id, geometry) if ground_contact else None
         if surface is None:
             return intersect_ray_plane(geometry, u, v, z_plane)
         return intersect_ray_surface(geometry, u, v, surface)
@@ -484,7 +504,7 @@ class CctvProjector:
         if geometry is None:
             return None
         plane = geometry.ground_height if z_plane is None else z_plane
-        return self._hit(camera_id, geometry, u, v, plane)
+        return self._hit(camera_id, geometry, u, v, plane, ground_contact=z_plane is None)
 
     def project_landmark(
         self,
@@ -513,7 +533,7 @@ class CctvProjector:
         fu, fv, dz = prior
         hit = self._hit(
             camera_id, geometry, x1 + fu * (x2 - x1), y1 + fv * (y2 - y1),
-            geometry.ground_height,
+            geometry.ground_height, ground_contact=True,
         )
         if hit is None:
             return None
@@ -551,6 +571,7 @@ class CctvProjector:
             support_u = (float(support_box[0]) + float(support_box[2])) / 2.0
             u += BENDING_ANCHOR_PULL * (support_u - u)
         z_plane = raised_plane_z(geometry.ground_height, support_class, rel)
+        ground_contact = support_lift(support_class, rel) == 0.0
         if pose_class:
             # People keep the flat plane (#112): in the scored scenario a person's
             # point sits 0.1-0.5 m above the calibrated terrain (public sar03,
@@ -559,7 +580,7 @@ class CctvProjector:
             # re-fitting people is #122.
             xyz = intersect_ray_plane(geometry, u, v, z_plane)
         else:
-            xyz = self._hit(camera_id, geometry, u, v, z_plane)
+            xyz = self._hit(camera_id, geometry, u, v, z_plane, ground_contact=ground_contact)
         if xyz is None:
             return None
         if pose_class == "person_bending" and rel_name not in {"on", "above"}:
