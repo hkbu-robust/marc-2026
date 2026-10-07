@@ -169,15 +169,61 @@ def resolve_sar_anchor(
     command: ParsedCommand,
     person: PersonCandidate,
     round_: CctvDetectionRound,
+    projector=None,
 ) -> Optional[ObjectCandidate]:
-    """Resolve projection anchor after person selection, never before it."""
-    classes = (
-        frozenset({command.landmark})
-        if command.landmark
-        else (LANDMARK_TYPES if command.scene_hint else frozenset())
+    """Resolve projection anchor after person selection, never before it.
+
+    A named landmark: its instance nearest in the image, as before. No named
+    landmark (#121): the landmark in the person's camera nearest the person on
+    the ground, preferring classes the command names as place cues. Image
+    distance is biased by perspective (sar06 anchored to a scooter in front of
+    the expected hydrant).
+    """
+    if command.landmark:
+        anchor, _ = _nearest_anchor(person, round_.objects, frozenset({command.landmark}))
+        return anchor
+    if not command.scene_hint and not command.place_cues:
+        return None
+    cues = frozenset(command.place_cues) & LANDMARK_TYPES
+    for classes in ((cues, LANDMARK_TYPES) if cues else (LANDMARK_TYPES,)):
+        anchor = _nearest_on_ground(person, round_.objects, classes, projector)
+        if anchor is not None:
+            return anchor
+    return None
+
+
+def _nearest_on_ground(
+    person: PersonCandidate,
+    objects: list[ObjectCandidate],
+    classes: frozenset[str],
+    projector,
+) -> Optional[ObjectCandidate]:
+    """The ``classes`` object in the person's camera nearest on the ground.
+
+    Falls back to image distance without a projector or a projectable person.
+    """
+    pool = [item for item in objects
+            if item.camera_id == person.camera_id and item.class_name in classes]
+    if not pool:
+        return None
+    person_xyz = (
+        projector.project_contact(person.camera_id, person.bbox_xyxy,
+                                  pose_class=person.pose_class)
+        if projector is not None else None
     )
-    anchor, _ = _nearest_anchor(person, round_.objects, classes)
-    return anchor
+    if person_xyz is None:
+        return _nearest_anchor(person, pool, classes)[0]
+    scored = []
+    for item in pool:
+        xyz = projector.project_landmark(
+            item.camera_id, item.bbox_xyxy, item.class_name, item.image_size
+        )
+        if xyz is not None:
+            dist = math.hypot(xyz[0] - person_xyz[0], xyz[1] - person_xyz[1])
+            scored.append((dist, -item.confidence, item.candidate_id, item))
+    if not scored:
+        return _nearest_anchor(person, pool, classes)[0]
+    return min(scored)[3]
 
 
 _ON_TOP_CUE = re.compile(
@@ -393,9 +439,11 @@ def _named_pose_classes(
 
 
 def _world_xy(projector, camera_id: str, box, pose_class: Optional[str] = None):
+    """Ground XY on the flat plane: people are modelled there (#112), so the
+    person-to-landmark distances that SAR selection compares stay in one frame."""
     if projector is None:
         return None
-    xyz = projector.project_contact(camera_id, box, pose_class=pose_class)
+    xyz = projector.project_contact(camera_id, box, pose_class=pose_class, calibrated=False)
     if xyz is None:
         return None
     return (float(xyz[0]), float(xyz[1]))

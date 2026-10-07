@@ -6,16 +6,19 @@ import contextlib
 import io
 import json
 import math
+import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from marc_agent.perception.stage1_pipeline import project_anchor
 from scripts.stage1_replay import main, projector_for, replay_cases, replay_run
 from scripts.stage1_runs import read_run, score
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "stage1_replay" / "run-01"
+FROZEN_FLAGS = {"MARC_GROUND_CALIBRATION": "0", "MARC_LANDMARK_FOOTPRINT": "0"}
 
 
 class ReplayTests(unittest.TestCase):
@@ -23,9 +26,11 @@ class ReplayTests(unittest.TestCase):
 
     def setUp(self):
         self.run = read_run(FIXTURE)
-        self.replayed = {
-            item.round.problem_id: item for item in replay_run(self.run, projector_for())
-        }
+        # With every new mechanism's flag off, the replay is the frozen system.
+        with mock.patch.dict(os.environ, FROZEN_FLAGS):
+            self.replayed = {
+                item.round.problem_id: item for item in replay_run(self.run, projector_for())
+            }
 
     def test_logged_rounds_reproduce_to_the_millimetre(self):
         self.assertEqual(set(self.replayed), {"lf06_umbrella_fallenbike", "sar03_bench_lie"})

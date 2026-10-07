@@ -710,13 +710,15 @@ def project_anchor(
     projector: CctvProjector,
     camera_id: str,
     anchor_box: tuple[float, float, float, float],
+    anchor_class: Optional[str] = None,
+    image_size: Optional[tuple[int, int]] = None,
 ) -> Optional[tuple[float, float, float]]:
     """World point submitted for an anchor (landmark) box.
 
     The offline replay (``scripts/stage1_replay.py``) scores held-out anchors
     through this function, so anchor geometry changes belong here.
     """
-    return projector.project_contact(camera_id, anchor_box)
+    return projector.project_landmark(camera_id, anchor_box, anchor_class, image_size)
 
 
 def _project_pair(
@@ -728,6 +730,7 @@ def _project_pair(
     relation: Optional[Relation],
     support_class: Optional[str],
     pose_class: Optional[str] = None,
+    anchor_image_size: Optional[tuple[int, int]] = None,
 ) -> Optional[tuple[tuple[float, float, float], tuple[float, float, float]]]:
     target_xyz = projector.project_contact(
         camera_id,
@@ -741,7 +744,9 @@ def _project_pair(
         return None
     if anchor_box is None:
         return target_xyz, target_xyz
-    anchor_xyz = project_anchor(projector, camera_id, anchor_box)
+    anchor_xyz = project_anchor(
+        projector, camera_id, anchor_box, support_class, anchor_image_size
+    )
     if anchor_xyz is None:
         note_decision("anchor_collapsed", camera_id=camera_id, anchor_box=anchor_box)
         return target_xyz, target_xyz
@@ -834,7 +839,7 @@ def _compose_person(
     )
     anchor = item.anchor if item is not None else None
     if anchor is None:
-        anchor = resolve_sar_anchor(parsed, person, candidates.detections)
+        anchor = resolve_sar_anchor(parsed, person, candidates.detections, projector)
     projected = _project_pair(
         projector,
         person.camera_id,
@@ -845,6 +850,7 @@ def _compose_person(
         ),
         support_class=anchor.class_name if anchor is not None else None,
         pose_class=person.pose_class,
+        anchor_image_size=anchor.image_size if anchor is not None else None,
     )
     if projected is None:
         log.info(
@@ -1006,6 +1012,9 @@ def _project_selection(
         ),
         support_class=(
             selection.anchor.class_name if selection.anchor is not None else None
+        ),
+        anchor_image_size=(
+            selection.anchor.image_size if selection.anchor is not None else None
         ),
     )
 
@@ -1195,8 +1204,16 @@ def compose_stage1_grounding(
         reason = candidates.failure_reason or "command_parse"
         return Stage1RoundResult(candidates, None, None, reason)
     if parsed.target_type == "person":
-        return _compose_person(candidates, projector)
-    return _compose_object(candidates, projector)
+        result = _compose_person(candidates, projector)
+    else:
+        result = _compose_object(candidates, projector)
+    if result.grounding is not None and result.grounding.camera_id:
+        camera_id = result.grounding.camera_id
+        note_decision(
+            "ground_model", camera_id=camera_id,
+            ground=projector.ground_status(camera_id),
+        )
+    return result
 
 
 def run_stage1_round(
