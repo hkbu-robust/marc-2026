@@ -362,10 +362,10 @@ class ProxyTests(unittest.TestCase):
 
     def test_refine_additions_are_recorded(self):
         parsed = parse_command("Find the tumbler on the bench.")
-        # The tile pass runs first, so its candidate takes the first free ID.
+        # The zoomed pass runs first, so its candidate takes the first free ID.
         tiled = ObjectCandidate(
             "rig_1:tumbler:0", "tumbler", (20.0, 20.0, 24.0, 25.0), 0.7,
-            "rig_1", (640, 480), source="tile",
+            "rig_1", (640, 480), source="zoom",
         )
         missed = ObjectCandidate(
             "rig_1:tumbler:1", "tumbler", (200.0, 200.0, 240.0, 250.0), 0.2,
@@ -380,7 +380,7 @@ class ProxyTests(unittest.TestCase):
         )
         detector = Mock()
         detector.contract = RuntimeContract.load()
-        detector.refine_tiled.return_value = [tiled]
+        detector.refine_zoomed.return_value = [tiled]
         detector.refine_around_landmarks.return_value = [missed]
         with patch("marc_agent.perception.cctv_yolo._detector", detector):
             refined, notes = _notes(refine_detection_round, parsed, round_)

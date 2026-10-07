@@ -21,9 +21,8 @@ from marc_agent.command_parser import (
 )
 from marc_agent.perception.bundle_paths import STAGE1_CCTV_CONTRACT
 from marc_agent.perception.cctv_yolo import (
-    TILE_CONF,
-    TILE_FRAC,
-    TILE_GRID,
+    ZOOM,
+    ZOOM_CONF,
     CctvYoloDetector,
     RuntimeContract,
     _pad_box,
@@ -31,7 +30,6 @@ from marc_agent.perception.cctv_yolo import (
     detections_to_candidates,
     person_candidates_to_sar,
     refine_detection_round,
-    tile_windows,
 )
 from marc_agent.perception.pose_to_situation import situation_for_pose
 from marc_agent.types import (
@@ -177,84 +175,48 @@ class CctvYoloTests(unittest.TestCase):
         self.assertLessEqual(small, set(MISSION_OBJECT_TYPES))
         self.assertFalse(small & set(LANDMARK_TYPES))
 
-    def test_tile_windows_are_relative_to_any_frame_size(self):
-        for width, height in ((1280, 720), (3840, 2160), (641, 359)):
-            windows = tile_windows(width, height)
-            self.assertEqual(TILE_GRID * TILE_GRID, len(windows))
-            covered = np.zeros((height, width), dtype=bool)
-            for x1, y1, x2, y2 in windows:
-                self.assertAlmostEqual(TILE_FRAC * width, x2 - x1, delta=1)
-                self.assertAlmostEqual(TILE_FRAC * height, y2 - y1, delta=1)
-                covered[y1:y2, x1:x2] = True
-            self.assertTrue(covered.all())
-
-    def test_tiled_refine_maps_tiles_back_and_keeps_new_target_boxes(self):
+    def test_zoomed_refine_keeps_new_target_boxes_at_twice_the_contract_size(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
         detector.contract = RuntimeContract.load()
         detector.model = object()
         calls = []
 
         def fake_predict(rgb, *, confidence=None, imgsz=None, **_kwargs):
-            calls.append((rgb.shape[:2], confidence, imgsz))
-            # Every tile sees the same tumbler at frame (330, 190)-(338, 198) when it
-            # contains it, a cup, and a tumbler already found by the full-frame pass.
-            index = len(calls) - 1
-            x0, y0, x1, y1 = tile_windows(1280, 720)[index]
-            out = [("disposable_cup", 0.9, (1.0, 1.0, 5.0, 5.0))]
-            for box in ((330.0, 190.0, 338.0, 198.0), (900.0, 500.0, 920.0, 520.0)):
-                if x0 <= box[0] and box[2] <= x1 and y0 <= box[1] and box[3] <= y1:
-                    out.append(("tumbler", 0.7, (box[0] - x0, box[1] - y0, box[2] - x0, box[3] - y0)))
-            return out
+            calls.append((confidence, imgsz))
+            return [
+                ("disposable_cup", 0.9, (1.0, 1.0, 5.0, 5.0)),
+                ("tumbler", 0.7, (330.0, 190.0, 338.0, 198.0)),  # new
+                ("tumbler", 0.8, (900.0, 500.0, 921.0, 521.0)),  # the full-frame one
+                ("tumbler", 0.6, (905.0, 505.0, 909.0, 509.0)),  # centre inside it
+            ]
 
         detector._predict_frame = fake_predict
         frame = CctvFrame("cam", 1280, 720, np.zeros((720, 1280, 3), dtype=np.uint8))
         found = ObjectCandidate("cam:tumbler:0", "tumbler", (899.0, 499.0, 921.0, 521.0),
                                 0.8, "cam", (1280, 720))
 
-        extra = detector.refine_tiled({"cam": frame}, [found], "tumbler")
+        extra = detector.refine_zoomed({"cam": frame}, [found], "tumbler")
 
-        self.assertEqual(TILE_GRID * TILE_GRID, len(calls))
-        self.assertTrue(all(c == TILE_CONF and z == detector.contract.imgsz for _, c, z in calls))
-        self.assertEqual(1, len(extra))
-        self.assertEqual("cam:tumbler:1", extra[0].candidate_id)
+        self.assertEqual([(ZOOM_CONF, ZOOM * detector.contract.imgsz)], calls)
+        self.assertEqual(["cam:tumbler:1"], [item.candidate_id for item in extra])
         self.assertEqual((330.0, 190.0, 338.0, 198.0), extra[0].bbox_xyxy)
-        self.assertEqual("tile", extra[0].source)
-
-    def test_overlapping_tiles_merge_one_object_into_one_candidate(self):
-        detector = CctvYoloDetector.__new__(CctvYoloDetector)
-        detector.contract = RuntimeContract.load()
-        detector.model = object()
-        windows = tile_windows(1280, 720)
-        seen = iter(range(len(windows)))
-
-        def fake_predict(rgb, **_kwargs):
-            x0, y0, x1, y1 = windows[next(seen)]
-            # The same mug, boxed slightly differently by each tile that holds it.
-            box = (600.0 + (x0 % 7), 300.0, 640.0 + (x0 % 5), 340.0)
-            if x0 <= box[0] and box[2] <= x1 and y0 <= box[1] and box[3] <= y1:
-                return [("mug", 0.7 + x0 / 1e4, (box[0] - x0, box[1] - y0, box[2] - x0, box[3] - y0))]
-            return []
-
-        detector._predict_frame = fake_predict
-        frame = CctvFrame("cam", 1280, 720, np.zeros((720, 1280, 3), dtype=np.uint8))
-        extra = detector.refine_tiled({"cam": frame}, [], "mug")
-        self.assertEqual(["cam:mug:0"], [item.candidate_id for item in extra])
+        self.assertEqual("zoom", extra[0].source)
 
     def test_tiled_pass_runs_only_for_small_targets_when_enabled(self):
         detector = Mock()
         detector.contract = RuntimeContract.load()
-        detector.refine_tiled.return_value = []
+        detector.refine_zoomed.return_value = []
         detector.refine_around_landmarks.return_value = []
         round_ = CctvDetectionRound(camera_ids=["cam"])
         with patch("marc_agent.perception.cctv_yolo._detector", detector):
             refine_detection_round(parse_command("Find the tumbler on the bench."), round_)
-            self.assertEqual(1, detector.refine_tiled.call_count)
+            self.assertEqual(1, detector.refine_zoomed.call_count)
             with patch.dict(os.environ, {"MARC_TILED_REFINE": "0"}):
                 refine_detection_round(parse_command("Find the tumbler on the bench."), round_)
-            self.assertEqual(1, detector.refine_tiled.call_count)
+            self.assertEqual(1, detector.refine_zoomed.call_count)
             detector.contract = replace(detector.contract, small_target_classes=())
             refine_detection_round(parse_command("Find the tumbler on the bench."), round_)
-            self.assertEqual(1, detector.refine_tiled.call_count)
+            self.assertEqual(1, detector.refine_zoomed.call_count)
 
     def test_landmark_crop_keeps_similar_mission_class_as_visual_proposal(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
@@ -452,7 +414,7 @@ class CctvYoloTests(unittest.TestCase):
         )
         detector = Mock()
         detector.contract = RuntimeContract.load()
-        detector.refine_tiled.return_value = []
+        detector.refine_zoomed.return_value = []
         detector.refine_around_landmarks.return_value = [missed]
         with patch("marc_agent.perception.cctv_yolo._detector", detector):
             refined = refine_detection_round(parsed, round_)
@@ -463,7 +425,7 @@ class CctvYoloTests(unittest.TestCase):
         parsed = parse_command("Find the umbrella in the empty parking space.")
         detector = Mock()
         detector.contract = RuntimeContract.load()
-        detector.refine_tiled.return_value = []
+        detector.refine_zoomed.return_value = []
         detector.refine_around_landmarks.return_value = []
 
         with patch("marc_agent.perception.cctv_yolo._detector", detector):
