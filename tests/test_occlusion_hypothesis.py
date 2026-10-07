@@ -30,6 +30,9 @@ class Projector:
     def project_landmark(self, _camera, box, *_args, **_kwargs):
         return self.points.get(tuple(box))
 
+    def ground_status(self, _camera):
+        return "test"
+
 
 def _round(*, mug_at, people=(PERSON,), extra=()):
     objects = [ObjectCandidate("cam:picnic_table:0", "picnic_table", TABLE, 0.9, "cam", SIZE)]
@@ -98,6 +101,48 @@ class HypothesisTests(unittest.TestCase):
         projector = Projector({TABLE: (0.0, 0.0, 0.0), PERSON: (0.6, 0.0, 0.0)})
         _, out, _ = self._add("Find the mug near the picnic table.", _round(mug_at=10.0), projector)
         self.assertFalse([o for o in out.objects if occlusion_hypothesis.is_hypothesis(o)])
+
+    def test_choose_rechecks_the_relation_whoever_added_the_hypothesis(self):
+        command = "Find the mug near the picnic table."
+        parsed, out, _ = self._add(command, _round(mug_at=10.0), _projector(10.0))
+        # A satisfying detection appears next to the hypothesis (e.g. a replayed round).
+        near_mug = ObjectCandidate("cam:mug:9", "mug", (500.0, 330.0, 510.0, 340.0), 0.7, "cam", SIZE)
+        projector = Projector({**_projector(10.0).points, near_mug.bbox_xyxy: (1.0, 0.0, 0.0)})
+        out.objects.append(near_mug)
+        self.assertIsNone(occlusion_hypothesis.choose(parsed, out, projector, command))
+        selected = select_object_candidate(parsed, out, command_text=command, projector=projector)
+        self.assertNotEqual("occlusion_hypothesis", selected.method)
+
+    def test_an_unprojectable_landmark_might_be_satisfied_so_nothing_fires(self):
+        projector = Projector({PERSON: (0.6, 0.0, 0.0), FAR_MUG: (10.0, 0.0, 0.0)})
+        _, out, _ = self._add("Find the mug near the picnic table.", _round(mug_at=10.0), projector)
+        self.assertFalse([o for o in out.objects if occlusion_hypothesis.is_hypothesis(o)])
+
+    def test_one_hypothesis_per_occluder_with_an_unused_id(self):
+        second = ObjectCandidate("cam:picnic_table:1", "picnic_table", (420.0, 310.0, 580.0, 400.0),
+                                 0.8, "cam", SIZE)
+        gap = ObjectCandidate("cam:mug:4", "mug", (100.0, 600.0, 110.0, 610.0), 0.8, "cam", SIZE)
+        projector = Projector({TABLE: (0.0, 0.0, 0.0), second.bbox_xyxy: (0.2, 0.0, 0.0),
+                               PERSON: (0.6, 0.0, 0.0), FAR_MUG: (10.0, 0.0, 0.0)})
+        _, out, _ = self._add("Find the mug near the picnic table.",
+                              _round(mug_at=None, extra=[second, gap]), projector)
+        hypotheses = [o for o in out.objects if occlusion_hypothesis.is_hypothesis(o)]
+        self.assertEqual(["cam:mug:5"], [h.candidate_id for h in hypotheses])
+
+    def test_a_round_submits_the_hypothesis_with_its_landmark(self):
+        from marc_agent.perception.stage1_pipeline import run_stage1_round
+
+        round_ = _round(mug_at=10.0)
+        with decision_scope("stage1", 1) as notes:
+            result = run_stage1_round(None, "Find the mug near the picnic table.",
+                                      detector=lambda *a, **k: round_, projector=_projector(10.0))
+        self.assertEqual("cam:mug:1", result.target_id)
+        self.assertEqual("cam:picnic_table:0", result.anchor_id)
+        self.assertEqual("picnic_table", result.grounding.landmark)
+        self.assertTrue([n for n in notes if n["decision"] == "selector"
+                         and n.get("outcome") == "occlusion_hypothesis"])
+        record = result.record()
+        self.assertIn("cam:mug:1", [c["candidate_id"] for c in record["candidates"]])
 
     def test_flag_off(self):
         with mock.patch.dict(os.environ, {"MARC_OCCLUSION_HYPOTHESIS": "0"}):

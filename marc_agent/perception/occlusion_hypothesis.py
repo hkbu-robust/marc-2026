@@ -83,6 +83,8 @@ def relation_satisfied(
     for landmark in landmarks:
         landmark_xy = _xy(projector.project_landmark(
             landmark.camera_id, landmark.bbox_xyxy, landmark.class_name, landmark.image_size))
+        if landmark_xy is None:
+            return True  # cannot be ruled out, like a target that cannot be projected
         for target in round_.objects:
             if target.class_name != parsed.target_type or is_hypothesis(target):
                 continue
@@ -112,16 +114,13 @@ def add_hypotheses(
     landmark_xy = {item.candidate_id: _xy(projector.project_landmark(
         item.camera_id, item.bbox_xyxy, item.class_name, item.image_size)) for item in landmarks}
     added: list[ObjectCandidate] = []
-    counts = {}
-    for item in round_.objects:
-        if item.class_name == parsed.target_type:
-            counts[item.camera_id] = counts.get(item.camera_id, 0) + 1
+    used: set[str] = set()
     for landmark in sorted(landmarks, key=lambda item: (-item.confidence, item.candidate_id)):
         occluder, dist_m = _occluder(landmark, landmark_xy[landmark.candidate_id], round_, projector)
-        if occluder is None:
-            continue
-        index = counts.get(landmark.camera_id, 0)
-        counts[landmark.camera_id] = index + 1
+        if occluder is None or occluder.candidate_id in used:
+            continue  # one hypothesis per occluder
+        used.add(occluder.candidate_id)
+        index = _next_index(round_.objects + added, landmark.camera_id, parsed.target_type)
         hypothesis = ObjectCandidate(
             candidate_id=object_candidate_id(landmark.camera_id, parsed.target_type, index),
             class_name=parsed.target_type,
@@ -145,9 +144,15 @@ def add_hypotheses(
 
 
 def choose(parsed: ParsedCommand, round_: CctvDetectionRound, projector, command_text: str = ""):
-    """The hypothesis to submit and its landmark: the most confident landmark with one."""
+    """The hypothesis to submit and its landmark: the most confident landmark with one.
+
+    Re-checks the relation here, so no hypothesis is chosen while any detection
+    satisfies it, whoever put the hypothesis into the round."""
     hypotheses = [item for item in round_.objects if is_hypothesis(item)]
     if not hypotheses or projector is None:
+        return None
+    detections = replace(round_, objects=[o for o in round_.objects if not is_hypothesis(o)])
+    if relation_satisfied(parsed, detections, projector, command_text) is not False:
         return None
     classes = implicit_anchor_classes(parsed, command_text)
     landmarks = sorted((item for item in round_.objects if item.class_name in classes),
@@ -200,6 +205,14 @@ def _stacked_on(box, support, support_class: str) -> bool:
     if support_class in SEATING_LANDMARKS:
         return True
     return (support[3] - box[3]) >= STACK_FEET_ABOVE_BASE * (support[3] - support[1])
+
+
+def _next_index(objects, camera_id: str, class_name: str) -> int:
+    """One past the highest index of ``camera:class:N`` IDs, so IDs never collide."""
+    prefix = f"{camera_id}:{class_name}:"
+    taken = [int(item.candidate_id[len(prefix):]) for item in objects
+             if item.candidate_id.startswith(prefix) and item.candidate_id[len(prefix):].isdigit()]
+    return max(taken, default=-1) + 1
 
 
 def _overlaps(a, b) -> bool:

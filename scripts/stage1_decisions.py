@@ -69,6 +69,8 @@ class Round:
             return "geometry only (no Qwen)"
         if self.selector_outcome == "qwen_choice":
             return "Qwen choice accepted"
+        if self.selector_outcome == "occlusion_hypothesis":
+            return "occlusion hypothesis (#117)"
         return "unknown"
 
 
@@ -191,6 +193,7 @@ def run_totals(run: Run) -> dict:
         "qwen_fallback": sum(item.selector_outcome == "fallback" for item in rounds),
         "geometry_only": sum(item.selector_outcome == "geometry_only" for item in rounds),
         "geometry_override": sum(item.selector_outcome == "geometry_override" for item in rounds),
+        "occlusion_hypothesis": sum(item.selector_outcome == "occlusion_hypothesis" for item in rounds),
         "qwen_skipped_time": sum(item.qwen_skipped == "time_budget" for item in rounds),
         "landmark_proxy": sum(item.landmark_proxy for item in rounds),
         "projection_proxy": sum(item.projection_proxy is not None for item in rounds),

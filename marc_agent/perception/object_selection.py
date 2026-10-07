@@ -1194,6 +1194,8 @@ def select_object_candidate(
         hypothesis, landmark = picked
         log.info("[object-selection] occlusion hypothesis=%s landmark=%s",
                  hypothesis.candidate_id, landmark.candidate_id)
+        note_decision("selector", path="object", outcome="occlusion_hypothesis",
+                      reason="no_detection_satisfies_relation")
         return ObjectSelection(hypothesis, landmark, 0.0, method="occlusion_hypothesis",
                                match="hypothesis")
     selection = _select_object_candidate(

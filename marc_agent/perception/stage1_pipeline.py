@@ -494,7 +494,6 @@ def run_stage1_candidate_pipeline(
         )
 
     detections = refine_detection_round(parsed, detections)
-    detections = add_hypotheses(parsed, detections, projector, command_text)
     selection_started = time.perf_counter()
     selected_verifier = _select_verifier(verifier, clock, client)
     prepare_scene = getattr(selected_verifier, "prepare_scene", None)
@@ -513,6 +512,8 @@ def run_stage1_candidate_pipeline(
                 exc,
             )
             note_decision("scene_description_failed", error=type(exc).__name__)
+    # After the scene description, so Qwen never sees a hypothesis (#117).
+    detections = add_hypotheses(parsed, detections, projector, command_text)
     selection = None
     object_selection = None
     failure_reason = None
