@@ -3,14 +3,16 @@
 #   docker compose -f docker-compose.yml -f docker-compose.frozen.yml \
 #     -f scripts/frozen-logging.compose.yml up
 # Experiment runs can share one GPU (scripts/README.md, "Sharing the GPU"):
-# MARC_VLLM_PORT moves vLLM off 8004, MARC_VLLM_MEMORY_MIBS sizes it as if the
-# card had that much memory (49152 = the 48 GB judging card, ~36 GB reserved).
+# MARC_VLLM_PORT moves vLLM off 8004; MARC_VLLM_GPU_FRACTION is the share of the
+# physical card vLLM reserves (0.37 of 96 GB = ~36 GB, what it gets on the 48 GB
+# judging card). VLLM_GPU_MEMORY_MIBS does not cap memory: the entrypoint only
+# uses it to choose a fraction, which vLLM then applies to the physical card.
 services:
   qwen:
     image: ${MARC_QWEN_IMAGE:-marc-qwen-vllm:qualifier-b2360c86}
     environment:
       VLLM_PORT: "${MARC_VLLM_PORT:-8004}"
-      VLLM_GPU_MEMORY_MIBS: "${MARC_VLLM_MEMORY_MIBS:-}"
+      VLLM_GPU_MEMORY_UTILIZATION: "${MARC_VLLM_GPU_FRACTION:-}"
     healthcheck:
       test:
         - CMD
