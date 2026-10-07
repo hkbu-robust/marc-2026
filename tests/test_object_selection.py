@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 
@@ -25,6 +27,9 @@ from marc_agent.types import (
     ObjectCandidate,
     PersonCandidate,
 )
+from scripts.stage1_replay import projector_for
+
+HF08_RUN02 = Path(__file__).resolve().parent / "fixtures" / "hf08_scene_evidence_run02.json"
 
 
 def _object(
@@ -1113,6 +1118,49 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("cam:suv:0", result.anchor.candidate_id)
         named = parse_command("Find the tumbler near the police car.")
         self.assertIs(selection, infer_anchor(selection, named, "", [near], Projector()))
+
+    def _hf08_run02(self):
+        case = json.loads(HF08_RUN02.read_text())
+        objects, people = [], []
+        for item in case["candidates"]:
+            box = tuple(item["bbox_xyxy"])
+            if item["class_name"].startswith("person_"):
+                people.append(PersonCandidate(item["candidate_id"], box, item["class_name"],
+                                              item["confidence"], item["camera_id"], (1280, 720)))
+            else:
+                objects.append(ObjectCandidate(item["candidate_id"], item["class_name"], box,
+                                               item["confidence"], item["camera_id"], (1280, 720)))
+        frames = {
+            camera: CctvFrame(camera, 1280, 720, np.zeros((720, 1280, 3), dtype=np.uint8))
+            for camera in case["camera_ids"]
+        }
+        round_ = CctvDetectionRound(objects=objects, people=people, frames=frames,
+                                    camera_ids=case["camera_ids"])
+        return case, round_
+
+    def test_scene_evidence_guard_keeps_geometry_in_the_parking_camera_hf08(self):
+        """#88 run-02 hf08: Qwen chose an umbrella in rig_2_b, which shows no parking lot."""
+        case, round_ = self._hf08_run02()
+        parsed = parse_command(case["command"], expected_intent=Intent.FIND)
+        with decision_scope("stage1", 19) as notes:
+            selected = select_object_candidate(
+                parsed, round_, command_text=case["command"],
+                verifier=lambda _board: case["qwen_target"], projector=projector_for(),
+            )
+        self.assertEqual("rig_7_a:umbrella:0", selected.target.candidate_id)
+        override = [note for note in notes if note["decision"] == "geometry_override"]
+        self.assertEqual("scene_evidence_guard", override[0]["reason"])
+
+    def test_scene_evidence_guard_does_not_fire_within_one_camera(self):
+        case, round_ = self._hf08_run02()
+        parsed = parse_command(case["command"], expected_intent=Intent.FIND)
+        with decision_scope("stage1", 19) as notes:
+            selected = select_object_candidate(
+                parsed, round_, command_text=case["command"],
+                verifier=lambda _board: "rig_7_a:umbrella:0", projector=projector_for(),
+            )
+        self.assertEqual("rig_7_a:umbrella:0", selected.target.candidate_id)
+        self.assertFalse([note for note in notes if note.get("reason") == "scene_evidence_guard"])
 
     def test_same_camera_floor_drop_prefers_lower_box(self):
         text = (

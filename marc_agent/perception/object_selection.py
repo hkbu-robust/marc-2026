@@ -23,7 +23,7 @@ from marc_agent.command_parser import (
     Relation,
     implicit_anchor_classes,
 )
-from marc_agent.perception.camera_gate import apply_camera_gate
+from marc_agent.perception.camera_gate import apply_camera_gate, scene_classes
 from marc_agent.perception.cctv_project import pair_alignment_score
 from marc_agent.perception.lost_item_priors import (
     distinct_target_count,
@@ -1101,6 +1101,16 @@ def _resolve_target_only(
     )
 
 
+def _scene_evidence(
+    objects: Iterable[ObjectCandidate], camera_id: str, names: frozenset[str]
+) -> int:
+    """How many kinds of the scene's objects one camera shows."""
+    return len({
+        item.class_name for item in objects
+        if item.camera_id == camera_id and item.class_name in names
+    })
+
+
 def infer_anchor(
     selection: ObjectSelection,
     parsed: ParsedCommand,
@@ -1395,6 +1405,24 @@ def _select_object_candidate(
                 "[vlm] weak-override geometry guard selected=%s",
                 selected.target.candidate_id,
             )
+        if (
+            guard is None
+            and parsed.scene_hint
+            and selected.target.camera_id != geometry.target.camera_id
+        ):
+            # The object-path twin of the SAR camera-evidence guard (#119, found on
+            # hf08): keep geometry when Qwen's camera shows fewer kinds of the
+            # requested scene's objects (e.g. vehicles for a parking lot).
+            names = scene_classes(parsed.scene_hint)
+            qwen_evidence = _scene_evidence(round_.objects, selected.target.camera_id, names)
+            geometry_evidence = _scene_evidence(round_.objects, geometry.target.camera_id, names)
+            if qwen_evidence < geometry_evidence:
+                guard = "scene_evidence_guard"
+                selected = geometry
+                log.info(
+                    "[vlm] scene-evidence geometry guard selected=%s qwen=%d geometry=%d",
+                    selected.target.candidate_id, qwen_evidence, geometry_evidence,
+                )
         target_id, anchor_id = _pair_key(selected)
         if guard is not None:
             note_decision(
