@@ -38,6 +38,7 @@ from marc_agent.perception.object_selection import (
     rank_object_candidates,
     select_object_candidate,
 )
+from marc_agent.perception.occlusion_hypothesis import add_hypotheses
 from marc_agent.perception.sar_selection import (
     QwenSarVerifier,
     SarSelectionResult,
@@ -511,6 +512,8 @@ def run_stage1_candidate_pipeline(
                 exc,
             )
             note_decision("scene_description_failed", error=type(exc).__name__)
+    # After the scene description, so Qwen never sees a hypothesis (#117).
+    detections = add_hypotheses(parsed, detections, projector, command_text)
     selection = None
     object_selection = None
     failure_reason = None
