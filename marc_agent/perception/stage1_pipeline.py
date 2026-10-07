@@ -267,6 +267,7 @@ class Stage1CandidateResult:
                     "camera_id": item.camera_id,
                     "confidence": item.confidence,
                     "bbox_xyxy": item.bbox_xyxy,
+                    "source": getattr(item, "source", "detector"),
                 }
                 for item in (*self.detections.objects, *self.detections.people)
             ],

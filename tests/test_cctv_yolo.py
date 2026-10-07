@@ -7,14 +7,23 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
 
-from marc_agent.command_parser import PARKED_VEHICLE_LANDMARKS, parse_command
+from marc_agent.command_parser import (
+    LANDMARK_TYPES,
+    MISSION_OBJECT_TYPES,
+    PARKED_VEHICLE_LANDMARKS,
+    parse_command,
+)
 from marc_agent.perception.bundle_paths import STAGE1_CCTV_CONTRACT
 from marc_agent.perception.cctv_yolo import (
+    TILE_CONF,
+    TILE_FRAC,
+    TILE_GRID,
     CctvYoloDetector,
     RuntimeContract,
     _pad_box,
@@ -22,6 +31,7 @@ from marc_agent.perception.cctv_yolo import (
     detections_to_candidates,
     person_candidates_to_sar,
     refine_detection_round,
+    tile_windows,
 )
 from marc_agent.perception.pose_to_situation import situation_for_pose
 from marc_agent.types import (
@@ -161,44 +171,70 @@ class CctvYoloTests(unittest.TestCase):
         self.assertTrue(people)
         self.assertTrue(all(item.camera_id == payload["camera"] for item in people))
 
-    def test_tiny_target_refine_runs_on_full_frames_and_keeps_only_target_class(self):
+    def test_small_targets_are_the_mission_objects_from_training_labels(self):
+        small = set(RuntimeContract.load().small_target_classes)
+        self.assertEqual(10, len(small))
+        self.assertLessEqual(small, set(MISSION_OBJECT_TYPES))
+        self.assertFalse(small & set(LANDMARK_TYPES))
+
+    def test_tile_windows_are_relative_to_any_frame_size(self):
+        for width, height in ((1280, 720), (3840, 2160), (641, 359)):
+            windows = tile_windows(width, height)
+            self.assertEqual(TILE_GRID * TILE_GRID, len(windows))
+            covered = np.zeros((height, width), dtype=bool)
+            for x1, y1, x2, y2 in windows:
+                self.assertAlmostEqual(TILE_FRAC * width, x2 - x1, delta=1)
+                self.assertAlmostEqual(TILE_FRAC * height, y2 - y1, delta=1)
+                covered[y1:y2, x1:x2] = True
+            self.assertTrue(covered.all())
+
+    def test_tiled_refine_maps_tiles_back_and_keeps_new_target_boxes(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
         detector.contract = RuntimeContract.load()
         detector.model = object()
-        detector.names = {8: "pencilcase"}
+        calls = []
 
         def fake_predict(rgb, *, confidence=None, imgsz=None, **_kwargs):
-            self.assertEqual(0.005, confidence)
-            self.assertEqual(1600, imgsz)
-            if rgb.shape[:2] != (720, 1280):
-                return [("pencilcase", 0.4, (20.0, 20.0, 40.0, 40.0))]
-            return [
-                ("umbrella", 0.02, (5.0, 6.0, 15.0, 18.0)),
-                ("pencilcase", 0.4, (20.0, 20.0, 40.0, 40.0)),
-            ]
+            calls.append((rgb.shape[:2], confidence, imgsz))
+            # Every tile sees the same tumbler at frame (330, 190)-(338, 198) when it
+            # contains it, a cup, and a tumbler already found by the full-frame pass.
+            index = len(calls) - 1
+            x0, y0, x1, y1 = tile_windows(1280, 720)[index]
+            out = [("disposable_cup", 0.9, (1.0, 1.0, 5.0, 5.0))]
+            for box in ((330.0, 190.0, 338.0, 198.0), (900.0, 500.0, 920.0, 520.0)):
+                if x0 <= box[0] and box[2] <= x1 and y0 <= box[1] and box[3] <= y1:
+                    out.append(("tumbler", 0.7, (box[0] - x0, box[1] - y0, box[2] - x0, box[3] - y0)))
+            return out
 
         detector._predict_frame = fake_predict
-        frame = CctvFrame(
-            "rig_3_b",
-            1280,
-            720,
-            np.zeros((720, 1280, 3), dtype=np.uint8),
-        )
-        table = detections_to_candidates(
-            "rig_3_b",
-            (1280, 720),
-            [("picnic_table", 0.9, (100.0, 200.0, 400.0, 500.0))],
-        )[0][0]
-        extra = detector.refine_around_landmarks(
-            {"rig_3_b": frame},
-            [table],
-            "umbrella",
-            frozenset({"picnic_table"}),
-        )
+        frame = CctvFrame("cam", 1280, 720, np.zeros((720, 1280, 3), dtype=np.uint8))
+        found = ObjectCandidate("cam:tumbler:0", "tumbler", (899.0, 499.0, 921.0, 521.0),
+                                0.8, "cam", (1280, 720))
+
+        extra = detector.refine_tiled({"cam": frame}, [found], "tumbler")
+
+        self.assertEqual(TILE_GRID * TILE_GRID, len(calls))
+        self.assertTrue(all(c == TILE_CONF and z == detector.contract.imgsz for _, c, z in calls))
         self.assertEqual(1, len(extra))
-        self.assertEqual("umbrella", extra[0].class_name)
-        self.assertEqual("rig_3_b", extra[0].camera_id)
-        self.assertEqual((5.0, 6.0, 15.0, 18.0), extra[0].bbox_xyxy)
+        self.assertEqual("cam:tumbler:1", extra[0].candidate_id)
+        self.assertEqual((330.0, 190.0, 338.0, 198.0), extra[0].bbox_xyxy)
+        self.assertEqual("tile", extra[0].source)
+
+    def test_tiled_pass_runs_only_for_small_targets_when_enabled(self):
+        detector = Mock()
+        detector.contract = RuntimeContract.load()
+        detector.refine_tiled.return_value = []
+        detector.refine_around_landmarks.return_value = []
+        round_ = CctvDetectionRound(camera_ids=["cam"])
+        with patch("marc_agent.perception.cctv_yolo._detector", detector):
+            refine_detection_round(parse_command("Find the tumbler on the bench."), round_)
+            self.assertEqual(1, detector.refine_tiled.call_count)
+            with patch.dict(os.environ, {"MARC_TILED_REFINE": "0"}):
+                refine_detection_round(parse_command("Find the tumbler on the bench."), round_)
+            self.assertEqual(1, detector.refine_tiled.call_count)
+            detector.contract = replace(detector.contract, small_target_classes=())
+            refine_detection_round(parse_command("Find the tumbler on the bench."), round_)
+            self.assertEqual(1, detector.refine_tiled.call_count)
 
     def test_landmark_crop_keeps_similar_mission_class_as_visual_proposal(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
@@ -319,7 +355,11 @@ class CctvYoloTests(unittest.TestCase):
             frames, objects, "pencilcase", frozenset({"picnic_table"})
         )
         self.assertEqual([], extra)
-        self.assertEqual(4, detector._predict_frame.call_count)
+        # One crop per table, at the same settings as every other class (#115).
+        self.assertEqual(2, detector._predict_frame.call_count)
+        for call in detector._predict_frame.call_args_list:
+            self.assertEqual(0.05, call.kwargs["confidence"])
+            self.assertEqual(960, call.kwargs["imgsz"])
 
     def test_unique_missing_tiny_target_uses_landmark_occlusion_proxy(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
@@ -391,6 +431,8 @@ class CctvYoloTests(unittest.TestCase):
             camera_ids=["rig_3", "rig_1"],
         )
         detector = Mock()
+        detector.contract = RuntimeContract.load()
+        detector.refine_tiled.return_value = []
         detector.refine_around_landmarks.return_value = [missed]
         with patch("marc_agent.perception.cctv_yolo._detector", detector):
             refined = refine_detection_round(parsed, round_)
@@ -400,6 +442,8 @@ class CctvYoloTests(unittest.TestCase):
     def test_parking_refine_uses_parked_vehicles(self):
         parsed = parse_command("Find the umbrella in the empty parking space.")
         detector = Mock()
+        detector.contract = RuntimeContract.load()
+        detector.refine_tiled.return_value = []
         detector.refine_around_landmarks.return_value = []
 
         with patch("marc_agent.perception.cctv_yolo._detector", detector):

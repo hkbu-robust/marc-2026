@@ -17,7 +17,7 @@ import marc_agent.experiment_log as experiment_log
 from marc_agent.command_parser import parse_command
 from marc_agent.experiment_log import decision_scope, note_decision, start_experiment
 from marc_agent.perception.cctv_project import CctvProjector, static_lookup
-from marc_agent.perception.cctv_yolo import refine_detection_round
+from marc_agent.perception.cctv_yolo import RuntimeContract, refine_detection_round
 from marc_agent.perception.object_selection import (
     ObjectSelection,
     select_object_candidate,
@@ -366,6 +366,10 @@ class ProxyTests(unittest.TestCase):
             "rig_1:tumbler:0", "tumbler", (200.0, 200.0, 240.0, 250.0), 0.2,
             "rig_1", (640, 480),
         )
+        tiled = ObjectCandidate(
+            "rig_1:tumbler:1", "tumbler", (20.0, 20.0, 24.0, 25.0), 0.7,
+            "rig_1", (640, 480), source="tile",
+        )
         round_ = CctvDetectionRound(
             objects=[
                 ObjectCandidate("rig_1:bench:0", "bench", (180.0, 180.0, 400.0, 360.0),
@@ -374,11 +378,19 @@ class ProxyTests(unittest.TestCase):
             camera_ids=["rig_1"],
         )
         detector = Mock()
+        detector.contract = RuntimeContract.load()
+        detector.refine_tiled.return_value = [tiled]
         detector.refine_around_landmarks.return_value = [missed]
         with patch("marc_agent.perception.cctv_yolo._detector", detector):
-            _, notes = _notes(refine_detection_round, parsed, round_)
+            refined, notes = _notes(refine_detection_round, parsed, round_)
         note = _only(notes, "refine_added", path="object")
         self.assertEqual(["rig_1:tumbler:0"], note["candidates"])
+        note = _only(notes, "tiled_refine", target="tumbler")
+        self.assertEqual(1, note["added"])
+        self.assertEqual(["rig_1:tumbler:1"], note["candidates"])
+        self.assertEqual(["rig_1"], note["cameras"])
+        self.assertIn("ms", note)
+        self.assertEqual([tiled, missed], refined.objects[1:])
 
     def test_hidden_umbrella_proxy_is_recorded(self):
         target = ObjectCandidate(

@@ -60,6 +60,7 @@ def _candidate_row(item) -> dict:
     pose = getattr(item, "pose_class", None)
     if pose is not None:
         row["pose_class"] = pose
+    row["source"] = getattr(item, "source", "detector")
     return row
 
 

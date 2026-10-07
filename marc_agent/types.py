@@ -15,6 +15,7 @@ class ObjectCandidate:
     confidence: float
     camera_id: str
     image_size: tuple[int, int]
+    source: str = "detector"  # or "tile", "landmark_crop", "landmark_context"
 
 
 @dataclass(frozen=True)

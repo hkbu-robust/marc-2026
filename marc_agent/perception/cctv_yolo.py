@@ -44,8 +44,17 @@ CROP_PAD_FRAC = 0.15
 OBJECT_CROP_PAD_FRAC = 1.0
 REFINE_DEDUP_IOU = 0.45
 REFINE_IMGSZ = 320
-OBJECT_REFINE_IMGSZ = 1600
+OBJECT_CROP_IMGSZ = 960
 REFINE_CROP_CAP = 8
+
+# Tiled refinement for small target classes (#115), after SAHI (Akyon et al.,
+# 2022): overlapping slices, each upscaled to the contract's imgsz, merged with
+# class-wise NMS. Sizes are fractions of the frame, so any resolution works.
+SMALL_TARGETS_PATH = Path(__file__).resolve().parent / "data" / "small_targets.json"
+TILE_GRID = 3  # tiles per axis
+TILE_FRAC = 0.5  # tile side / frame side; neighbouring tiles overlap by half a tile
+TILE_CONF = 0.6  # max F1 of added target boxes on #87 held-out even scenes (#115)
+TILE_NMS_IOU = 0.5
 
 
 def _pad_box(
@@ -143,6 +152,7 @@ class RuntimeContract:
     use_fp16: bool
     ordered_classes: tuple[str, ...]
     ignored_classes: tuple[str, ...]
+    small_target_classes: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, contract_path: Path = STAGE1_CCTV_CONTRACT) -> "RuntimeContract":
@@ -164,7 +174,57 @@ class RuntimeContract:
             use_fp16=str(inference.get("quantize", "")).lower() == "fp16",
             ordered_classes=tuple(payload.get("ordered_classes") or ()),
             ignored_classes=tuple(payload.get("ignored_classes") or ()),
+            small_target_classes=_small_target_classes(),
         )
+
+
+def _small_target_classes() -> tuple[str, ...]:
+    """Classes whose median training box is small (scripts/small_target_classes.py)."""
+    if not SMALL_TARGETS_PATH.is_file():
+        log.warning("[cctv-yolo] %s missing; tiled refinement disabled", SMALL_TARGETS_PATH)
+        return ()
+    payload = json.loads(SMALL_TARGETS_PATH.read_text(encoding="utf-8"))
+    return tuple(payload["classes"])
+
+
+def tiled_refine_enabled() -> bool:
+    return os.environ.get("MARC_TILED_REFINE", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def tile_windows(width: int, height: int) -> list[tuple[int, int, int, int]]:
+    """TILE_GRID x TILE_GRID overlapping windows, each TILE_FRAC of the frame per side."""
+    tile_w = max(1, round(width * TILE_FRAC))
+    tile_h = max(1, round(height * TILE_FRAC))
+    xs = np.linspace(0, width - tile_w, TILE_GRID).round().astype(int)
+    ys = np.linspace(0, height - tile_h, TILE_GRID).round().astype(int)
+    return [(int(x), int(y), int(x) + tile_w, int(y) + tile_h) for y in ys for x in xs]
+
+
+def _nms(
+    boxes: list[tuple[float, float, float, float]], scores: list[float], iou: float
+) -> list[int]:
+    """Indices kept by NMS, highest score first."""
+    if not boxes:
+        return []
+    import torch
+    from torchvision.ops import nms
+
+    keep = nms(
+        torch.tensor(boxes, dtype=torch.float32),
+        torch.tensor(scores, dtype=torch.float32),
+        iou,
+    )
+    return [int(i) for i in keep]
+
+
+def _same_object(box, existing: list[tuple[float, float, float, float]]) -> bool:
+    """A tile box repeats an existing same-class box: overlap, or centre inside it."""
+    cx, cy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+    return any(
+        _box_iou(box, other) >= REFINE_DEDUP_IOU
+        or (other[0] <= cx <= other[2] and other[1] <= cy <= other[3])
+        for other in existing
+    )
 
 
 def detections_to_candidates(
@@ -368,66 +428,15 @@ class CctvYoloDetector:
             counts[(item.camera_id, item.class_name)] += 1
             if item.class_name == target_type:
                 occupied[item.camera_id].append(item.bbox_xyxy)
-        refine_imgsz = {"umbrella": 1600, "pencilcase": 1280}.get(
-            target_type, 960
+        detections = self._predict_around_landmarks(
+            frames,
+            objects,
+            landmark_classes,
+            landmarks=self._all_landmarks_for_refine(objects, landmark_classes),
+            pad_frac=OBJECT_CROP_PAD_FRAC,
+            imgsz=OBJECT_CROP_IMGSZ,
+            confidence=REFINE_CONF,
         )
-        refine_confidence = (
-            OBJECT_REFINE_CONF
-            if target_type in {"umbrella", "pencilcase"}
-            else REFINE_CONF
-        )
-        if target_type in {"umbrella", "pencilcase"}:
-            detections = []
-            for camera_id in sorted(frames):
-                frame = frames[camera_id]
-                if frame.rgb is None:
-                    continue
-                try:
-                    predicted = self._predict_frame(
-                        np.asarray(frame.rgb),
-                        imgsz=refine_imgsz,
-                        confidence=refine_confidence,
-                    )
-                except Exception as exc:
-                    if not _is_cuda_oom(exc):
-                        raise
-                    log.warning(
-                        "[cctv-yolo] full-frame refine OOM camera=%s; skipping",
-                        camera_id,
-                    )
-                    predicted = []
-                _release_cuda()
-                detections.extend(
-                    (camera_id, class_name, confidence, bbox, (frame.width, frame.height))
-                    for class_name, confidence, bbox in predicted
-                    if class_name == target_type
-                )
-            detections.extend(
-                item
-                for item in self._predict_around_landmarks(
-                    frames,
-                    objects,
-                    landmark_classes,
-                    landmarks=self._all_landmarks_for_refine(
-                        objects, landmark_classes
-                    ),
-                    pad_frac=OBJECT_CROP_PAD_FRAC,
-                    imgsz=refine_imgsz,
-                    confidence=refine_confidence,
-                )
-                if item[1] == target_type
-            )
-        else:
-            landmarks = self._all_landmarks_for_refine(objects, landmark_classes)
-            detections = self._predict_around_landmarks(
-                frames,
-                objects,
-                landmark_classes,
-                landmarks=landmarks,
-                pad_frac=OBJECT_CROP_PAD_FRAC,
-                imgsz=refine_imgsz,
-                confidence=refine_confidence,
-            )
         for camera_id, class_name, confidence, mapped, image_size in detections:
             # Crop inference is deliberately proposal-oriented: tiny mission items
             # are often classified as a visually similar mission class. Qwen sees
@@ -450,6 +459,7 @@ class CctvYoloDetector:
                     confidence=confidence,
                     camera_id=camera_id,
                     image_size=image_size,
+                    source="landmark_crop",
                 )
             )
             occupied[camera_id].append(mapped)
@@ -472,6 +482,7 @@ class CctvYoloDetector:
                     confidence=OBJECT_REFINE_CONF / 2.0,
                     camera_id=landmark.camera_id,
                     image_size=landmark.image_size,
+                    source="landmark_context",
                 )
                 extra.append(proxy)
                 log.info(
@@ -484,6 +495,69 @@ class CctvYoloDetector:
                     candidate=proxy.candidate_id, landmark=landmark.candidate_id,
                 )
         return extra
+
+    def refine_tiled(
+        self,
+        frames: dict[str, CctvFrame],
+        objects: list[ObjectCandidate],
+        target_type: str,
+    ) -> list[ObjectCandidate]:
+        """Target-class boxes the full-frame pass missed, found on upscaled tiles."""
+        counts: dict[str, int] = defaultdict(int)
+        occupied: dict[str, list[tuple[float, float, float, float]]] = defaultdict(list)
+        for item in objects:
+            if item.class_name == target_type:
+                counts[item.camera_id] += 1
+                occupied[item.camera_id].append(item.bbox_xyxy)
+        extra: list[ObjectCandidate] = []
+        for camera_id in sorted(frames):
+            frame = frames[camera_id]
+            if frame.rgb is None:
+                continue
+            for confidence, box in self._predict_tiles(np.asarray(frame.rgb), target_type):
+                if _same_object(box, occupied[camera_id]):
+                    continue
+                extra.append(
+                    ObjectCandidate(
+                        candidate_id=object_candidate_id(
+                            camera_id, target_type, counts[camera_id]
+                        ),
+                        class_name=target_type,
+                        bbox_xyxy=box,
+                        confidence=confidence,
+                        camera_id=camera_id,
+                        image_size=(int(frame.width), int(frame.height)),
+                        source="tile",
+                    )
+                )
+                counts[camera_id] += 1
+                occupied[camera_id].append(box)
+        return extra
+
+    def _predict_tiles(
+        self, rgb: np.ndarray, target_type: str
+    ) -> list[tuple[float, tuple[float, float, float, float]]]:
+        """Target-class detections over all tiles of one frame, merged by NMS."""
+        height, width = rgb.shape[:2]
+        boxes: list[tuple[float, float, float, float]] = []
+        scores: list[float] = []
+        for x1, y1, x2, y2 in tile_windows(width, height):
+            try:
+                predicted = self._predict_frame(
+                    rgb[y1:y2, x1:x2], confidence=TILE_CONF, imgsz=self.contract.imgsz
+                )
+            except Exception as exc:
+                if not _is_cuda_oom(exc):
+                    raise
+                log.warning("[cctv-yolo] tile OOM window=%s; skipping", (x1, y1, x2, y2))
+                _release_cuda()
+                continue
+            for class_name, confidence, (bx1, by1, bx2, by2) in predicted:
+                if class_name == target_type:
+                    boxes.append((bx1 + x1, by1 + y1, bx2 + x1, by2 + y1))
+                    scores.append(confidence)
+        _release_cuda()
+        return [(scores[i], boxes[i]) for i in _nms(boxes, scores, TILE_NMS_IOU)]
 
     def _landmarks_for_refine(
         self,
@@ -738,13 +812,14 @@ def _refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetection
         names.update(PARKED_VEHICLE_LANDMARKS)
     elif parsed.scene_hint == "park":
         names.update({"picnic_table", "bench"})
-    if not names:
-        return round_
-    extra = _detector.refine_around_landmarks(
-        round_.frames,
-        round_.objects,
-        parsed.target_type,
-        frozenset(names),
+    tiled = _tiled_refine(parsed.target_type, round_)
+    objects = list(round_.objects) + tiled
+    extra = (
+        _detector.refine_around_landmarks(
+            round_.frames, objects, parsed.target_type, frozenset(names)
+        )
+        if names
+        else []
     )
     log.info(
         "[cctv-yolo] object-refine target=%s landmark=%s added=%d ids=%s",
@@ -758,14 +833,40 @@ def _refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetection
             "refine_added", path="object",
             candidates=[item.candidate_id for item in extra],
         )
-    if not extra:
+    if not tiled and not extra:
         return round_
-    objects = list(round_.objects) + extra
     return CctvDetectionRound(
-        objects=objects,
+        objects=objects + extra,
         people=list(round_.people),
         sar=list(round_.sar),
         frames=round_.frames,
         camera_ids=list(round_.camera_ids),
         metrics=round_.metrics,
     )
+
+
+def _tiled_refine(target_type: str, round_: CctvDetectionRound) -> list[ObjectCandidate]:
+    """The tiled pass for a small target class; [] when off or not small (#115)."""
+    if not tiled_refine_enabled():
+        return []
+    if target_type not in _detector.contract.small_target_classes:
+        return []
+    started = time.perf_counter()
+    added = _detector.refine_tiled(round_.frames, round_.objects, target_type)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    log.info(
+        "[cctv-yolo] tiled-refine target=%s added=%d ms=%.0f ids=%s",
+        target_type,
+        len(added),
+        elapsed_ms,
+        ",".join(item.candidate_id for item in added) or "-",
+    )
+    note_decision(
+        "tiled_refine",
+        target=target_type,
+        added=len(added),
+        candidates=[item.candidate_id for item in added],
+        cameras=sorted({item.camera_id for item in added}),
+        ms=round(elapsed_ms),
+    )
+    return added
