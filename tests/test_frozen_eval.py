@@ -12,7 +12,7 @@ from PIL import Image
 from scripts.frozen_eval import case_store
 from scripts.frozen_eval.geometry import geometry_from_gt, ground_point, project_point
 from scripts.frozen_eval.heldout import assemble_case, stratum, wilson
-from scripts.frozen_eval.public import propose
+from scripts.frozen_eval.public import confirm, propose
 from scripts.frozen_eval.relations import object_choices, relations_between, sar_check
 
 # rig_3_b as the generator reports it.
@@ -163,6 +163,32 @@ class PublicProposalTests(unittest.TestCase):
         gold, evidence = propose(cands, {"rig_3_b": geom}, expected, lambda c: c["class_name"] == "mug")
         self.assertEqual(gold, ["rig_3_b:mug:0"])
         self.assertGreater(evidence["nearest"][1]["error_m"], 1.0)
+
+
+class PublicConfirmTests(unittest.TestCase):
+    def test_correction_to_empty_target_is_a_detector_miss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame = root / "f.png"
+            Image.new("RGB", (4, 4)).save(frame)
+            case_store.write_case(root, "public", {
+                "case_id": "pub-r13", "kind": "object", "command": "c", "parsed": {},
+                "candidates": [],
+                "gold": {"target_ids": ["rig_3_b:pencilcase:0"], "anchor_ids": ["rig_3_b:picnic_table:0"],
+                         "anchor_xyz": [0, 0, 0], "camera_ids": ["rig_3_b"], "confirmed_by": None},
+                "tags": {"detector_miss": False, "live_selected": {"target_id": "rig_3_b:pencilcase:0"}},
+            }, {"rig_3_b": frame})
+            sheet = root / "review.csv"
+            sheet.write_text(
+                "case_id,verdict,corrected_target_ids,corrected_anchor_ids,note,reviewer\n"
+                "pub-r13,corrected,,rig_3_b:picnic_table:0,hidden under person,r\n")
+            confirm(root, sheet)
+            case = case_store.read_cases(root, "public")[0]
+            self.assertEqual(case.gold["target_ids"], [])
+            self.assertTrue(case.tags["detector_miss"])
+            self.assertFalse(case.tags["anchor_miss"])
+            self.assertFalse(case.tags["live_selected_is_gold"])
+            self.assertEqual(case.gold["confirmed_by"]["proposed_target_ids"], ["rig_3_b:pencilcase:0"])
 
 
 class CaseStoreTests(unittest.TestCase):

@@ -250,7 +250,8 @@ def write_review_sheet(cases: list[tuple], geometry: dict[str, CameraGeometry], 
             "runner_up_error_m": t[1]["error_m"] if len(t) > 1 else "",
             "live_selected_is_gold": case["tags"]["live_selected_is_gold"],
             "live_target_score": case["tags"]["live_selected"]["target_score"],
-            "verdict": "", "corrected_target_ids": "", "corrected_anchor_ids": "", "reviewer": "",
+            "verdict": "", "corrected_target_ids": "", "corrected_anchor_ids": "", "note": "",
+            "reviewer": "",
         })
     path = out_dir / "review.csv"
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -261,7 +262,8 @@ def write_review_sheet(cases: list[tuple], geometry: dict[str, CameraGeometry], 
 
 
 def confirm(root: Path, review_csv: Path) -> int:
-    """Apply a filled review sheet: ``verdict`` ok|corrected, optional corrected IDs, reviewer."""
+    """Apply a filled review sheet: ``verdict`` ok|corrected, corrected IDs (empty = detector
+    miss), optional ``note``, and ``reviewer``. Rows without a verdict and reviewer are skipped."""
     rows = {r["case_id"]: r for r in csv.DictReader(review_csv.open(encoding="utf-8"))}
     updated = 0
     for case_dir in sorted((root / "public" / "cases").iterdir()):
@@ -270,13 +272,20 @@ def confirm(root: Path, review_csv: Path) -> int:
         row = rows.get(case["case_id"])
         if not row or row["verdict"] not in ("ok", "corrected") or not row["reviewer"]:
             continue
+        confirmed = {"reviewer": row["reviewer"], "verdict": row["verdict"],
+                     "note": (row.get("note") or "").strip()}
         if row["verdict"] == "corrected":
+            # Keep what was proposed: a proxy the platform rewards is still worth reporting.
+            confirmed["proposed_target_ids"] = case["gold"]["target_ids"]
+            confirmed["proposed_anchor_ids"] = case["gold"]["anchor_ids"]
             case["gold"]["target_ids"] = row["corrected_target_ids"].split()
             case["gold"]["anchor_ids"] = row["corrected_anchor_ids"].split()
             case["tags"]["detector_miss"] = not case["gold"]["target_ids"]
+            case["tags"]["anchor_miss"] = (bool(case["gold"].get("anchor_xyz"))
+                                           and not case["gold"]["anchor_ids"])
             case["tags"]["live_selected_is_gold"] = (
                 case["tags"]["live_selected"]["target_id"] in case["gold"]["target_ids"])
-        case["gold"]["confirmed_by"] = {"reviewer": row["reviewer"], "verdict": row["verdict"]}
+        case["gold"]["confirmed_by"] = confirmed
         path.write_text(json.dumps(case, indent=1, default=str), encoding="utf-8")
         updated += 1
     print(f"{updated} public cases confirmed")
