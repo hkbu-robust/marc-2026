@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from marc_agent.perception.cctv_project import (
     CameraGeometry,
@@ -15,6 +16,7 @@ from marc_agent.perception.stage1_pipeline import (
     _project_selection,
     has_complete_camera_coverage,
     run_stage1_round,
+    start_qwen_warmup,
     static_scene_key,
 )
 from marc_agent.perception.object_selection import ObjectSelection
@@ -200,56 +202,55 @@ def _object_round() -> CctvDetectionRound:
 
 
 class Stage1RoundTests(unittest.TestCase):
-    def test_post_qwen_yolo_boxes_drive_target_and_anchor_projection(self):
+    def test_qwen_warmup_runs_in_the_background_and_logs_its_outcome(self):
+        verifier = Mock()
+        with patch.dict(os.environ, {"MARC_SAR_DETECTOR": "qwen-remote"}), patch(
+            "marc_agent.perception.stage1_pipeline.RemoteQwenSarVerifier",
+            return_value=verifier,
+        ), patch("marc_agent.perception.stage1_pipeline.note_decision") as note:
+            thread = start_qwen_warmup()
+            thread.join(5.0)
+        verifier.warm_up.assert_called_once()
+        self.assertEqual("qwen_warmup", note.call_args.args[0])
+        self.assertTrue(note.call_args.kwargs["ok"])
+        self.assertIn("latency_s", note.call_args.kwargs)
+
+    def test_qwen_warmup_failure_is_logged_not_raised(self):
+        verifier = Mock()
+        verifier.warm_up.side_effect = RuntimeError("vLLM down")
+        with patch.dict(os.environ, {"MARC_SAR_DETECTOR": "qwen-remote"}), patch(
+            "marc_agent.perception.stage1_pipeline.RemoteQwenSarVerifier",
+            return_value=verifier,
+        ), patch("marc_agent.perception.stage1_pipeline.note_decision") as note:
+            start_qwen_warmup().join(5.0)
+        self.assertFalse(note.call_args.kwargs["ok"])
+
+    def test_no_qwen_warmup_without_the_remote_backend(self):
+        with patch.dict(os.environ, {"MARC_SAR_DETECTOR": "fallback"}):
+            self.assertIsNone(start_qwen_warmup())
+
+    def test_selected_boxes_drive_target_and_anchor_projection(self):
         def detector(client, *, stub_path=None):
             return _object_round()
 
-        initial = _object_round()
-        target = ObjectCandidate(
-            "rig_a:mug:0", "mug", (300.0, 210.0, 360.0, 265.0), 0.95,
-            "rig_a", (640, 480),
-        )
-        anchor = ObjectCandidate(
-            "rig_a:picnic_table:0", "picnic_table",
-            (220.0, 265.0, 470.0, 415.0), 0.96, "rig_a", (640, 480),
-        )
-        refreshed = CctvDetectionRound(
-            objects=[target, anchor] + initial.objects[2:],
-            people=initial.people,
-            frames=initial.frames,
-            camera_ids=initial.camera_ids,
-        )
         projector = _geometry()
-        with patch(
-            "marc_agent.perception.stage1_pipeline.refresh_detection_camera",
-            return_value=refreshed,
-        ) as refresh:
-            result = run_stage1_round(
-                object(),
-                "Find the mug on the picnic table.",
-                detector=detector,
-                verifier=lambda board: "rig_a:mug:0|rig_a:picnic_table:0",
-                projector=projector,
-            )
+        result = run_stage1_round(
+            object(),
+            "Find the mug on the picnic table.",
+            detector=detector,
+            verifier=lambda board: "rig_a:mug:0|rig_a:picnic_table:0",
+            projector=projector,
+        )
 
-        refresh.assert_called_once()
-        self.assertEqual("rig_a", refresh.call_args.args[1])
-        self.assertEqual(
-            target.bbox_xyxy,
-            result.candidates.object_selection.target.bbox_xyxy,
-        )
-        self.assertEqual(
-            anchor.bbox_xyxy,
-            result.candidates.object_selection.anchor.bbox_xyxy,
-        )
+        selection = result.candidates.object_selection
         expected_target = projector.project_contact(
             "rig_a",
-            target.bbox_xyxy,
+            selection.target.bbox_xyxy,
             relation=Relation.ON,
             support_class="picnic_table",
-            support_box=anchor.bbox_xyxy,
+            support_box=selection.anchor.bbox_xyxy,
         )
-        expected_anchor = projector.project_contact("rig_a", anchor.bbox_xyxy)
+        expected_anchor = projector.project_contact("rig_a", selection.anchor.bbox_xyxy)
         self.assertIsNotNone(expected_target)
         self.assertIsNotNone(expected_anchor)
         self.assertEqual(list(expected_target), result.grounding.target_coord)

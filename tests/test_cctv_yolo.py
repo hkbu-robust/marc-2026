@@ -22,7 +22,6 @@ from marc_agent.perception.cctv_yolo import (
     detections_to_candidates,
     person_candidates_to_sar,
     refine_detection_round,
-    refresh_detection_camera,
 )
 from marc_agent.perception.pose_to_situation import situation_for_pose
 from marc_agent.types import (
@@ -34,42 +33,6 @@ from marc_agent.types import (
 
 
 class CctvYoloTests(unittest.TestCase):
-    def test_post_select_refresh_updates_boxes_but_preserves_candidate_ids(self):
-        frame = CctvFrame(
-            "rig_a", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)
-        )
-        mug = ObjectCandidate(
-            "rig_a:mug:0", "mug", (10.0, 20.0, 50.0, 80.0), 0.7,
-            "rig_a", (640, 480),
-        )
-        person = PersonCandidate(
-            "rig_a:person_sitting:0", (100.0, 80.0, 180.0, 300.0),
-            "person_sitting", 0.8, "rig_a", (640, 480),
-        )
-        round_ = CctvDetectionRound(
-            objects=[mug], people=[person], frames={"rig_a": frame},
-            camera_ids=["rig_a"],
-        )
-        detector = Mock()
-        detector._predict_frame.return_value = [
-            ("mug", 0.9, (12.0, 22.0, 52.0, 82.0)),
-            ("person_sitting", 0.95, (102.0, 82.0, 182.0, 302.0)),
-        ]
-
-        with patch("marc_agent.perception.cctv_yolo._detector", detector), patch(
-            "marc_agent.perception.cctv_yolo._release_cuda"
-        ):
-            refreshed = refresh_detection_camera(round_, "rig_a")
-
-        self.assertEqual("rig_a:mug:0", refreshed.objects[0].candidate_id)
-        self.assertEqual((12.0, 22.0, 52.0, 82.0), refreshed.objects[0].bbox_xyxy)
-        self.assertEqual(
-            "rig_a:person_sitting:0", refreshed.people[0].candidate_id
-        )
-        self.assertEqual(
-            (102.0, 82.0, 182.0, 302.0), refreshed.people[0].bbox_xyxy
-        )
-
     def test_requested_cuda_never_falls_back_to_cpu(self):
         torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False))
         with patch.dict(sys.modules, {"torch": torch}):

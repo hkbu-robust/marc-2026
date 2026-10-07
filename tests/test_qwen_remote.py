@@ -302,6 +302,56 @@ class QwenRemoteTests(unittest.TestCase):
         self.assertIn("budget=27.9s", output)
         self.assertIn("attempt=1/1", output)
 
+    def test_scene_description_leaves_the_round_budget_to_the_target_pick(self):
+        now = [100.0]
+        calls = []
+
+        def post(_url, body, _headers, timeout):
+            prompt = json.loads(body)["messages"][0]["content"][-1]["text"]
+            calls.append((timeout, "Inspect every supplied camera" in prompt))
+            now[0] += timeout  # the cold server uses the whole deadline
+            if calls[-1][1]:
+                raise QwenRemoteTimeout("cold")
+            return json.dumps(
+                {"choices": [{"message": {"content": "rig_a:person_prone:0|emergency"}}]}
+            ).encode("utf-8")
+
+        config = QwenRemoteConfig(
+            base_url="http://workstation:8000/v1", api_key="k", model_name="qwen3-vl-8b",
+            timeout_s=90.0, max_new_tokens=8,
+        )
+        frame = CctvFrame("rig_a", 32, 24, Image.new("RGB", (32, 24)))
+        scene = CctvDetectionRound(frames={"rig_a": frame}, camera_ids=["rig_a"])
+        verifier = RemoteQwenSarVerifier(config, post=post)
+        with patch("marc_agent.perception.qwen_remote.time.monotonic", side_effect=lambda: now[0]):
+            verifier.set_budget_timeout(25.0)
+            with self.assertRaises(QwenRemoteTimeout):
+                verifier.prepare_scene(scene, "Find the mug.")
+            verifier(_board())
+
+        self.assertEqual((8.0, True), calls[0])  # min(8 s, 0.4 x 25 s), one attempt
+        self.assertEqual(1, sum(is_scene for _, is_scene in calls))
+        self.assertAlmostEqual(17.0, calls[1][0])  # the pick keeps the rest
+
+    def test_scene_timeout_shrinks_with_the_remaining_budget(self):
+        verifier = RemoteQwenSarVerifier(_config(), post=lambda *_args: b"")
+        with patch("marc_agent.perception.qwen_remote.time.monotonic", return_value=50.0):
+            verifier.set_budget_timeout(4.0)
+            self.assertAlmostEqual(1.6, verifier._scene_timeout_s())
+
+    def test_warm_up_sends_a_small_then_a_six_image_board(self):
+        calls = []
+
+        def post(_url, body, _headers, timeout):
+            payload = json.loads(body)
+            images = sum(1 for item in payload["messages"][0]["content"]
+                         if item["type"] == "image_url")
+            calls.append((timeout, images))
+            return json.dumps({"choices": [{"message": {"content": "READY"}}]}).encode()
+
+        RemoteQwenSarVerifier(_config(), post=post).warm_up()
+        self.assertEqual([(90.0, 1), (90.0, 6)], calls)
+
     def test_timeout_retry_exhausted_raises(self):
         calls = []
 

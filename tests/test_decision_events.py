@@ -523,7 +523,7 @@ class StaticSceneCacheTests(unittest.TestCase):
         )
 
     def test_hit_submits_the_stored_answer_and_records_the_fresh_one(self):
-        cache = StaticSceneCache()
+        cache = StaticSceneCache(enabled=True)
         first = cache.apply(self._round(), 3)
         moved = _object_with_frames()
         moved.objects = [item for item in moved.objects if item.candidate_id != "rig_a:mug:0"]
@@ -549,11 +549,13 @@ class StaticSceneCacheTests(unittest.TestCase):
         self.assertIs(fresh, result)
         self.assertEqual([], notes)
 
-    def test_default_is_on(self):
-        self.assertTrue(StaticSceneCache.from_env({}).enabled)
+    def test_default_is_off(self):
+        self.assertFalse(StaticSceneCache.from_env({}).enabled)
+        self.assertFalse(StaticSceneCache.from_env({"MARC_STAGE1_SCENE_CACHE": "0"}).enabled)
+        self.assertTrue(StaticSceneCache.from_env({"MARC_STAGE1_SCENE_CACHE": "1"}).enabled)
 
     def test_incomplete_coverage_is_not_stored(self):
-        cache = StaticSceneCache()
+        cache = StaticSceneCache(enabled=True)
         cache.apply(self._round(detections=_object_round()), 1)
         fresh = self._round()
         self.assertIs(fresh, cache.apply(fresh, 2))
