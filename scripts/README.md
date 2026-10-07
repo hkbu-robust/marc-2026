@@ -35,6 +35,12 @@ rounds and the reverse-engineered scoring kernel.
        --out <smoke-run-dir>/gate.md
    ```
 
+   **Rolling baseline:** the #88 cache-off runs plus every smoke run merged into
+   `final-system` since (`ablations/final-system/*/smoke/run-*`, `111-118-smoke`).
+   A single previous run would give zero-width bands, and lf06, hf08 and sar03 flip
+   between unchanged runs; the union keeps those flips and the values earlier
+   tickets changed on purpose.
+
    Attach `gate.md`. It fails when a round outside `--allow` leaves its baseline
    band of totals by more than 0.5 points, or an invariant breaks (all rounds
    submitted, landmark/relation filled on object rounds, no sentinel coordinate,
