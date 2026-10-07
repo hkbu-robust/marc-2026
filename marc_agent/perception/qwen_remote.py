@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 from marc_agent.perception.qwen_reply import LENGTH_RETRY_TOKENS, choice_text
 from marc_agent.perception.qwen_runtime import QwenRemoteConfig
+from marc_agent.round_clock import scene_budget_fraction, scene_timeout_s
 
 if TYPE_CHECKING:
     from marc_agent.perception.sar_selection import CandidateBoard
@@ -25,6 +26,7 @@ log = logging.getLogger("marc_agent.qwen_remote")
 
 MAX_REMOTE_IMAGES = 6
 SCENE_MAX_TOKENS = 192
+WARMUP_TIMEOUT_S = 90.0
 def pack_camera_evidence(overview: object, crops: tuple[tuple[str, object], ...]):
     """Fit one camera overview and all of its labeled crops into one image."""
     from PIL import Image, ImageDraw
@@ -306,7 +308,9 @@ class RemoteQwenSarVerifier:
         self._scene_description = None
         description = self._scene_cache.get(key)
         if description is None:
-            description = self._complete(board, max_tokens=SCENE_MAX_TOKENS)
+            description = self._complete(
+                board, max_tokens=SCENE_MAX_TOKENS, timeout_s=self._scene_timeout_s()
+            )
             self._scene_cache[key] = description
             if len(self._scene_cache) > 8:
                 self._scene_cache.pop(next(iter(self._scene_cache)))
@@ -315,6 +319,28 @@ class RemoteQwenSarVerifier:
             log.info("[qwen-remote] scene-cache hit cameras=%d", len(board.images))
         self._scene_description = description
         return description
+
+    def _scene_timeout_s(self) -> float:
+        timeout_s = min(float(self.config.timeout_s), scene_timeout_s())
+        if self._budget_deadline_s is not None:
+            remaining = max(0.0, self._budget_deadline_s - time.monotonic())
+            timeout_s = min(timeout_s, scene_budget_fraction() * remaining)
+        return timeout_s
+
+    def warm_up(self, round_: "CctvDetectionRound") -> None:
+        """Send one all-camera scene board and one single-image board; discard replies.
+
+        The first requests after vLLM starts take 15-25 s (#111), so a round that
+        meets a cold server falls back to geometry. Use a dedicated instance: the
+        replies and metrics of this call must not mix with a round's.
+        """
+        prepared = _scene_board(round_, "")
+        if prepared is None:
+            raise QwenRemoteResponseError("no camera frame to warm up with")
+        _, scene = prepared
+        self._complete(scene, max_tokens=SCENE_MAX_TOKENS, timeout_s=WARMUP_TIMEOUT_S)
+        single = _SceneBoard(scene.images[:1], "Reply with the single word READY.")
+        self._complete(single, max_tokens=8, timeout_s=WARMUP_TIMEOUT_S)
 
     def _with_scene_reference(self, board: "CandidateBoard") -> "CandidateBoard":
         description = self._scene_description
@@ -330,10 +356,13 @@ class RemoteQwenSarVerifier:
         )
         return replace(board, prompt=prompt)
 
-    def _timeout_s(self) -> tuple[float, int]:
-        timeout_s = min(
-            float(self.config.timeout_s),
-            float(self.config.wall_timeout_s),
+    def _timeout_s(self, fixed_s: float | None = None) -> tuple[float, int]:
+        """Request deadline and attempts; ``fixed_s`` replaces the config timeout
+        with one attempt, still bounded by the round budget."""
+        timeout_s = (
+            float(fixed_s)
+            if fixed_s is not None
+            else min(float(self.config.timeout_s), float(self.config.wall_timeout_s))
         )
         budget = (
             None
@@ -344,6 +373,8 @@ class RemoteQwenSarVerifier:
             raise QwenRemoteTimeout("round Qwen budget exhausted")
         if budget is not None:
             timeout_s = min(timeout_s, float(budget))
+        if fixed_s is not None:
+            return timeout_s, 1
         retry_ok = budget is None or float(budget) >= 2.0 * timeout_s
         max_attempts = 2 if retry_ok else 1
         return timeout_s, max_attempts
@@ -353,6 +384,7 @@ class RemoteQwenSarVerifier:
         board: "CandidateBoard",
         *,
         max_tokens: int | None = None,
+        timeout_s: float | None = None,
     ) -> str:
         self.last_prompt = board.prompt
         if len(board.images) > MAX_REMOTE_IMAGES:
@@ -365,7 +397,7 @@ class RemoteQwenSarVerifier:
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
-        timeout_s, max_attempts = self._timeout_s()
+        timeout_s, max_attempts = self._timeout_s(timeout_s)
         started = time.perf_counter()
         raw = b""
         latency_ms = 0.0

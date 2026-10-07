@@ -10,6 +10,10 @@ from typing import Callable, Optional
 
 DEFAULT_MIN_REMAINING_S = 4.0
 DEFAULT_SUBMIT_MARGIN_S = 2.0
+# The all-camera scene description is optional context: it may use at most this
+# long and this share of the remaining budget, leaving the rest to the target pick.
+DEFAULT_SCENE_TIMEOUT_S = 8.0
+DEFAULT_SCENE_BUDGET_FRACTION = 0.4
 
 
 def _env_float(name: str, default: float) -> float:
@@ -28,6 +32,14 @@ def min_remaining_s() -> float:
 
 def submit_margin_s() -> float:
     return _env_float("MARC_QWEN_SUBMIT_MARGIN_S", DEFAULT_SUBMIT_MARGIN_S)
+
+
+def scene_timeout_s() -> float:
+    return _env_float("MARC_QWEN_SCENE_TIMEOUT_S", DEFAULT_SCENE_TIMEOUT_S)
+
+
+def scene_budget_fraction() -> float:
+    return _env_float("MARC_QWEN_SCENE_BUDGET_FRACTION", DEFAULT_SCENE_BUDGET_FRACTION)
 
 
 class RoundClock:

@@ -55,6 +55,7 @@ from marc_agent.perception.stage1_pipeline import (
     get_default_verifier,
     log_qwen_startup_status,
     run_stage1_round,
+    start_qwen_warmup,
 )
 from marc_agent.pick_runtime import PickRuntime, pick_policy_name
 from marc_agent.retrieval_state import (
@@ -962,7 +963,8 @@ class DemoParticipant:
     def run(self):
         if not self.client.connect():
             raise SystemExit("Registration failed -- check the runtime and the token.")
-        fetch_cctv_round(self.client)
+        frames, camera_ids = fetch_cctv_round(self.client)
+        start_qwen_warmup(frames, camera_ids)
         self.client.run()
         if self._final_score_payload is not None:
             self._experiment.finish(
