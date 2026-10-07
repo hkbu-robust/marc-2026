@@ -1,8 +1,11 @@
-# Run the frozen qualifier pair with the #85 logging build of the agent.
+# Run the frozen qualifier pair with the #85 logging build of the agent, or
+# any agent image built the same way (MARC_AGENT_IMAGE, set by run_stage1_repeats).
 #   docker compose -f docker-compose.yml -f docker-compose.frozen.yml \
 #     -f scripts/frozen-logging.compose.yml up
 services:
+  qwen:
+    image: ${MARC_QWEN_IMAGE:-marc-qwen-vllm:qualifier-b2360c86}
   agent:
-    image: marc-agent:frozen-logging
+    image: ${MARC_AGENT_IMAGE:-marc-agent:frozen-logging}
     environment:
       MARC_ROUND_DUMP: "${MARC_ROUND_DUMP:-1}"

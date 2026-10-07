@@ -18,12 +18,17 @@ rounds and the reverse-engineered scoring kernel.
 
 ## What every Stage 1 PR attaches
 
-1. **Regression gate.** Run one 33-round smoke run of the branch (~12 GPU-min;
-   `run_stage1_repeats.py --runs 1 --agent-image <branch image>`, built under its own
-   tag, never `:local`) and compare it against the rolling baseline: the #88
-   cache-off runs at first, then the last merged PR's run.
+1. **Regression gate.** Run one 33-round smoke run of the branch (~12 GPU-min) and
+   compare it against the rolling baseline: the #88 cache-off runs at first, then
+   the last merged PR's run. Build the branch image under its own tag (never
+   `:local`; tags are machine-wide). The runner refuses to start if the agent
+   container does not run that image.
 
    ```bash
+   docker build -f scripts/frozen_logging.Dockerfile -t marc-agent:fs-<ticket> \
+       --label org.opencontainers.image.revision=$(git rev-parse HEAD) .
+   python -m scripts.run_stage1_repeats --runs 1 --agent-image marc-agent:fs-<ticket> \
+       --out ~/marc-2026-work/experiments/ablations/final-system/<ticket>-<slug>/smoke
    python -m scripts.stage1_regress compare \
        --baseline ~/marc-2026-work/experiments/ablations/04-repeated-runs/cache-off/run-* \
        --candidate <smoke-run-dir> --allow <rounds this ticket should change> \
