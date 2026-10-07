@@ -68,6 +68,30 @@ rounds and the reverse-engineered scoring kernel.
    passes. The "on" summary gives the point delta (Stage 1 average, anchor and
    target credit, target-credit flips) and the held-out anchor error.
 
+## Sharing the GPU
+
+Two experiment runs (yours and a teammate's) can share the 96 GB card if each has
+its own vLLM port, its own ROS domain and its own clone:
+
+```bash
+python -m scripts.run_stage1_repeats ... --project fs-a --ros-domain-id 88 --vllm-port 8004
+python -m scripts.run_stage1_repeats ... --project fs-b --ros-domain-id 89 --vllm-port 8014
+```
+
+- **Memory:** `--vllm-memory-mib` (default 49152) sizes vLLM as on the 48 GB judging
+  card: ~36 GB, of which 16.8 GB are weights; the rest is KV cache the rounds barely
+  use. Without it vLLM reserves 75 % of the whole card (~72 GB) and nothing else fits.
+  A run needs about 36 + 7 (Isaac Sim) + 2 (agent) GB; the runner refuses to start
+  below `--min-free-gpu-mib` (45000).
+- **Separate clones:** the platform writes score files to `<clone>/results/`, and the
+  runner picks the new file there, so two runs from one clone would mix them up.
+- **Timing:** concurrent runs slow each other down. Fine for scores and decisions;
+  run timing-sensitive tests (warm-up, round time, latency) alone.
+- Outside the runner (`docker compose up` by hand), set the same variables:
+  `MARC_VLLM_PORT`, `MARC_VLLM_MEMORY_MIBS` and `ROS_DOMAIN_ID`, with
+  `scripts/frozen-logging.compose.yml` as the last `-f` file. The root
+  `docker-compose.yml` (the submission entry point) is unchanged.
+
 ## Rules the replay relies on
 
 - **Read feature flags at call time** (`os.environ.get` inside the function), not

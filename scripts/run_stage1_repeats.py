@@ -91,14 +91,15 @@ def provenance(args, env: dict, agent_project: str) -> dict:
             "docker", "compose", "-p", agent_project, *AGENT_COMPOSE, "exec", "-T", "qwen",
             "python3", "-c",
             "import os, urllib.request; print(urllib.request.urlopen(urllib.request.Request("
-            "'http://127.0.0.1:8004/v1/models', headers={'Authorization': 'Bearer ' "
+            "'http://127.0.0.1:' + os.environ['VLLM_PORT'] + '/v1/models', "
+            "headers={'Authorization': 'Bearer ' "
             "+ os.environ['VLLM_API_KEY']}), timeout=5).read().decode())",
         ]),
         "env": {
             key: env[key] for key in (
                 "ROS_DOMAIN_ID", "MARC_TEAM_ID", "HEADLESS", "ENV_MARC_SCENARIO",
                 "MARC_STAGE1_SCENE_CACHE", "MARC_ROUND_DUMP", "MARC_AGENT_IMAGE",
-                "MARC_QWEN_IMAGE",
+                "MARC_QWEN_IMAGE", "MARC_VLLM_PORT", "MARC_VLLM_MEMORY_MIBS",
             )
         },
         # Set by `docker build --label org.opencontainers.image.revision=<sha>`.
@@ -221,7 +222,13 @@ def main(argv=None) -> None:
     parser.add_argument("--ros-domain-id", default="85")
     parser.add_argument("--agent-delay-s", type=float, default=20.0)
     parser.add_argument("--timeout-s", type=float, default=2400.0)
-    parser.add_argument("--min-free-gpu-mib", type=int, default=60000)
+    parser.add_argument("--min-free-gpu-mib", type=int, default=45000,
+                        help="refuse to start with less free GPU memory than this")
+    parser.add_argument("--vllm-port", type=int, default=8004,
+                        help="host port for this run's vLLM; give each concurrent run its own")
+    parser.add_argument("--vllm-memory-mib", default="49152",
+                        help="size vLLM as if the GPU had this much memory (49152 = the 48 GB "
+                             "judging card); empty = the whole card")
     parser.add_argument("--warm-qwen", action="store_true",
                         help="keep vLLM loaded between runs instead of a cold start each run")
     args = parser.parse_args(argv)
@@ -238,6 +245,8 @@ def main(argv=None) -> None:
         "MARC_ROUND_DUMP": "1",
         "MARC_AGENT_IMAGE": args.agent_image,
         "MARC_QWEN_IMAGE": args.qwen_image,
+        "MARC_VLLM_PORT": str(args.vllm_port),
+        "MARC_VLLM_MEMORY_MIBS": args.vllm_memory_mib,
     }
     records = []
     try:
