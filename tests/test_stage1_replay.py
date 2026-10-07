@@ -22,7 +22,8 @@ FROZEN_FLAGS = {"MARC_GROUND_CALIBRATION": "0", "MARC_LANDMARK_FOOTPRINT": "0"}
 
 
 class ReplayTests(unittest.TestCase):
-    """Two #88 cache-off rounds: lf06 (hidden-umbrella proxy) and sar03 (lying person)."""
+    """Two #88 cache-off rounds: lf06 (logged through the proxy chain #116 deleted) and
+    sar03 (lying person)."""
 
     def setUp(self):
         self.run = read_run(FIXTURE)
@@ -45,8 +46,13 @@ class ReplayTests(unittest.TestCase):
             self.assertAlmostEqual(item.replayed.total, item.round.detail["total"], places=9)
 
     def test_replay_records_the_runtime_decisions(self):
-        decisions = {note["decision"] for note in self.replayed["lf06_umbrella_fallenbike"].decisions}
-        self.assertIn("projection_proxy", decisions)
+        lf06 = self.replayed["lf06_umbrella_fallenbike"]
+        decisions = {note["decision"] for note in lf06.decisions}
+        self.assertIn("ground_model", decisions)
+        # The swap is gone (#116). lf06's logged target was the fabricated landmark-
+        # context candidate, whose box is the trash can's, and the replay keeps logged
+        # candidates fixed, so the point itself only changes in a live run.
+        self.assertNotIn("projection_proxy", decisions)
 
     def test_kernel_matches_every_logged_component(self):
         for round_ in self.run.rounds:

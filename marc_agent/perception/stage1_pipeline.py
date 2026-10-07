@@ -895,115 +895,12 @@ def _project_selection(
     projector: CctvProjector,
     parsed: ParsedCommand,
     selection: ObjectSelection,
-    objects: tuple[ObjectCandidate, ...] | list[ObjectCandidate] = (),
 ) -> Optional[tuple[tuple[float, float, float], tuple[float, float, float]]]:
-    target_box = selection.target.bbox_xyxy
-    width, height = selection.target.image_size
-    clipped = (
-        target_box[0] <= 1
-        or target_box[1] <= 1
-        or target_box[2] >= width - 1
-        or target_box[3] >= height - 1
-    )
-    if (
-        parsed.target_type == "umbrella"
-        and selection.target.confidence < 0.02
-        and selection.anchor is not None
-        and selection.anchor.class_name == "trash_can"
-    ):
-        target_box = selection.anchor.bbox_xyxy
-        log.info(
-            "[stage1] hidden umbrella proxy target=%s proxy=%s",
-            selection.target.candidate_id,
-            selection.anchor.candidate_id,
-        )
-        note_decision(
-            "projection_proxy", variant="hidden_umbrella",
-            target=selection.target.candidate_id,
-            proxy=selection.anchor.candidate_id,
-        )
-    elif selection.target.confidence < 0.02 and clipped and selection.anchor is not None:
-        ax1, ay1, ax2, ay2 = selection.anchor.bbox_xyxy
-        ac = ((ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0)
-        proxies = [
-            item
-            for item in objects
-            if item.camera_id == selection.target.camera_id
-            and item.candidate_id != selection.anchor.candidate_id
-            and item.class_name != parsed.target_type
-            and item.confidence >= 0.2
-        ]
-        if proxies:
-            proxy = min(
-                proxies,
-                key=lambda item: (
-                    math.hypot(
-                        (item.bbox_xyxy[0] + item.bbox_xyxy[2]) / 2.0 - ac[0],
-                        (item.bbox_xyxy[1] + item.bbox_xyxy[3]) / 2.0 - ac[1],
-                    ),
-                    item.candidate_id,
-                ),
-            )
-            px1, py1, px2, py2 = proxy.bbox_xyxy
-            if target_box[2] >= width - 1:
-                target_box = (px1, py1, px1, py2)
-            elif target_box[0] <= 1:
-                target_box = (px2, py1, px2, py2)
-            elif target_box[3] >= height - 1:
-                target_box = (px1, py1, px2, py1)
-            else:
-                target_box = (px1, py2, px2, py2)
-            log.info(
-                "[stage1] clipped target proxy target=%s proxy=%s",
-                selection.target.candidate_id,
-                proxy.candidate_id,
-            )
-            note_decision(
-                "projection_proxy", variant="clipped_target",
-                target=selection.target.candidate_id, proxy=proxy.candidate_id,
-            )
-    elif (
-        parsed.target_type == "umbrella"
-        and (target_box[2] - target_box[0]) * (target_box[3] - target_box[1]) <= 400
-    ):
-        tx = (target_box[0] + target_box[2]) / 2.0
-        ty = (target_box[1] + target_box[3]) / 2.0
-        adjacent = [
-            item
-            for item in objects
-            if item.camera_id == selection.target.camera_id
-            and item.class_name != parsed.target_type
-            and (
-                selection.anchor is None
-                or item.candidate_id != selection.anchor.candidate_id
-            )
-            and item.confidence >= 0.5
-            and item.bbox_xyxy[0] - 5 <= tx <= item.bbox_xyxy[2] + 5
-            and item.bbox_xyxy[1] - 5 <= ty <= item.bbox_xyxy[3] + 5
-        ]
-        if adjacent:
-            proxy = max(
-                adjacent,
-                key=lambda item: (
-                    (item.bbox_xyxy[2] - item.bbox_xyxy[0])
-                    * (item.bbox_xyxy[3] - item.bbox_xyxy[1]),
-                    item.confidence,
-                ),
-            )
-            target_box = proxy.bbox_xyxy
-            log.info(
-                "[stage1] occluded target proxy target=%s proxy=%s",
-                selection.target.candidate_id,
-                proxy.candidate_id,
-            )
-            note_decision(
-                "projection_proxy", variant="occluded_target",
-                target=selection.target.candidate_id, proxy=proxy.candidate_id,
-            )
+    """Project the selected target's own box and its anchor (#116: no box swaps)."""
     return _project_pair(
         projector,
         selection.target.camera_id,
-        target_box,
+        selection.target.bbox_xyxy,
         selection.anchor.bbox_xyxy if selection.anchor is not None else None,
         relation=parsed.relation or (
             Relation.NEAR
@@ -1068,7 +965,7 @@ def _compose_object(
                 candidates.detections.objects, projector,
             )
         projected = _project_selection(
-            projector, parsed, selection, candidates.detections.objects
+            projector, parsed, selection
         )
         if projected is None:
             continue
