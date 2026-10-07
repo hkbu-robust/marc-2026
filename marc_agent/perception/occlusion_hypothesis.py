@@ -64,6 +64,40 @@ def is_hypothesis(item) -> bool:
     return getattr(item, "source", None) == SOURCE
 
 
+def relation_satisfied(
+    parsed: ParsedCommand,
+    round_: CctvDetectionRound,
+    projector,
+    command_text: str = "",
+) -> Optional[bool]:
+    """Whether a detected target-class candidate satisfies the command's relation to a
+    detected landmark instance (the #87 rule); None when there is no landmark to test."""
+    if projector is None or parsed.target_type == "person":
+        return None
+    classes = implicit_anchor_classes(parsed, command_text)
+    landmarks = [item for item in round_.objects if item.class_name in classes]
+    if not landmarks:
+        return None
+    relation = parsed.relation or Relation.NEAR
+    radius = _RADIUS_M.get(relation, NEAR_M)
+    for landmark in landmarks:
+        landmark_xy = _xy(projector.project_landmark(
+            landmark.camera_id, landmark.bbox_xyxy, landmark.class_name, landmark.image_size))
+        for target in round_.objects:
+            if target.class_name != parsed.target_type or is_hypothesis(target):
+                continue
+            target_xy = _xy(projector.project_contact(
+                target.camera_id, target.bbox_xyxy, relation=relation,
+                support_class=landmark.class_name))
+            # Satisfied, or might be (a target that cannot be projected).
+            if target_xy is None or _within(target_xy, landmark_xy, radius):
+                return True
+            if relation in (Relation.ON, Relation.ABOVE) and target.camera_id == landmark.camera_id \
+                    and _stacked_on(target.bbox_xyxy, landmark.bbox_xyxy, landmark.class_name):
+                return True
+    return False
+
+
 def add_hypotheses(
     parsed: ParsedCommand,
     round_: CctvDetectionRound,
@@ -71,30 +105,12 @@ def add_hypotheses(
     command_text: str = "",
 ) -> CctvDetectionRound:
     """``round_`` plus hypothesis candidates, when no detection satisfies the relation."""
-    if not enabled() or projector is None or parsed.target_type == "person":
+    if not enabled() or relation_satisfied(parsed, round_, projector, command_text) is not False:
         return round_
     classes = implicit_anchor_classes(parsed, command_text)
-    if not classes:
-        return round_
     landmarks = [item for item in round_.objects if item.class_name in classes]
-    if not landmarks:
-        return round_
-    relation = parsed.relation or Relation.NEAR
-    radius = _RADIUS_M.get(relation, NEAR_M)
     landmark_xy = {item.candidate_id: _xy(projector.project_landmark(
         item.camera_id, item.bbox_xyxy, item.class_name, item.image_size)) for item in landmarks}
-    targets = [item for item in round_.objects if item.class_name == parsed.target_type]
-    for target in targets:
-        for landmark in landmarks:
-            target_xy = _xy(projector.project_contact(
-                target.camera_id, target.bbox_xyxy, relation=relation,
-                support_class=landmark.class_name))
-            # A visible candidate satisfies the command, or might (not projectable).
-            if target_xy is None or _within(target_xy, landmark_xy[landmark.candidate_id], radius):
-                return round_
-            if relation in (Relation.ON, Relation.ABOVE) and target.camera_id == landmark.camera_id \
-                    and _stacked_on(target.bbox_xyxy, landmark.bbox_xyxy, landmark.class_name):
-                return round_
     added: list[ObjectCandidate] = []
     counts = {}
     for item in round_.objects:
