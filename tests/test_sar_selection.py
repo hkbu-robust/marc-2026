@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest.mock import patch
 import numpy as np
 
 from marc_agent.command_parser import parse_command
+from marc_agent.experiment_log import decision_scope
 from marc_agent.perception.sar_selection import (
     SelectionStatus,
     build_candidate_board,
@@ -31,6 +33,9 @@ from marc_agent.types import (
     ObjectCandidate,
     PersonCandidate,
 )
+from scripts.stage1_replay import projector_for
+
+SAR03_RUN03 = Path(__file__).resolve().parent / "fixtures" / "sar03_place_guard_run03.json"
 
 
 def _person(candidate_id: str, pose: str, box, confidence: float = 0.8, camera_id: str = "rig_a"):
@@ -1250,6 +1255,63 @@ class SarSelectionTests(unittest.TestCase):
 
         self.assertEqual("rig_b:person_bending:0", result.selected.candidate_id)
         self.assertEqual("place_geometry_override", result.reason)
+
+    def test_place_guard_keeps_only_eligible_people_sar03_run03(self):
+        """#88 run-03 sar03: the guard used to take a reclining bystander (0.21 m)."""
+        case = json.loads(SAR03_RUN03.read_text())
+        objects, people = [], []
+        for item in case["candidates"]:
+            box = tuple(item["bbox_xyxy"])
+            if item["class_name"].startswith("person_"):
+                people.append(PersonCandidate(item["candidate_id"], box, item["class_name"],
+                                              item["confidence"], item["camera_id"], (1280, 720)))
+            else:
+                objects.append(ObjectCandidate(item["candidate_id"], item["class_name"], box,
+                                               item["confidence"], item["camera_id"], (1280, 720)))
+        frames = {
+            camera: CctvFrame(camera, 1280, 720, np.zeros((720, 1280, 3), dtype=np.uint8))
+            for camera in case["camera_ids"]
+        }
+        round_ = CctvDetectionRound(objects=objects, people=people, frames=frames,
+                                    camera_ids=case["camera_ids"])
+        result = select_sar_candidate(
+            case["command"],
+            parse_command(case["command"]),
+            round_,
+            verifier=lambda _board: case["qwen_pick"],
+            projector=projector_for(),
+        )
+        self.assertEqual("rig_3_c:person_bending:0", result.selected.candidate_id)
+        self.assertEqual("place_geometry_override", result.reason)
+
+    def test_place_guard_keeps_qwen_when_nobody_in_the_place_is_eligible(self):
+        text = "Near the taxi, find the person lying down on top of the bench."
+        command = parse_command(text)
+        bench = (200.0, 200.0, 500.0, 400.0)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("rig_a:bench:0", "bench", bench, "rig_a"),
+                _object("rig_b:bench:0", "bench", bench, "rig_b"),
+                _object("rig_b:taxi:0", "taxi", (10.0, 10.0, 100.0, 100.0), "rig_b"),
+            ],
+            people=[
+                _person("rig_a:person_lying_down:0", "person_lying_down", (240, 130, 420, 240), 0.99, "rig_a"),
+                _person("rig_b:person_walking:0", "person_walking", (240, 130, 420, 240), 0.8, "rig_b"),
+            ],
+            frames={"rig_a": _frame("rig_a"), "rig_b": _frame("rig_b")},
+            camera_ids=["rig_a", "rig_b"],
+        )
+
+        with decision_scope("stage1", 1) as notes:
+            result = select_sar_candidate(
+                text, command, round_, verifier=lambda _board: "rig_a:person_lying_down:0",
+            )
+
+        self.assertEqual("rig_a:person_lying_down:0", result.selected.candidate_id)
+        self.assertIn(
+            "place_guard_no_eligible",
+            [note.get("reason") for note in notes if note["decision"] == "guard_skipped"],
+        )
 
     def test_fallen_by_bicycle_ranks_prostrate_before_walking(self):
         text = "Find the person fallen on the ground next to the toppled bicycle."
