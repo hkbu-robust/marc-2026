@@ -15,10 +15,13 @@ from marc_agent.perception.stage1_pipeline import (
     IGNORED_CLASS_DUMMY_XYZ,
     _project_selection,
     has_complete_camera_coverage,
+    Stage1CandidateResult,
+    compose_stage1_grounding,
     run_stage1_round,
     start_qwen_warmup,
     static_scene_key,
 )
+from marc_agent.experiment_log import decision_scope
 from marc_agent.perception.object_selection import ObjectSelection
 from marc_agent.command_parser import Intent, Relation, parse_command
 from marc_agent.types import (
@@ -580,7 +583,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("rig_a:tumbler:0", result.target_id)
         self.assertNotEqual(result.grounding.anchor_coord, result.grounding.target_coord)
 
-    def test_scene_inferred_park_anchor_submits_beside(self):
+    def test_scene_inferred_park_anchor_submits_near(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
                 objects=[
@@ -603,7 +606,58 @@ class Stage1RoundTests(unittest.TestCase):
             projector=_geometry(),
         )
         self.assertEqual("picnic_table", result.grounding.landmark)
-        self.assertEqual("beside", result.grounding.relation)
+        self.assertEqual("near", result.grounding.relation)  # unstated: the default
+
+    def test_object_rounds_always_submit_landmark_and_relation(self):
+        """The scorer weighs both on every object round (#113); each path fills them."""
+        table = ObjectCandidate("rig_a:picnic_table:0", "picnic_table", (180, 220, 470, 420),
+                                0.9, "rig_a", (640, 480))
+        bench = ObjectCandidate("rig_b:bench:0", "bench", (100, 300, 250, 400), 0.8,
+                                "rig_b", (640, 480))
+        mug = ObjectCandidate("rig_a:mug:0", "mug", (300, 210, 360, 265), 0.9, "rig_a",
+                              (640, 480))
+        cases = {
+            # command, detections, (landmark, relation), field sources
+            "stated": ("Find the mug on the picnic table.", [mug, table],
+                       ("picnic_table", "on"), ("stated", "stated")),
+            "no landmark named": ("Find the mug.", [mug, table],
+                                  ("picnic_table", "near"), ("inferred", "default")),
+            "landmark only in another camera": ("Find the mug.", [mug, bench],
+                                                ("bench", "near"), ("inferred", "default")),
+            "sentinel (no target detected)": ("Find the mug.", [table],
+                                              ("picnic_table", "near"), ("inferred", "default")),
+        }
+        for name, (command, objects, expected, sources) in cases.items():
+            with self.subTest(name):
+                def detector(client, *, stub_path=None, objects=objects):
+                    return CctvDetectionRound(objects=list(objects), camera_ids=["rig_a", "rig_b"])
+
+                with decision_scope("stage1", 1) as notes:
+                    result = run_stage1_round(
+                        object(), command, detector=detector, projector=_geometry()
+                    )
+                grounding = result.grounding
+                self.assertEqual(expected, (grounding.landmark, grounding.relation))
+                source = [note for note in notes if note["decision"] == "field_source"][-1]
+                self.assertEqual(sources, (source["landmark"], source["relation"]))
+
+    def test_fallthrough_pairs_also_get_the_nearest_implied_anchor(self):
+        text = "Find the tumbler dropped in the empty parking space."
+        size = (640, 480)
+        lost = ObjectCandidate("rig_x:tumbler:0", "tumbler", (300, 300, 320, 330), 0.9, "rig_x", size)
+        target = ObjectCandidate("rig_a:tumbler:0", "tumbler", (300, 300, 320, 330), 0.5, "rig_a", size)
+        far = ObjectCandidate("rig_a:police_car:0", "police_car", (0, 100, 100, 200), 0.9, "rig_a", size)
+        near = ObjectCandidate("rig_a:suv:0", "suv", (330, 280, 420, 340), 0.9, "rig_a", size)
+        detections = CctvDetectionRound(objects=[lost, target, far, near], camera_ids=["rig_a", "rig_x"])
+        candidates = Stage1CandidateResult(
+            text, parse_command(text), detections, None, None, 0.0,
+            # rig_x has no geometry, so composition falls through to rig_a.
+            object_selection=ObjectSelection(target=lost, anchor=None, score=1.0),
+        )
+        result = compose_stage1_grounding(candidates, _geometry())
+        self.assertEqual("rig_a:tumbler:0", result.target_id)
+        self.assertEqual("rig_a:suv:0", result.anchor_id)
+        self.assertEqual("suv", result.grounding.landmark)
 
     def test_sar_without_landmark_does_not_project_nearby_object(self):
         def detector(client, *, stub_path=None):

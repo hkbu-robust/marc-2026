@@ -456,16 +456,14 @@ class CommandFixtureTests(unittest.TestCase):
             ),
         )
 
-    def test_parked_vehicle_landmarks_exclude_taxi(self):
+    def test_any_vehicle_class_may_be_parked(self):
         from marc_agent.command_parser import (
             PARKED_VEHICLE_LANDMARKS,
             VEHICLE_LANDMARKS,
         )
 
-        self.assertIn("taxi", VEHICLE_LANDMARKS)
-        self.assertNotIn("taxi", PARKED_VEHICLE_LANDMARKS)
-        self.assertIn("suv", PARKED_VEHICLE_LANDMARKS)
-        self.assertIn("police_car", PARKED_VEHICLE_LANDMARKS)
+        self.assertEqual(VEHICLE_LANDMARKS, PARKED_VEHICLE_LANDMARKS)
+        self.assertIn("taxi", PARKED_VEHICLE_LANDMARKS)
 
 
 class PlaceCueAndFallenOffTests(unittest.TestCase):

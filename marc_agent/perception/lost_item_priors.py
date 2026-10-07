@@ -232,7 +232,7 @@ def parked_vehicle_count(
     camera_id: str,
     objects: Iterable[ObjectCandidate] = (),
 ) -> int:
-    """Parked cars visible on one camera. Taxis count as road, not lot evidence."""
+    """Vehicles visible on one camera, as evidence of a parking lot."""
     return sum(
         1
         for item in objects

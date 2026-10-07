@@ -120,7 +120,7 @@ class LostItemPriorsTests(unittest.TestCase):
         self.assertTrue(stall_is_empty(vacant, [person], [car, adjacent]))
         self.assertTrue(stall_is_empty(vacant, [], [adjacent]))
 
-    def test_parked_vehicle_count_ignores_taxi(self):
+    def test_parked_vehicle_count_counts_every_vehicle_class(self):
         cars = [
             ObjectCandidate(
                 "cam:suv:0", "suv", (10.0, 10.0, 80.0, 80.0), 0.9, "cam", (640, 480)
@@ -132,7 +132,7 @@ class LostItemPriorsTests(unittest.TestCase):
                 "other:suv:0", "suv", (10.0, 10.0, 80.0, 80.0), 0.9, "other", (640, 480)
             ),
         ]
-        self.assertEqual(1, parked_vehicle_count("cam", cars))
+        self.assertEqual(2, parked_vehicle_count("cam", cars))  # a taxi can be parked too
         self.assertEqual(0, parked_vehicle_count("empty", cars))
 
 
