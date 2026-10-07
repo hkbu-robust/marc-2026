@@ -31,6 +31,7 @@ DEFAULT_PATH = Path(__file__).resolve().parent / "data" / "ground_model.npz"
 NEIGHBOURS = 12
 DISTANCE_SOFTENING_M = 0.3
 ABOVE_GROUND_M = 0.25  # a neighbour this far above the local median is on furniture
+MAX_EXTRAPOLATION_M = 2.0  # farther than this from every ground point: no estimate
 FINGERPRINT_TRANSLATION_M = 0.01
 FINGERPRINT_ROTATION_DEG = 0.1
 FINGERPRINT_GROUND_M = 0.01
@@ -42,8 +43,11 @@ class GroundSurface:
 
     points: np.ndarray  # (N, 3) world xyz
 
-    def z(self, x: float, y: float) -> float:
+    def z(self, x: float, y: float) -> Optional[float]:
+        """Ground height at (x, y); None outside the calibrated area."""
         dist = np.hypot(self.points[:, 0] - x, self.points[:, 1] - y)
+        if float(dist.min()) > MAX_EXTRAPOLATION_M:
+            return None
         k = min(NEIGHBOURS, len(dist))
         nearest = np.argpartition(dist, k - 1)[:k]
         heights = self.points[nearest, 2]

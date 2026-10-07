@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from marc_agent.command_parser import MISSION_OBJECT_TYPES
-from marc_agent.perception.ground_model import DEFAULT_PATH, GroundSurface
+from marc_agent.perception.ground_model import DEFAULT_PATH, CameraFingerprint, GroundSurface
 from scripts.stage1_replay import DEFAULT_GEOMETRY
 
 GT_POSITION_TOLERANCE_M = 1e-3
@@ -50,6 +50,24 @@ def ground_points(files: list[str]) -> tuple[dict[str, np.ndarray], dict[str, di
     return {camera: np.asarray(xyz, dtype=float) for camera, xyz in points.items()}, cameras
 
 
+def _gt_geometry(camera: dict):
+    """A GT camera block in the runtime's convention: world-from-camera rotation
+    Rx(roll) Ry(pitch) Rz(yaw) in USD axes, then USD -> optical (diag(1, -1, -1))."""
+    import math
+    from types import SimpleNamespace
+
+    def rot(axis, degrees):
+        c, s = math.cos(math.radians(degrees)), math.sin(math.radians(degrees))
+        return {"x": np.array([[1, 0, 0], [0, c, -s], [0, s, c]]),
+                "y": np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]),
+                "z": np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])}[axis]
+
+    euler = camera["orientation_euler_deg"]
+    rotation = rot("x", euler["roll"]) @ rot("y", euler["pitch"]) @ rot("z", euler["yaw"])
+    return SimpleNamespace(rotation=rotation @ np.diag([1.0, -1.0, -1.0]),
+                           translation=camera["position"], ground_height=camera["ground_height"])
+
+
 def build(gt_files: list[str], geometry_path: Path, out: Path) -> dict:
     points, gt_cameras = ground_points(gt_files)
     geometry = json.loads(geometry_path.read_text(encoding="utf-8"))["geometry"]
@@ -60,6 +78,10 @@ def build(gt_files: list[str], geometry_path: Path, out: Path) -> dict:
         gap = np.linalg.norm(np.asarray(gt["position"]) - np.asarray(live["translation"]))
         if gap > GT_POSITION_TOLERANCE_M or abs(gt["ground_height"] - live["ground_height"]) > GT_POSITION_TOLERANCE_M:
             raise SystemExit(f"{camera}: GT camera block differs from {geometry_path}")
+        fingerprint = CameraFingerprint(np.asarray(live["rotation"]), np.asarray(live["translation"]),
+                                        float(live["ground_height"]))
+        if fingerprint.mismatch(_gt_geometry(gt)) is not None:
+            raise SystemExit(f"{camera}: GT camera orientation differs from {geometry_path}")
         arrays[f"{camera}/points"] = points[camera].astype(np.float32)
         arrays[f"{camera}/rotation"] = np.asarray(live["rotation"], dtype=float)
         arrays[f"{camera}/translation"] = np.asarray(live["translation"], dtype=float)
@@ -94,7 +116,11 @@ def check(model_points: dict[str, np.ndarray], files: list[str]) -> list[str]:
         flat = float(cameras[camera]["ground_height"])
         pts = pts[np.abs(pts[:, 2] - flat) < 1.0]
         flat_err = np.abs(pts[:, 2] - flat)
-        surf_err = np.abs(pts[:, 2] - np.array([surface.z(x, y) for x, y, _ in pts]))
+        heights = np.array([surface.z(x, y) for x, y, _ in pts], dtype=object)
+        inside = np.array([h is not None for h in heights])
+        pts, heights = pts[inside], heights[inside].astype(float)
+        flat_err = np.abs(pts[:, 2] - flat)
+        surf_err = np.abs(pts[:, 2] - heights)
         lines.append(
             f"| {camera} | {len(pts)} | {np.median(flat_err):.3f} | {np.median(surf_err):.3f} "
             f"| {np.percentile(flat_err, 90):.3f} | {np.percentile(surf_err, 90):.3f} |"

@@ -66,6 +66,8 @@ def samples(files: list[str], ground: GroundModel, geometry: dict) -> dict[str, 
                 continue
             x, y, z = det["world_xyz"]
             ground_z = surface.z(x, y)
+            if ground_z is None:
+                continue
             pixel = to_pixel(geometry[camera], (x, y, ground_z))
             if pixel is None:
                 continue
