@@ -39,7 +39,6 @@ from marc_agent.types import (
 log = logging.getLogger("marc_agent.cctv_yolo")
 
 REFINE_CONF = 0.05
-OBJECT_REFINE_CONF = 0.005
 CROP_PAD_FRAC = 0.15
 OBJECT_CROP_PAD_FRAC = 1.0
 REFINE_DEDUP_IOU = 0.45
@@ -444,37 +443,6 @@ class CctvYoloDetector:
                 )
             )
             occupied[camera_id].append(mapped)
-        if target_type in {"umbrella", "pencilcase"}:
-            landmarks = self._landmarks_for_refine(objects, landmark_classes)
-            missing = [
-                item for item in landmarks if item.camera_id not in occupied
-            ]
-            if len(missing) == 1:
-                # ponytail: a uniquely occluded tiny target uses its landmark as
-                # a projection proxy; replace if invisible-target data becomes available.
-                landmark = missing[0]
-                key = (landmark.camera_id, target_type)
-                proxy = ObjectCandidate(
-                    candidate_id=object_candidate_id(
-                        landmark.camera_id, target_type, counts[key]
-                    ),
-                    class_name=target_type,
-                    bbox_xyxy=landmark.bbox_xyxy,
-                    confidence=OBJECT_REFINE_CONF / 2.0,
-                    camera_id=landmark.camera_id,
-                    image_size=landmark.image_size,
-                    source="landmark_context",
-                )
-                extra.append(proxy)
-                log.info(
-                    "[cctv-yolo] unique-occlusion proxy target=%s landmark=%s",
-                    proxy.candidate_id,
-                    landmark.candidate_id,
-                )
-                note_decision(
-                    "proxy_created", variant="landmark_context",
-                    candidate=proxy.candidate_id, landmark=landmark.candidate_id,
-                )
         return extra
 
     def refine_zoomed(

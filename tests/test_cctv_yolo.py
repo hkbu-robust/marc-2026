@@ -347,7 +347,8 @@ class CctvYoloTests(unittest.TestCase):
             self.assertEqual(0.05, call.kwargs["confidence"])
             self.assertEqual(960, call.kwargs["imgsz"])
 
-    def test_unique_missing_tiny_target_uses_landmark_occlusion_proxy(self):
+    def test_a_landmark_without_a_target_detection_gets_no_fabricated_target(self):
+        """#116: the landmark-context proxy (a target box := the landmark box) is gone."""
         detector = CctvYoloDetector.__new__(CctvYoloDetector)
         detector.contract = RuntimeContract.load()
         detector.model = object()
@@ -373,9 +374,7 @@ class CctvYoloTests(unittest.TestCase):
             frames, objects, "umbrella", frozenset({"trash_can"})
         )
 
-        self.assertEqual(1, len(extra))
-        self.assertEqual("cam_b:umbrella:0", extra[0].candidate_id)
-        self.assertEqual(objects[2].bbox_xyxy, extra[0].bbox_xyxy)
+        self.assertEqual([], extra)
 
     def test_object_refine_runs_when_another_camera_already_has_target(self):
         parsed = parse_command("Find the tumbler on the bench.")

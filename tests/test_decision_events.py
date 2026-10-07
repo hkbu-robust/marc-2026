@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import marc_agent.experiment_log as experiment_log
-from marc_agent.command_parser import parse_command
+from marc_agent.command_parser import Relation, parse_command
 from marc_agent.experiment_log import decision_scope, note_decision, start_experiment
 from marc_agent.perception.cctv_project import CctvProjector, static_lookup
 from marc_agent.perception.cctv_yolo import RuntimeContract, refine_detection_round
@@ -329,8 +329,11 @@ class QwenAvailabilityTests(unittest.TestCase):
         _only(notes, "scene_description_failed", error="ConnectionError")
 
 
-class ProxyTests(unittest.TestCase):
-    def test_landmark_context_proxy_is_recorded(self):
+class NoProxyTests(unittest.TestCase):
+    """#116: the shapes that used to trigger a proxy now record none and project the
+    target's own box (the proxy chain is deleted, not flagged)."""
+
+    def test_no_landmark_context_proxy(self):
         from marc_agent.perception.cctv_yolo import CctvYoloDetector, RuntimeContract
         import numpy as np
         from marc_agent.types import CctvFrame
@@ -353,13 +356,12 @@ class ProxyTests(unittest.TestCase):
                 ("cam_b:trash_can:0", "trash_can", (300, 100, 380, 300), "cam_b"),
             )
         ]
-        _, notes = _notes(
+        extra, notes = _notes(
             detector.refine_around_landmarks,
             frames, objects, "umbrella", frozenset({"trash_can"}),
         )
-        note = _only(notes, "proxy_created", variant="landmark_context")
-        self.assertEqual("cam_b:umbrella:0", note["candidate"])
-        self.assertEqual("cam_b:trash_can:0", note["landmark"])
+        self.assertEqual([], extra)
+        self.assertFalse([n for n in notes if n["decision"] == "proxy_created"])
 
     def test_refine_additions_are_recorded(self):
         parsed = parse_command("Find the tumbler on the bench.")
@@ -395,7 +397,7 @@ class ProxyTests(unittest.TestCase):
         self.assertIn("ms", note)
         self.assertEqual([tiled, missed], refined.objects[1:])
 
-    def test_hidden_umbrella_proxy_is_recorded(self):
+    def test_no_hidden_umbrella_swap(self):
         target = ObjectCandidate(
             "rig_a:umbrella:0", "umbrella", (10, 10, 20, 20), 0.019, "rig_a", (1280, 720),
         )
@@ -404,15 +406,16 @@ class ProxyTests(unittest.TestCase):
         )
         projector = Mock()
         projector.project_contact.return_value = (0.0, 0.0, 0.0)
+        projector.project_landmark.return_value = (0.0, 0.0, 0.0)
         _, notes = _notes(
             _project_selection, projector,
             parse_command("Find the umbrella next to the trash can."),
-            ObjectSelection(target, anchor, 1.0), [target, anchor],
+            ObjectSelection(target, anchor, 1.0),
         )
-        note = _only(notes, "projection_proxy", variant="hidden_umbrella")
-        self.assertEqual("rig_a:trash_can:0", note["proxy"])
+        self.assertFalse([n for n in notes if n["decision"] == "projection_proxy"])
+        self.assertEqual(target.bbox_xyxy, projector.project_contact.call_args.args[1])
 
-    def test_clipped_target_proxy_is_recorded(self):
+    def test_no_clipped_target_swap(self):
         round_ = CctvDetectionRound(
             objects=[
                 ObjectCandidate("rig_a:pencilcase:0", "pencilcase",
@@ -424,14 +427,14 @@ class ProxyTests(unittest.TestCase):
             ],
             camera_ids=["rig_a"],
         )
-        _, notes = _notes(
+        result, notes = _notes(
             run_stage1_round, object(), "Find the pencil case near the picnic table.",
             detector=_fixed(round_), projector=_geometry(),
         )
-        note = _only(notes, "projection_proxy", variant="clipped_target")
-        self.assertEqual("rig_a:trash_can:0", note["proxy"])
+        self.assertFalse([n for n in notes if n["decision"] == "projection_proxy"])
+        self._assert_own_box(result, round_)
 
-    def test_occluded_target_proxy_is_recorded(self):
+    def test_no_occluded_target_swap(self):
         round_ = CctvDetectionRound(
             objects=[
                 ObjectCandidate("rig_a:umbrella:0", "umbrella",
@@ -443,12 +446,23 @@ class ProxyTests(unittest.TestCase):
             ],
             camera_ids=["rig_a"],
         )
-        _, notes = _notes(
+        result, notes = _notes(
             run_stage1_round, object(), "Find the umbrella near the taxi.",
             detector=_fixed(round_), projector=_geometry(),
         )
-        note = _only(notes, "projection_proxy", variant="occluded_target")
-        self.assertEqual("rig_a:kick_scooter:0", note["proxy"])
+        self.assertFalse([n for n in notes if n["decision"] == "projection_proxy"])
+        self._assert_own_box(result, round_)
+
+    def _assert_own_box(self, result, round_):
+        """The submitted target is the selected candidate's own box, projected."""
+        by_id = {item.candidate_id: item for item in round_.objects}
+        target, anchor = by_id[result.target_id], by_id[result.anchor_id]
+        expected, _ = _project_pair(
+            _geometry(), target.camera_id, target.bbox_xyxy, anchor.bbox_xyxy,
+            relation=Relation.NEAR, support_class=anchor.class_name,
+            anchor_image_size=anchor.image_size,
+        )
+        self.assertEqual(list(expected), list(result.grounding.target_coord))
 
 
 class ProjectionTests(unittest.TestCase):

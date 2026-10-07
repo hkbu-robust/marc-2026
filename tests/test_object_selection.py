@@ -1669,7 +1669,8 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual("cam_a:tumbler:0", selected.target.candidate_id)
         self.assertEqual("strict", selected.match)
 
-    def test_reserved_occlusion_proxy_beats_false_visible_target(self):
+    def test_a_very_low_confidence_target_no_longer_overrides_qwen(self):
+        """#116: the <=0.003 forcing and the low-confidence guard are gone."""
         text = "Find the umbrella near the trash can."
         parsed = parse_command(text)
         round_ = CctvDetectionRound(
@@ -1687,9 +1688,11 @@ class ObjectSelectionTests(unittest.TestCase):
             command_text=text,
             verifier=lambda _board: "cam_bad:umbrella:0|cam_bad:trash_can:0",
         )
-        self.assertEqual("cam_good:umbrella:0", selected.target.candidate_id)
+        self.assertEqual("cam_bad:umbrella:0", selected.target.candidate_id)
+        self.assertNotEqual("geometry_override", selected.method)
 
-    def test_tiny_umbrella_contained_by_trash_beats_visible_false_positive(self):
+    def test_a_tiny_target_inside_its_landmark_no_longer_overrides_qwen(self):
+        """#116: the class-pair contained-occlusion guard is gone."""
         text = "Find the umbrella near the trash can."
         parsed = parse_command(text)
         round_ = CctvDetectionRound(
@@ -1707,7 +1710,7 @@ class ObjectSelectionTests(unittest.TestCase):
             command_text=text,
             verifier=lambda _board: "cam_bad:umbrella:0|cam_bad:trash_can:0",
         )
-        self.assertEqual("cam_good:umbrella:0", selected.target.candidate_id)
+        self.assertEqual("cam_bad:umbrella:0", selected.target.candidate_id)
 
     def test_remote_verifier_can_choose_alternate_implicit_anchor(self):
         text = "Pick up the tumbler dropped on the parking lot floor."
