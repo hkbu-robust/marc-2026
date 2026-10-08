@@ -222,8 +222,12 @@ def to_parsed(
         # as behind (dev: "I left my pencil case behind; please find it.").
         fixes.append("behind_idiom")
         relation = None
-    if relation is not None and target == PERSON:
-        fixes.append("relation_on_person")  # person commands carry no relation (SAR)
+    if (
+        relation is not None
+        and target == PERSON
+        and os.environ.get("MARC_PERSON_RELATION", "1").strip().lower() in {"0", "false", "no", "off"}
+    ):
+        fixes.append("relation_on_person")
         relation = None
     if relation is not None and landmark is None:
         fixes.append("relation_without_landmark")

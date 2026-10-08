@@ -6,6 +6,7 @@ Callers and tests use :func:`parse_command`; normalization and phrase rules stay
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 import unicodedata
@@ -72,13 +73,13 @@ class ParsedCommand:
 
 _OBJECT_ALIASES = {
     "master_chef_can": ("master chef can", "master chef cans", "chef can", "chef cans"),
-    "cracker_box": ("cracker box", "cracker boxes"),
-    "mug": ("mug", "mugs", "coffee mug", "coffee mugs"),
+    "cracker_box": ("cracker box", "cracker boxes", "box of crackers", "boxes of crackers"),
+    "mug": ("mug", "mugs", "coffee mug", "coffee mugs", "coffee cup", "coffee cups"),
     "wood_block": ("wood block", "wood blocks", "wooden block", "wooden blocks"),
     "cola_can": ("cola can", "cola cans", "soda can", "soda cans", "coke can", "coke cans"),
     "disposable_cup": ("disposable cup", "disposable cups", "paper cup", "paper cups"),
     "juice": ("juice", "juices", "juice box", "juice boxes"),
-    "tissue": ("tissue", "tissues", "tissue pack"),
+    "tissue": ("tissue", "tissues", "tissue pack", "kleenex"),
     "pencilcase": ("pencilcase", "pencilcases", "pencil case", "pencil cases"),
     "tumbler": ("tumbler", "tumblers", "travel tumbler", "travel tumblers"),
     "long_umbrella": ("long umbrella", "long umbrellas"),
@@ -172,7 +173,8 @@ _BRING_RE = re.compile(rf"\b(?:{_BRING_PATTERN})\b")
 _ACTION_RE = re.compile(rf"\b(?:{_FIND_PATTERN}|{_BRING_PATTERN})\b")
 
 _RELATION_PHRASES: tuple[tuple[Relation, str], ...] = (
-    (Relation.FRONT, r"(?:in\s+)?front\s+of"),
+    (Relation.FRONT, r"(?:in\s+)?front\s+of|across\s+from"),
+    (Relation.ON, r"under(?:neath)?|beneath"),
     (Relation.LEFT, r"(?:on|to)\s+the\s+left\s+(?:side\s+)?of"),
     (Relation.RIGHT, r"(?:on|to)\s+the\s+right\s+(?:side\s+)?of"),
     (Relation.ABOVE, r"above"),
@@ -1059,10 +1061,18 @@ def parse_command(
     cues = _place_cues(landmarks, landmark)
 
     if is_sar:
+        relation = None
+        if os.environ.get("MARC_PERSON_RELATION", "1").strip().lower() not in {
+            "0", "false", "no", "off",
+        }:
+            stated = _relation_candidates(evidence_scope, landmarks, landmark)
+            if len(stated) == 1:
+                relation = next(iter(stated))
         return ParsedCommand(
             intent=intent,
             target_type="person",
             landmark=landmark,
+            relation=relation,
             situation=_stated_situation(evidence_scope),
             scene_hint=hint,
             place_cues=cues,

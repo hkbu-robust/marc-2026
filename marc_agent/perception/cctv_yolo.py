@@ -14,6 +14,7 @@ from typing import Optional
 import numpy as np
 
 from marc_agent.experiment_log import note_decision
+from marc_agent.round_clock import qwen_budget
 from marc_agent.command_parser import (
     MISSION_OBJECT_TYPES,
     PARKED_VEHICLE_LANDMARKS,
@@ -707,10 +708,17 @@ def detector_can_emit(class_name: str) -> bool:
     return name in contract.ordered_classes
 
 
-def refine_detection_round(parsed, round_: CctvDetectionRound) -> CctvDetectionRound:
+def refine_detection_round(parsed, round_: CctvDetectionRound, clock=None) -> CctvDetectionRound:
     """Add missing trained-class boxes from landmark crops. No-op without a live detector."""
     if parsed is None:
         return round_
+    if clock is not None:
+        budget = qwen_budget(clock, time.monotonic())
+        if budget.skip:
+            note_decision(
+                "refine_skipped", reason="time_budget", remaining_s=budget.remaining,
+            )
+            return round_
     global _detector
     if _detector is None:
         return round_

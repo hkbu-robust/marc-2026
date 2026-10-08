@@ -15,7 +15,7 @@ from unittest import mock
 
 from marc_agent.perception.stage1_pipeline import project_anchor
 from scripts.stage1_replay import main, projector_for, replay_cases, replay_run
-from scripts.stage1_runs import read_run, score
+from scripts.stage1_runs import read_run, score, target_credit
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "stage1_replay" / "run-01"
 FROZEN_FLAGS = {"MARC_GROUND_CALIBRATION": "0", "MARC_LANDMARK_FOOTPRINT": "0"}
@@ -68,8 +68,20 @@ class ReplayTests(unittest.TestCase):
         far = {**round_.detail["submission"], "target_coord": [expected[0] + 3.0, *expected[1:]]}
         self.assertEqual(score(round_, near).components["target"], 1.0)
         self.assertTrue(score(round_, near).target_uncertain)
-        self.assertEqual(score(round_, far).components["target"], 0.0)
+        # 3 m is inside the miss radius and outside the acquire radius: linear partial credit.
+        self.assertAlmostEqual(score(round_, far).components["target"], 2.0 / 3.0, places=6)
         self.assertFalse(math.isclose(score(round_, far).total, round_.detail["total"]))
+
+    def test_a_point_nearer_a_distractor_than_the_target_scores_zero(self):
+        gt = (0.0, 0.0, 0.0)
+        distractor = (1.0, 0.0, 0.0)
+        self.assertEqual(target_credit((0.2, 0.0, 0.0), gt, [distractor]), 1.0)
+        self.assertEqual(target_credit((0.6, 0.0, 0.0), gt, [distractor]), 0.0)
+        near_distractor = (0.9, 0.0, 0.0)
+        self.assertEqual(target_credit((0.4, 0.0, 0.0), gt, [near_distractor]), 1.0)
+        self.assertEqual(
+            target_credit((0.4, 0.0, 0.0), gt, [near_distractor], margin=0.15), 0.0
+        )
 
     def test_a_round_without_a_parse_keeps_its_logged_score(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -230,6 +230,53 @@ def _flag_on(name: str) -> bool:
     return os.environ.get(name, "1") != "0"
 
 
+def pair_likelihood_enabled() -> bool:
+    """Bounded pair score. Off until a parsed-relation replay shows a gain."""
+    return os.environ.get("MARC_PAIR_LIKELIHOOD", "0").strip().lower() not in {
+        "", "0", "false", "no", "off",
+    }
+
+
+_NEAR_DECAY_M = 2.0
+_DIRECTION_DECAY_M = 3.0
+
+
+def directional_likelihood(
+    target_xyz: tuple[float, float, float],
+    anchor_xyz: tuple[float, float, float],
+    geometry: CameraGeometry,
+    relation: Relation,
+) -> Optional[float]:
+    """cos(offset, camera axis) − d/3, and None when the offset faces the other way."""
+    delta = (
+        target_xyz[0] - anchor_xyz[0],
+        target_xyz[1] - anchor_xyz[1],
+        target_xyz[2] - anchor_xyz[2],
+    )
+    length = math.sqrt(delta[0] ** 2 + delta[1] ** 2 + delta[2] ** 2)
+    if length < 1e-6:
+        return None
+    right = _column(geometry.rotation, 0)
+    forward = _column(geometry.rotation, 2)
+    if relation is Relation.LEFT:
+        axis = tuple(-value for value in right)
+    elif relation is Relation.RIGHT:
+        axis = right
+    elif relation is Relation.FRONT:
+        axis = tuple(-value for value in forward)
+    elif relation is Relation.BEHIND:
+        axis = forward
+    else:
+        return None
+    axis_len = math.sqrt(sum(value * value for value in axis))
+    if axis_len < 1e-6:
+        return None
+    cosine = sum(delta[i] * axis[i] for i in range(3)) / (length * axis_len)
+    if cosine <= 0.0:
+        return None
+    return cosine - length / _DIRECTION_DECAY_M
+
+
 def intersect_ray_surface(
     geometry: CameraGeometry,
     u: float,
@@ -415,8 +462,13 @@ def pair_alignment_score(
     if anchor_xyz is None:
         return None
     if rel in {"left", "right", "front", "behind"} and isinstance(relation, Relation):
+        if pair_likelihood_enabled():
+            return directional_likelihood(target_xyz, anchor_xyz, geometry, relation)
         return world_relation_score(target_xyz, anchor_xyz, geometry, relation)
-    return 1.0 / (1.0 + _xy_dist(target_xyz, anchor_xyz))
+    dist = _xy_dist(target_xyz, anchor_xyz)
+    if pair_likelihood_enabled() and rel in {"near", "beside", None}:
+        return -dist / _NEAR_DECAY_M
+    return 1.0 / (1.0 + dist)
 
 
 def static_lookup(geometry_by_camera: dict[str, CameraGeometry]) -> GeometryLookup:
@@ -595,11 +647,17 @@ class CctvProjector:
         return xyz
 
 
+_ROBOT_FRAME_TOKENS = ("car_base_link", "odom", "base_link")
+
+
 def _keep_cctv_transform(transform) -> bool:
-    """Drop robot odom (car_base_link) so tf2 never logs TF_OLD_DATA on CCTV lookup."""
+    """Keep discovered camera frames and drop robot odom, which makes tf2 log TF_OLD_DATA."""
     parent = (getattr(getattr(transform, "header", None), "frame_id", None) or "").lstrip("/")
     child = (getattr(transform, "child_frame_id", None) or "").lstrip("/")
-    return parent.startswith("rig_") or child.startswith("rig_")
+    blob = f"{parent} {child}"
+    if any(token in blob for token in _ROBOT_FRAME_TOKENS):
+        return False
+    return bool(parent or child)
 
 
 def _start_tf_listener(client):

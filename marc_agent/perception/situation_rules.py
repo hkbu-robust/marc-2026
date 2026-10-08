@@ -3,8 +3,8 @@
 The submitted GroundingResult.situation comes from this matrix applied to the selected
 person's detected pose, with the anchor's class as support (#114,
 ``stage1_pipeline.submitted_situation``); the text's situation is only a fallback.
-Unknown support uses the pose fallback below, then ``abnormal`` — never invent
-``emergency`` without a known road/parking, non-mount, or fallen-vehicle support.
+Unknown support uses the pose fallback from the organisers' people_poses.yaml
+(bending is emergency, reclining is normal), then ``normal``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Optional
 
 RULES_VERSION = "2026.1"
 SITUATIONS = ("normal", "abnormal", "emergency", "accident")
-DEFAULT_SITUATION = "abnormal"
+DEFAULT_SITUATION = "normal"
 
 POSE_GROUPS = {
     "upright": frozenset({"person_walking", "person_walking_away", "person_reaching"}),
@@ -24,49 +24,47 @@ POSE_GROUPS = {
 
 SUPPORT_CLASSES = {
     "seating": frozenset({"bench", "picnic_table", "chair"}),
-    "grass_lawn": frozenset({"grass", "lawn", "park"}),
-    "road_parking": frozenset({
+    "rest_ground": frozenset({"grass", "lawn"}),
+    "transit": frozenset({
         "walkway", "sidewalk", "road", "parking", "parking_space",
     }),
     "non_mount": frozenset({
         "trash_can", "vending_machine", "postbox", "hydrant", "car",
-        "police_car", "normal_car_1", "normal_car_2",
-        "sports_car", "sports_car_2", "suv", "taxi",
     }),
-    "fallen_vehicle": frozenset({"bicycle", "kick_scooter"}),
+    "vehicle_fallen": frozenset({"bicycle", "kick_scooter"}),
 }
 
 # (pose_group, support_class) -> situation. person_prone is applied first.
 SITUATION_MATRIX = {
     ("upright", "seating"): "abnormal",
-    ("upright", "grass_lawn"): "normal",
-    ("upright", "road_parking"): "normal",
+    ("upright", "rest_ground"): "normal",
+    ("upright", "transit"): "normal",
     ("upright", "non_mount"): "abnormal",
-    ("upright", "fallen_vehicle"): "abnormal",
+    ("upright", "vehicle_fallen"): "abnormal",
     ("seated", "seating"): "normal",
-    ("seated", "grass_lawn"): "normal",
-    ("seated", "road_parking"): "abnormal",
+    ("seated", "rest_ground"): "normal",
+    ("seated", "transit"): "abnormal",
     ("seated", "non_mount"): "abnormal",
-    ("seated", "fallen_vehicle"): "abnormal",
+    ("seated", "vehicle_fallen"): "abnormal",
     ("low", "seating"): "abnormal",
-    ("low", "grass_lawn"): "abnormal",
-    ("low", "road_parking"): "abnormal",
+    ("low", "rest_ground"): "abnormal",
+    ("low", "transit"): "abnormal",
     ("low", "non_mount"): "abnormal",
-    ("low", "fallen_vehicle"): "abnormal",
+    ("low", "vehicle_fallen"): "abnormal",
     ("prostrate", "seating"): "abnormal",
-    ("prostrate", "grass_lawn"): "normal",
-    ("prostrate", "road_parking"): "emergency",
+    ("prostrate", "rest_ground"): "normal",
+    ("prostrate", "transit"): "emergency",
     ("prostrate", "non_mount"): "emergency",
-    ("prostrate", "fallen_vehicle"): "emergency",
+    ("prostrate", "vehicle_fallen"): "emergency",
 }
 
 # Pose-only fallback when support/surface is unknown. Does not invent emergency.
 POSE_FALLBACK = {
     "person_prone": "accident",
     "person_lying_down": "abnormal",
-    "person_bending": "abnormal",
+    "person_bending": "emergency",
     "person_crouching": "abnormal",
-    "person_reclining": "abnormal",
+    "person_reclining": "normal",
     "person_sitting": "normal",
     "person_reaching": "normal",
     "person_walking": "normal",

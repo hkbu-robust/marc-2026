@@ -68,7 +68,6 @@ class CommandFixtureTests(unittest.TestCase):
                 result = parse_command(case["text"], expected_intent=expected_intent)
                 _assert_parsed(self, result, case["expected"])
                 if result.target_type == "person":
-                    self.assertIsNone(result.relation)
                     if case["expected"].get("situation") is not None:
                         self.assertIsNotNone(result.situation)
                 else:
@@ -474,6 +473,23 @@ class PlaceCueAndFallenOffTests(unittest.TestCase):
         )
         self.assertEqual("bench", result.landmark)
         self.assertEqual(("taxi",), result.place_cues)
+        self.assertEqual(Relation.ON, result.relation)
+
+    def test_a_person_command_keeps_the_stated_relation(self):
+        result = parse_command("Find the person lying on the bench.")
+        self.assertEqual("person", result.target_type)
+        self.assertEqual("bench", result.landmark)
+        self.assertEqual(Relation.ON, result.relation)
+
+    def test_paraphrase_fixture(self):
+        import json
+        path = os.path.join(os.path.dirname(__file__), "fixtures", "parser_paraphrases.json")
+        cases = json.loads(open(path, encoding="utf-8").read())
+        for case in cases:
+            result = parse_command(case["text"])
+            self.assertEqual(case["target_type"], result.target_type, case["text"])
+            self.assertEqual(case["landmark"], result.landmark, case["text"])
+            self.assertEqual(case["relation"], result.relation.value if result.relation else None, case["text"])
 
     def test_fallen_off_attaches_the_support(self):
         result = parse_command("Find the person who fell off the bench.")

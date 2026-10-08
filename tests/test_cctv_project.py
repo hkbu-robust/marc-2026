@@ -18,6 +18,7 @@ from marc_agent.perception.cctv_project import (
     _start_tf_listener,
     contact_pixel,
     k_from_camera_info,
+    directional_likelihood,
     pair_alignment_score,
     project_pixel,
     raised_plane_z,
@@ -171,6 +172,14 @@ class CctvProjectTests(unittest.TestCase):
         )
         self.assertGreater(close, far)
 
+    def test_directional_likelihood_prefers_the_near_instance(self):
+        geometry = _looking_along_z()
+        anchor = (0.0, 0.0, 5.0)
+        near = directional_likelihood((1.0, 0.0, 5.0), anchor, geometry, Relation.RIGHT)
+        far = directional_likelihood((4.0, 0.0, 5.0), anchor, geometry, Relation.RIGHT)
+        self.assertGreater(near, far)
+        self.assertIsNone(directional_likelihood((-1.0, 0.0, 5.0), anchor, geometry, Relation.RIGHT))
+
     def test_on_submit_snaps_xy_into_support_footprint(self):
         projector = CctvProjector(static_lookup({"cam": _looking_along_z()}))
         support = (200.0, 240.0, 440.0, 400.0)
@@ -300,6 +309,7 @@ class CctvProjectTests(unittest.TestCase):
 
         self.assertTrue(_keep_cctv_transform(Transform("world", "rig_1_a")))
         self.assertTrue(_keep_cctv_transform(Transform("rig_1", "rig_1_a")))
+        self.assertTrue(_keep_cctv_transform(Transform("world", "cam_7")))
         self.assertFalse(_keep_cctv_transform(Transform("odom", "car_base_link")))
 
     def test_start_tf_listener_subscribes_static_and_live_without_transform_listener(self):

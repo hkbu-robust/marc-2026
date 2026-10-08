@@ -185,8 +185,36 @@ def _relation_compatible(
     return True
 
 
+def _env_enabled(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def class_first_enabled() -> bool:
+    return _env_enabled("MARC_CLASS_FIRST")
+
+
+def cross_class_guard_enabled() -> bool:
+    return _env_enabled("MARC_CROSS_CLASS_GUARD")
+
+
 def _target_classes(parsed: ParsedCommand) -> frozenset[str]:
     return frozenset({parsed.target_type})
+
+
+def _named_class_pool(
+    parsed: ParsedCommand, targets: list[ObjectCandidate]
+) -> list[ObjectCandidate]:
+    """Rank the class the command names whenever one box of that class exists."""
+    if not class_first_enabled() or parsed.target_type in {"", "person", "unknown"}:
+        return targets
+    named = [item for item in targets if item.class_name == parsed.target_type]
+    if not named or len(named) == len(targets):
+        return targets
+    note_decision(
+        "class_first", target_type=parsed.target_type,
+        kept=len(named), dropped=len(targets) - len(named),
+    )
+    return named
 
 
 def _target_candidates(
@@ -588,8 +616,9 @@ def rank_object_candidates(
         if not visual_proposals or (parsed.scene_hint and not parsed.landmark)
         else round_
     )
-    targets = _target_candidates(
-        parsed, gated.objects, visual_proposals=visual_proposals
+    targets = _named_class_pool(
+        parsed,
+        _target_candidates(parsed, gated.objects, visual_proposals=visual_proposals),
     )
     if not targets:
         return ()
@@ -1239,6 +1268,16 @@ def _select_object_candidate(
     )
     if not ranked:
         return None
+    if cross_class_guard_enabled():
+        named = tuple(
+            item for item in ranked if item.target.class_name == parsed.target_type
+        )
+        if named and len(named) != len(ranked):
+            note_decision(
+                "cross_class_guard", target_type=parsed.target_type,
+                kept=len(named), dropped=len(ranked) - len(named),
+            )
+            ranked = named
     geometry = ranked[0]
     remote = str(getattr(verifier, "method", "qwen")) == "qwen_remote"
     parking_geometry = parsed.scene_hint == "parking_space" and remote
@@ -1393,6 +1432,18 @@ def _select_object_candidate(
             log.info(
                 "[vlm] support geometry guard selected=%s",
                 selected.target.candidate_id,
+            )
+        elif (
+            cross_class_guard_enabled()
+            and selected.target.class_name != parsed.target_type
+            and geometry.target.class_name == parsed.target_type
+        ):
+            guard = "cross_class_guard"
+            selected = geometry
+            log.info(
+                "[vlm] cross-class guard selected=%s qwen=%s",
+                selected.target.candidate_id,
+                qwen_pick.target.candidate_id,
             )
         elif (
             selected.target.confidence < 0.15

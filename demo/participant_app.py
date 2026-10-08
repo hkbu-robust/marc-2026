@@ -29,6 +29,7 @@ from marc_agent.command_parser import Intent
 from marc_agent.experiment_log import (
     current_experiment,
     decision_scope,
+    note_decision,
     start_experiment,
 )
 from marc_agent.navigation_runtime import NavStatus, Stage2Navigator
@@ -176,8 +177,14 @@ class DemoParticipant:
                 if self._stage1_submitted_round == mission.round:
                     return
                 try:
-                    seq = self.client.submit_grounding(
-                        fallback_grounding(mission.voice_command, self._last_detections))
+                    seq = self._submit_stage1(
+                        fallback_grounding(
+                            mission.voice_command, self._last_detections, self._stage1_projector,
+                        ),
+                        mission,
+                    )
+                    if seq is None:
+                        return
                     self._stage1_submitted_round = mission.round
                     self._experiment.event(
                         "stage1.submission.completed", stage="stage1", round=mission.round,
@@ -230,8 +237,12 @@ class DemoParticipant:
         if grounding is None:  # never end a round without a submission (#114)
             log.info("[Stage1] no grounding (reason=%s); submitting the fallback",
                      round_result.failure_reason)
-            grounding = fallback_grounding(mission.voice_command, self._last_detections)
-        seq = self.client.submit_grounding(grounding)
+            grounding = fallback_grounding(
+                mission.voice_command, self._last_detections, self._stage1_projector,
+            )
+        seq = self._submit_stage1(grounding, mission)
+        if seq is None:
+            return
         self._stage1_submitted_round = mission.round
         self._experiment.event(
             "stage1.submission.completed", stage="stage1", round=mission.round,
@@ -974,8 +985,31 @@ class DemoParticipant:
 
     # -- run --
 
+    def _submit_stage1(self, grounding, mission):
+        """Submit, unless the local clock says the answer would land after the deadline."""
+        remaining = self._round_clock.remaining(self.client.now_s())
+        if remaining is not None and remaining <= 0.0:
+            note_decision("submit_dropped", reason="after_deadline", remaining_s=remaining)
+            log.warning("[Stage1] dropping answer after the deadline remaining=%.3f", remaining)
+            return None
+        return self.client.submit_grounding(grounding)
+
+    def _connect_with_retry(self, attempts: int = 3) -> bool:
+        delay_s = 2.0
+        for attempt in range(1, attempts + 1):
+            if self.client.connect():
+                return True
+            if attempt == attempts:
+                return False
+            log.warning(
+                "[agent] registration failed attempt=%d; retrying in %.0fs", attempt, delay_s,
+            )
+            time.sleep(delay_s)
+            delay_s = min(delay_s * 2.0, 10.0)
+        return False
+
     def run(self):
-        if not self.client.connect():
+        if not self._connect_with_retry():
             raise SystemExit("Registration failed -- check the runtime and the token.")
         fetch_cctv_round(self.client)
         self.client.run()
