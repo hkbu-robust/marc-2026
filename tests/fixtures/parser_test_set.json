@@ -1,0 +1,906 @@
+{
+ "about": "Blind parser test set (#114). Written by a separate agent that never saw the parser, its prompt or its dev set; labelled by 'what the text states' with the team's phrase conventions (next to / propped / leaning against -> beside). Scored once, at the end. Do not edit: sha256 covers canonical JSON of 'items' (sort_keys, separators=(',',':'), ensure_ascii=False).",
+ "sha256": "606b2f14f300cee8eba9ac6a0d48bd6876d3e767406c3d8abd723886dc972e51",
+ "items": [
+  {
+   "id": "t01",
+   "command": "Hey, I think I left my thermos on the old wooden bench by the bike racks. Can you find it?",
+   "label": {
+    "intent": "find",
+    "target_type": "tumbler",
+    "landmark": "bench",
+    "relation": "on",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "two landmarks; target is on the bench, bike racks only locate the bench"
+  },
+  {
+   "id": "t02",
+   "command": "My folding umbrella fell behind the blue vending machine and I can't reach it, could you bring it back to me?",
+   "label": {
+    "intent": "bring",
+    "target_type": "umbrella",
+    "landmark": "vending_machine",
+    "relation": "behind",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "modifier before landmark; bring phrasing"
+  },
+  {
+   "id": "t03",
+   "command": "There's a coke can next to the green rubbish bin, please locate it.",
+   "label": {
+    "intent": "find",
+    "target_type": "cola_can",
+    "landmark": "trash_can",
+    "relation": "beside",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "synonyms coke can, rubbish bin"
+  },
+  {
+   "id": "t04",
+   "command": "A man is sitting on the kerb in front of the police car, he looks dazed after the crash. Go find him.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "police_car",
+    "relation": "front",
+    "scene_hint": null,
+    "pose_hint": "person_sitting",
+    "situation_hint": "accident"
+   },
+   "ambiguous": false,
+   "note": "kerb is not a scene hint in the vocabulary"
+  },
+  {
+   "id": "t05",
+   "command": "Could you fetch my juice box? I'm pretty sure it's still on the picnc table in the park.",
+   "label": {
+    "intent": "bring",
+    "target_type": "juice",
+    "landmark": "picnic_table",
+    "relation": "on",
+    "scene_hint": "park",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "typo picnc"
+  },
+  {
+   "id": "t06",
+   "command": "I left my long golf umbrella leaning against the taxi on the street.",
+   "label": {
+    "intent": "find",
+    "target_type": "long_umbrella",
+    "landmark": "taxi",
+    "relation": "beside",
+    "scene_hint": "road",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "indirect request; leaning against -> beside"
+  },
+  {
+   "id": "t07",
+   "command": "Somewhere close to the red mailbox there should be a Master Chef coffee can, find it please.",
+   "label": {
+    "intent": "find",
+    "target_type": "master_chef_can",
+    "landmark": "postbox",
+    "relation": "near",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "mailbox synonym; fronted location"
+  },
+  {
+   "id": "t08",
+   "command": "Can you look for a small wooden block? A kid was playing with it on the grass earlier and walked off without it.",
+   "label": {
+    "intent": "find",
+    "target_type": "wood_block",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": "grass",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "no landmark; the kid is not the target"
+  },
+  {
+   "id": "t09",
+   "command": "A student is squatting to the left of the yellow sports car, can you check on him?",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "sports_car",
+    "relation": "left",
+    "scene_hint": null,
+    "pose_hint": "person_crouching",
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "squatting -> crouching"
+  },
+  {
+   "id": "t10",
+   "command": "There's a woman lying face down behind the postbox and she isn't moving. Find her quickly!",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "postbox",
+    "relation": "behind",
+    "scene_hint": null,
+    "pose_hint": "person_prone",
+    "situation_hint": "emergency"
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t11",
+   "command": "Find the paper cup to the right of the fire hydrnat.",
+   "label": {
+    "intent": "find",
+    "target_type": "disposable_cup",
+    "landmark": "hydrant",
+    "relation": "right",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "typo hydrnat"
+  },
+  {
+   "id": "t12",
+   "command": "I lost my sunscreen somewhere in the park this morning, could you bring it back to me if you find it?",
+   "label": {
+    "intent": "bring",
+    "target_type": "sunblock",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": "park",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "no landmark"
+  },
+  {
+   "id": "t13",
+   "command": "My pencil case is by the bike, the black one that's locked up outside the library.",
+   "label": {
+    "intent": "find",
+    "target_type": "pencilcase",
+    "landmark": "bicycle",
+    "relation": "beside",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "bike synonym; library is not a landmark class"
+  },
+  {
+   "id": "t14",
+   "command": "There's a tissue box sitting on the hood of the SUV in the car park.",
+   "label": {
+    "intent": "find",
+    "target_type": "tissue",
+    "landmark": "suv",
+    "relation": "on",
+    "scene_hint": "parking",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "car park synonym"
+  },
+  {
+   "id": "t15",
+   "command": "Someone stuck a mug up on the little ledge above the postbox, can you find it for me?",
+   "label": {
+    "intent": "find",
+    "target_type": "mug",
+    "landmark": "postbox",
+    "relation": "above",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "'on' links to the ledge; 'above' links to the landmark"
+  },
+  {
+   "id": "t16",
+   "command": "There's a pedestrian lying on his back right in front of normal car one on the road, I think he got hit.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "normal_car_1",
+    "relation": "front",
+    "scene_hint": "road",
+    "pose_hint": "person_lying_down",
+    "situation_hint": "accident"
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t17",
+   "command": "Locate the water bottle that was dropped in an empty parking bay.",
+   "label": {
+    "intent": "find",
+    "target_type": "tumbler",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": "parking_space",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "water bottle -> tumbler; parking bay"
+  },
+  {
+   "id": "t18",
+   "command": "Look for an umbrela, it was left over in the area with the cab.",
+   "label": {
+    "intent": "find",
+    "target_type": "umbrella",
+    "landmark": "taxi",
+    "relation": null,
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "typo umbrela; landmark without relation word; 'left over' is not a relation"
+  },
+  {
+   "id": "t19",
+   "command": "A little kid is hiding behind the picnic table, all crouched down, I think she's scared. Please find her.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "picnic_table",
+    "relation": "behind",
+    "scene_hint": null,
+    "pose_hint": "person_crouching",
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t20",
+   "command": "He's reaching up into the drink machine trying to grab something, could you find him?",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "vending_machine",
+    "relation": null,
+    "scene_hint": null,
+    "pose_hint": "person_reaching",
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "'into' is not a relation in the vocabulary"
+  },
+  {
+   "id": "t21",
+   "command": "A cyclist has climbed onto the roof of the police car and is just standing there, he really shouldn't be up there. Find him.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "police_car",
+    "relation": "on",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": "abnormal"
+   },
+   "ambiguous": false,
+   "note": "standing has no pose class"
+  },
+  {
+   "id": "t22",
+   "command": "Find the woman lounging back on the bench, she's just relaxing in the sun.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "bench",
+    "relation": "on",
+    "scene_hint": null,
+    "pose_hint": "person_reclining",
+    "situation_hint": "normal"
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t23",
+   "command": "Find the student who's walking away down the road with a grey backpack.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": "road",
+    "pose_hint": "person_walking_away",
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "no landmark"
+  },
+  {
+   "id": "t24",
+   "command": "A cyclist crashed into the hydrant and now he's sitting on the ground in front of it holding his knee.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "hydrant",
+    "relation": "front",
+    "scene_hint": null,
+    "pose_hint": "person_sitting",
+    "situation_hint": "accident"
+   },
+   "ambiguous": false,
+   "note": "implicit find request"
+  },
+  {
+   "id": "t25",
+   "command": "Find the girl bending over beside the e-scooter.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "kick_scooter",
+    "relation": "beside",
+    "scene_hint": null,
+    "pose_hint": "person_bending",
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t26",
+   "command": "Please hurry, there's an old man collapsed near sports car two and he isn't responding to anyone.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "sports_car_2",
+    "relation": "near",
+    "scene_hint": null,
+    "pose_hint": "person_lying_down",
+    "situation_hint": "emergency"
+   },
+   "ambiguous": false,
+   "note": "collapsed -> lying_down"
+  },
+  {
+   "id": "t27",
+   "command": "Can you locate the lady sitting in an empty parking stall? She says she's fine, just resting.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": "parking_space",
+    "pose_hint": "person_sitting",
+    "situation_hint": "normal"
+   },
+   "ambiguous": false,
+   "note": "parking stall"
+  },
+  {
+   "id": "t28",
+   "command": "There's a boy reaching for something in the grass by the trash can, go find him.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "trash_can",
+    "relation": "beside",
+    "scene_hint": "grass",
+    "pose_hint": "person_reaching",
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t29",
+   "command": "Can you find her? She was walking past normal car two a minute ago, red jacket, dark hair.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "normal_car_2",
+    "relation": null,
+    "scene_hint": null,
+    "pose_hint": "person_walking",
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "'past' is not a relation"
+  },
+  {
+   "id": "t30",
+   "command": "The victim is propped against the right side of the SUV, bleeding from the head after the accident. Find the victim now.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "suv",
+    "relation": "beside",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": "accident"
+   },
+   "ambiguous": true,
+   "note": "relation could be beside (propped against) or right (right side of); pose could be read as sitting"
+  },
+  {
+   "id": "t31",
+   "command": "A pedestrian got knocked down by the cab and is lying on the road beside it, please go help.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "taxi",
+    "relation": "beside",
+    "scene_hint": "road",
+    "pose_hint": "person_lying_down",
+    "situation_hint": "accident"
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t32",
+   "command": "He's leaning back against the picnic table half asleep, just resting I guess. Could you find him?",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "picnic_table",
+    "relation": "beside",
+    "scene_hint": null,
+    "pose_hint": "person_reclining",
+    "situation_hint": "normal"
+   },
+   "ambiguous": false,
+   "note": "leaning against -> beside; leaning back -> reclining"
+  },
+  {
+   "id": "t33",
+   "command": "Find the man walking toward the snack machine.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "vending_machine",
+    "relation": null,
+    "scene_hint": null,
+    "pose_hint": "person_walking",
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "'toward' is not a relation"
+  },
+  {
+   "id": "t34",
+   "command": "Someone's lying face-down in the middle of the road near the hydrant, please go see what's going on.",
+   "label": {
+    "intent": "find",
+    "target_type": "person",
+    "landmark": "hydrant",
+    "relation": "near",
+    "scene_hint": "road",
+    "pose_hint": "person_prone",
+    "situation_hint": null
+   },
+   "ambiguous": true,
+   "note": "situation not stated; a reader might infer emergency"
+  },
+  {
+   "id": "t35",
+   "command": "I was having a snack at the outdoor table and forgot my box of crackers on it, would you mind bringing it over to me?",
+   "label": {
+    "intent": "bring",
+    "target_type": "cracker_box",
+    "landmark": "picnic_table",
+    "relation": "on",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "relation via pronoun 'on it'"
+  },
+  {
+   "id": "t36",
+   "command": "Find a cracker box in the car park.",
+   "label": {
+    "intent": "find",
+    "target_type": "cracker_box",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": "parking",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t37",
+   "command": "There's a white mug sitting just to the left of the trashcan, go find it.",
+   "label": {
+    "intent": "find",
+    "target_type": "mug",
+    "landmark": "trash_can",
+    "relation": "left",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "trashcan synonym"
+  },
+  {
+   "id": "t38",
+   "command": "Return my flask to me please, I think I set it down somewhere around the patrol car.",
+   "label": {
+    "intent": "bring",
+    "target_type": "tumbler",
+    "landmark": "police_car",
+    "relation": "near",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "flask, patrol car"
+  },
+  {
+   "id": "t39",
+   "command": "Find the long umbrella propped against the bench in the park.",
+   "label": {
+    "intent": "find",
+    "target_type": "long_umbrella",
+    "landmark": "bench",
+    "relation": "beside",
+    "scene_hint": "park",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t40",
+   "command": "Could you look for the small folding umbrella hanging on the handlebar of the scooter?",
+   "label": {
+    "intent": "find",
+    "target_type": "umbrella",
+    "landmark": "kick_scooter",
+    "relation": "on",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t41",
+   "command": "Find the bottle of juice someone left in front of the vending machine.",
+   "label": {
+    "intent": "find",
+    "target_type": "juice",
+    "landmark": "vending_machine",
+    "relation": "front",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "'left' is a verb here, not a relation"
+  },
+  {
+   "id": "t42",
+   "command": "There's a paper cup on the picnic table, the one beside the postbox, find it.",
+   "label": {
+    "intent": "find",
+    "target_type": "disposable_cup",
+    "landmark": "picnic_table",
+    "relation": "on",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "two landmarks; 'beside' describes the table, not the cup"
+  },
+  {
+   "id": "t43",
+   "command": "The sunblock is behind the trash can that stands between the taxi and the SUV.",
+   "label": {
+    "intent": "find",
+    "target_type": "sunblock",
+    "landmark": "trash_can",
+    "relation": "behind",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "three landmarks; target relates to the trash can"
+  },
+  {
+   "id": "t44",
+   "command": "Packet of tissues to the right of normal car one, please locate.",
+   "label": {
+    "intent": "find",
+    "target_type": "tissue",
+    "landmark": "normal_car_1",
+    "relation": "right",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "terse word order"
+  },
+  {
+   "id": "t45",
+   "command": "Could you find the wooden block? It's right of the bicycle, no wait, sorry, left of it.",
+   "label": {
+    "intent": "find",
+    "target_type": "wood_block",
+    "landmark": "bicycle",
+    "relation": "left",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": true,
+   "note": "self-correction; final statement is left, but right is also stated"
+  },
+  {
+   "id": "t46",
+   "command": "Somebody dropped a can of Master Chef coffee on the road, please find it.",
+   "label": {
+    "intent": "find",
+    "target_type": "master_chef_can",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": "road",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t47",
+   "command": "Can you look for my daughter's pencilcase? It rolled behind the sports car when she dropped her bag.",
+   "label": {
+    "intent": "find",
+    "target_type": "pencilcase",
+    "landmark": "sports_car",
+    "relation": "behind",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "daughter is not the target"
+  },
+  {
+   "id": "t48",
+   "command": "Could you fetch my mug, please?",
+   "label": {
+    "intent": "bring",
+    "target_type": "mug",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "minimal"
+  },
+  {
+   "id": "t49",
+   "command": "Find the soda can lying on the lawn.",
+   "label": {
+    "intent": "find",
+    "target_type": "cola_can",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": "grass",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t50",
+   "command": "Find the thremos near the postbox.",
+   "label": {
+    "intent": "find",
+    "target_type": "tumbler",
+    "landmark": "postbox",
+    "relation": "near",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "typo thremos"
+  },
+  {
+   "id": "t51",
+   "command": "Find the cup balanced on the sign above the fire hydrant.",
+   "label": {
+    "intent": "find",
+    "target_type": "disposable_cup",
+    "landmark": "hydrant",
+    "relation": "above",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "plain 'cup' read as disposable cup; 'on' links to the sign"
+  },
+  {
+   "id": "t52",
+   "command": "So I walked my dog through the park, sat down for a bit, and got home without my sunscreen. I'm sure it's next to the bench, could you get it back for me?",
+   "label": {
+    "intent": "bring",
+    "target_type": "sunblock",
+    "landmark": "bench",
+    "relation": "beside",
+    "scene_hint": "park",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "narrative; dog is not the target"
+  },
+  {
+   "id": "t53",
+   "command": "Is there a cola can by sports car 2? Find it if so.",
+   "label": {
+    "intent": "find",
+    "target_type": "cola_can",
+    "landmark": "sports_car_2",
+    "relation": "beside",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t54",
+   "command": "Could you return my walking-length umbrella? I left it somewhere in the parking lot after class.",
+   "label": {
+    "intent": "bring",
+    "target_type": "long_umbrella",
+    "landmark": null,
+    "relation": null,
+    "scene_hint": "parking",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": ""
+  },
+  {
+   "id": "t55",
+   "command": "Juice bottle, scooter area, go.",
+   "label": {
+    "intent": "find",
+    "target_type": "juice",
+    "landmark": "kick_scooter",
+    "relation": null,
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "telegraphic; landmark without relation"
+  },
+  {
+   "id": "t56",
+   "command": "Please find the wood block lying on the dustbin lid.",
+   "label": {
+    "intent": "find",
+    "target_type": "wood_block",
+    "landmark": "trash_can",
+    "relation": "on",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "dustbin synonym"
+  },
+  {
+   "id": "t57",
+   "command": "The sunblock is in the empty parking spot right next to the SUV, can you find it?",
+   "label": {
+    "intent": "find",
+    "target_type": "sunblock",
+    "landmark": "suv",
+    "relation": "beside",
+    "scene_hint": "parking_space",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "parking spot"
+  },
+  {
+   "id": "t58",
+   "command": "pls find the tissues near the bycicle",
+   "label": {
+    "intent": "find",
+    "target_type": "tissue",
+    "landmark": "bicycle",
+    "relation": "near",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "typo bycicle; lowercase, no punctuation"
+  },
+  {
+   "id": "t59",
+   "command": "Find the mug on the bench in the car park, the bench near the taxi.",
+   "label": {
+    "intent": "find",
+    "target_type": "mug",
+    "landmark": "bench",
+    "relation": "on",
+    "scene_hint": "parking",
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": false,
+   "note": "two landmarks; 'near' describes the bench"
+  },
+  {
+   "id": "t60",
+   "command": "My son wandered off, can you find him and bring him back to me? He was near the vending machines last I saw.",
+   "label": {
+    "intent": "bring",
+    "target_type": "person",
+    "landmark": "vending_machine",
+    "relation": "near",
+    "scene_hint": null,
+    "pose_hint": null,
+    "situation_hint": null
+   },
+   "ambiguous": true,
+   "note": "intent: text literally asks to bring him back, but bring is defined for objects; find is also defensible"
+  }
+ ]
+}
