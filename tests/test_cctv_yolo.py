@@ -215,12 +215,15 @@ class CctvYoloTests(unittest.TestCase):
             self.assertEqual(1, detector.refine_zoomed.call_count)
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("MARC_TILED_REFINE", None)
-                refine_detection_round(command, round_)  # off by default
-            self.assertEqual(1, detector.refine_zoomed.call_count)
+                refine_detection_round(command, round_)  # on by default
+            self.assertEqual(2, detector.refine_zoomed.call_count)
+            with patch.dict(os.environ, {"MARC_TILED_REFINE": "0"}):
+                refine_detection_round(command, round_)
+            self.assertEqual(2, detector.refine_zoomed.call_count)
             detector.contract = replace(detector.contract, small_target_classes=())
             with patch.dict(os.environ, {"MARC_TILED_REFINE": "1"}):
                 refine_detection_round(command, round_)
-            self.assertEqual(1, detector.refine_zoomed.call_count)
+            self.assertEqual(2, detector.refine_zoomed.call_count)
 
     def test_landmark_crop_keeps_similar_mission_class_as_visual_proposal(self):
         detector = CctvYoloDetector.__new__(CctvYoloDetector)

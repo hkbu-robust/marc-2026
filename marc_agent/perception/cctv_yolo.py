@@ -188,11 +188,13 @@ def _small_target_classes() -> tuple[str, ...]:
 
 
 def tiled_refine_enabled() -> bool:
-    """Off by default: on the #87 held-out cases the zoomed pass recovers missed targets
-    (+0.047 credit on detector misses) but its false positives cost as much on the rest
-    (overall -0.0002, 95% CI -0.007 to +0.007), so it failed the pre-registered ship rule
-    (ablations/final-system/115-tiled-refinement/summary.md). Kept for the #129 ablation."""
-    return os.environ.get("MARC_TILED_REFINE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    """On by default (team decision, 2026-10-08). On the #87 held-out cases the zoomed pass is
+    neutral end to end (-0.0002, 95% CI -0.007 to +0.007: +0.047 on detector misses, -0.0067 on
+    the rest), so the pre-registered rule alone would have left it off. The team turned it on
+    knowing that the public smoke run gains lf08/hf08 (82.21 -> 86.61) and loses no round; this
+    decision used public rounds and is disclosed as such
+    (ablations/final-system/115-tiled-refinement/summary.md)."""
+    return os.environ.get("MARC_TILED_REFINE", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _same_object(box, existing: list[tuple[float, float, float, float]]) -> bool:
