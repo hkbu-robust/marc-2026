@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 
@@ -1588,7 +1590,61 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertEqual("object_relation", selected.method)
 
+    def test_implied_anchor_command_is_decided_by_geometry(self):
+        """#120 option (b): no named landmark but a car cue -> geometry, Qwen not asked (hf07)."""
+        text = "Find the tumbler I dropped as I got out of my car in the parking lot."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam:tumbler:0", "tumbler", (20, 100, 60, 160), "cam"),
+                _object("cam:tumbler:1", "tumbler", (500, 100, 540, 160), "cam"),
+                _object("cam:police_car:0", "police_car", (10, 50, 200, 200), "cam"),
+            ],
+            camera_ids=["cam"],
+        )
+        calls = []
+
+        class Verifier:
+            method = "qwen_remote"
+
+            def __call__(self, board):
+                calls.append(board)
+                return "cam:tumbler:1"
+
+        geometry = rank_object_candidates(parsed, round_, command_text=text)[0]
+        with decision_scope("stage1", 1) as notes:
+            selected = select_object_candidate(parsed, round_, command_text=text, verifier=Verifier())
+        self.assertEqual([], calls)
+        self.assertEqual(geometry.target.candidate_id, selected.target.candidate_id)
+        self.assertTrue([n for n in notes if n["decision"] == "selector"
+                         and n.get("reason") == "implied_anchor_geometry"])
+
+    def test_a_named_landmark_still_goes_to_qwen(self):
+        text = "Find the tumbler near the police car."
+        parsed = parse_command(text)
+        round_ = CctvDetectionRound(
+            objects=[
+                _object("cam:tumbler:0", "tumbler", (20, 100, 60, 160), "cam"),
+                _object("cam:tumbler:1", "tumbler", (150, 100, 190, 160), "cam"),
+                _object("cam:police_car:0", "police_car", (10, 50, 200, 200), "cam"),
+            ],
+            camera_ids=["cam"],
+        )
+        calls = []
+
+        class Verifier:
+            method = "qwen_remote"
+
+            def __call__(self, board):
+                calls.append(board)
+                return "cam:tumbler:1"
+
+        select_object_candidate(parsed, round_, command_text=text, verifier=Verifier())
+        self.assertTrue(calls)
+
+    @patch.dict(os.environ, {"MARC_IMPLIED_ANCHOR_GEOMETRY": "0"})
     def test_remote_parking_lot_request_keeps_visual_choice(self):
+        """With #120 option (b) off: Qwen decides implied-anchor commands."""
         text = "Find the tumbler I dropped as I got out of my car in the parking lot."
         parsed = parse_command(text)
         round_ = CctvDetectionRound(
@@ -1712,6 +1768,7 @@ class ObjectSelectionTests(unittest.TestCase):
         )
         self.assertEqual("cam_bad:umbrella:0", selected.target.candidate_id)
 
+    @patch.dict(os.environ, {"MARC_IMPLIED_ANCHOR_GEOMETRY": "0"})
     def test_remote_verifier_can_choose_alternate_implicit_anchor(self):
         text = "Pick up the tumbler dropped on the parking lot floor."
         parsed = parse_command(text)

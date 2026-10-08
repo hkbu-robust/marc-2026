@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from dataclasses import dataclass, replace
 from typing import Callable, Iterable, Optional
@@ -1174,6 +1175,14 @@ def infer_anchor(
     return replace(selection, anchor=anchor)
 
 
+def implied_anchor_geometry_enabled() -> bool:
+    """#120 option (b), on by default (team decision 2026-10-08, disclosed: motivated by
+    hf07; held-out cases all name their landmark, so no held-out evidence exists)."""
+    return os.environ.get("MARC_IMPLIED_ANCHOR_GEOMETRY", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
 def select_object_candidate(
     parsed: ParsedCommand,
     round_: CctvDetectionRound,
@@ -1231,24 +1240,36 @@ def _select_object_candidate(
     if not ranked:
         return None
     geometry = ranked[0]
-    parking_geometry = (
-        parsed.scene_hint == "parking_space"
-        and str(getattr(verifier, "method", "qwen")) == "qwen_remote"
+    remote = str(getattr(verifier, "method", "qwen")) == "qwen_remote"
+    parking_geometry = parsed.scene_hint == "parking_space" and remote
+    # #120 option (b), a disclosed rule motivated by a public failure (hf07): a command
+    # that names no landmark but implies one (a car or parking cue, a park) is decided
+    # by geometry, like the parking_space route. Qwen's target pick on such commands was
+    # only ever kept out by the untrained anchor re-pick failing to parse.
+    implied_geometry = (
+        remote
+        and implied_anchor_geometry_enabled()
+        and parsed.landmark is None
+        and bool(implicit_anchor_classes(parsed, command_text))
     )
-    if verifier is None or parking_geometry:
+    if verifier is None or parking_geometry or implied_geometry:
+        reason = (
+            "parking_geometry" if parking_geometry
+            else "implied_anchor_geometry" if implied_geometry
+            else "no_verifier"
+        )
         log.info(
             "[object-selection] pairs=%d classes=%s verify=False reason=%s "
             "geometry=%s occupancy=%s",
             len(ranked),
             ",".join(sorted(_target_classes(parsed))),
-            "parking_geometry" if parking_geometry else "no_verifier",
+            reason,
             geometry.target.candidate_id,
             "ok" if occupancy_at is not None else "missing",
         )
         note_decision(
             "selector", path="object", outcome="geometry_only",
-            reason="parking_geometry" if parking_geometry else "no_verifier",
-            selected=geometry.target.candidate_id,
+            reason=reason, selected=geometry.target.candidate_id,
         )
         return geometry
     log.info(
@@ -1345,21 +1366,13 @@ def _select_object_candidate(
         else:
             selected, raw_output, board = verify(contenders)
         if remote:
-            # Known limitation, kept on purpose (#120, option a). This re-pick asks
-            # for TARGET_ID|ANCHOR_ID, a format the LoRA never saw (its training
-            # export writes single IDs), so the reply usually fails to parse and
-            # the fallback below takes geometry for target and anchor. On hf07 that
-            # failure is what discards Qwen's wrong first target, so accepting the
-            # bare ID would cost about 1.1-1.6 points; retiring the call would be a
-            # routing rule chosen from public failures. The submitted anchor for a
-            # command with no named landmark comes from infer_anchor either way.
-            # Open option (b), not taken (team decision 2026-10-08): since the
-            # final-system changes this reply parses, so on hf07 Qwen's wrong first
-            # target now stands (35 vs 96.7 points, 3/3 smoke runs, about -1.9 per
-            # run). Routing implied-anchor requests (no named landmark, implicit
-            # anchor classes) to geometry for target and anchor, like the
-            # parking_space route, would recover it; it must be disclosed as a rule
-            # motivated by a public failure. See #120 and ADR 0002 (#125).
+            # Anchor re-pick (#120). It asks for TARGET_ID|ANCHOR_ID, a format the LoRA
+            # never saw (its training export writes single IDs). It only runs for
+            # commands with no named landmark but implicit anchor classes, which
+            # option (b) now routes to geometry before Qwen is asked (see
+            # implied_geometry above), so it is reached only with
+            # MARC_IMPLIED_ANCHOR_GEOMETRY=0. With option (b) off, Qwen's first
+            # target stands whenever the reply parses (hf07: 35 vs 96.7 points).
             anchors = _anchor_variants(
                 selected, parsed, command_text, round_
             )
