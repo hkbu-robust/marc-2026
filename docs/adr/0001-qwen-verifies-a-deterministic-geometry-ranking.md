@@ -1,6 +1,8 @@
 # 0001: Qwen verifies a deterministic geometry ranking
 
-- **Status:** Accepted. Describes the qualifier system at `1450aa9`.
+- **Status:** Accepted, **partly superseded by [ADR 0002](0002-final-stage1-system-scope.md)**
+  (2026-10-08). Describes the qualifier system at `1450aa9`; the guard list below is updated
+  to the final system, and the line references are replaced by function names.
 - **Issue:** #85 (part of #92)
 
 ## Context
@@ -44,14 +46,21 @@ Every round ends in exactly one of three outcomes:
 
 The guard rules:
 
-- **Object path** (`marc_agent/perception/object_selection.py:1279-1313`): support geometry, contained occlusion, low confidence, weak override.
-- **Person (SAR) path** (`marc_agent/perception/sar_selection.py:1007, 1049, 1074, 1128`): `pose_geometry_override`, `support_geometry_override`, `place_geometry_override`, `landmark_geometry_override`.
+- **Object path** (`object_selection._select_object_candidate`): support geometry, weak override,
+  scene evidence (#119). The qualifier's "contained occlusion" and "low confidence" guards were
+  deleted with the proxy chain (#116, ADR 0002).
+- **Person (SAR) path** (`sar_selection.select_sar_candidate`): `pose_geometry_override`,
+  `support_geometry_override`, `place_geometry_override` (with pose/support/situation
+  eligibility since #118), `landmark_geometry_override`.
 
-The SAR path also skips Qwen when no verifier is configured and the shortlist holds at most one person (`sar_selection.py:926`).
+Besides `parking_space`, commands that name no landmark but imply one also skip Qwen in the
+final system (#120 option b, ADR 0002).
+
+The SAR path also skips Qwen when no verifier is configured and the shortlist holds at most one person (`select_sar_candidate`).
 
 ## Consequences
 
 - **The pipeline always submits an answer when Qwen is down.** A dead vLLM server degrades the system to deterministic ranking without stopping the round.
-- **That degradation was invisible in the object path.** On a failed call, `object_selection.py:1345` returns the geometry answer unchanged, so the round is recorded as `object_relation`, the same label as a run without Qwen. The SAR path already records `deterministic_fallback` with `verifier_failed:<Error>`. #85 makes the object path record `deterministic_fallback` too, with the reason and the step that failed, so that the selector arms in #89 and #90 do not undercount fallbacks. The first live run with this logging found 4 fallbacks in 33 rounds: two vLLM cold-start timeouts in rounds 1–2, and two anchor re-pick replies that gave only a target ID.
+- **That degradation was invisible in the object path.** On a failed call, the object path returned the geometry answer unchanged, so the round is recorded as `object_relation`, the same label as a run without Qwen. The SAR path already records `deterministic_fallback` with `verifier_failed:<Error>`. #85 makes the object path record `deterministic_fallback` too, with the reason and the step that failed, so that the selector arms in #89 and #90 do not undercount fallbacks. The first live run with this logging found 4 fallbacks in 33 rounds: two vLLM cold-start timeouts in rounds 1–2, and two anchor re-pick replies that gave only a target ID.
 - **Geometry overrides were not counted.** They appear only as log text. #85 records them as structured events, with every guard when several fire in one round.
 - **Comparing "Qwen on" with "Qwen off" measures more than the selector.** Turning the verifier on also widens the candidate classes, adds a scene-description pass, a class screen and an anchor re-pick (#90). Base Qwen against fine-tuned Qwen isolates the fine-tuning, because both use the same path.
