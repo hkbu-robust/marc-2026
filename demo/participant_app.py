@@ -324,6 +324,11 @@ class DemoParticipant:
             **round_result.record(),
         )
         grounding = round_result.grounding
+        parsed = round_result.candidates.parsed
+        if grounding is not None and parsed is not None and parsed.target_type == "unknown":
+            # Stage 1 always submits (#114), but a bring command whose target could not be
+            # read must not send the robot to the sentinel coordinate: keep Stage 2's skip.
+            grounding = None
         if grounding is None:
             log.info(
                 "[Stage2] skip submit reason=%s (no zero-coordinate fallback)",
