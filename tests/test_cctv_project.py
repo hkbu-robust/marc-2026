@@ -311,6 +311,10 @@ class CctvProjectTests(unittest.TestCase):
         self.assertTrue(_keep_cctv_transform(Transform("rig_1", "rig_1_a")))
         self.assertTrue(_keep_cctv_transform(Transform("world", "cam_7")))
         self.assertFalse(_keep_cctv_transform(Transform("odom", "car_base_link")))
+        # live /tf is robot traffic: only rig_ frames, as before
+        self.assertTrue(_keep_cctv_transform(Transform("world", "rig_1_a"), static=False))
+        self.assertFalse(_keep_cctv_transform(Transform("world", "cam_7"), static=False))
+        self.assertFalse(_keep_cctv_transform(Transform("world", "Base_LiDAR"), static=False))
 
     def test_start_tf_listener_subscribes_static_and_live_without_transform_listener(self):
         captured = []

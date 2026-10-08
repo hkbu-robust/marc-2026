@@ -650,10 +650,17 @@ class CctvProjector:
 _ROBOT_FRAME_TOKENS = ("car_base_link", "odom", "base_link")
 
 
-def _keep_cctv_transform(transform) -> bool:
-    """Keep discovered camera frames and drop robot odom, which makes tf2 log TF_OLD_DATA."""
+def _keep_cctv_transform(transform, static: bool = True) -> bool:
+    """Keep camera extrinsics and drop robot frames, which make tf2 log TF_OLD_DATA.
+
+    Camera extrinsics are latched on /tf_static, so any non-robot frame is kept there
+    and a camera name other than ``rig_*`` still projects. Live /tf is high-rate robot
+    traffic: only ``rig_*`` frames are kept, as before, so the listener adds no load.
+    """
     parent = (getattr(getattr(transform, "header", None), "frame_id", None) or "").lstrip("/")
     child = (getattr(transform, "child_frame_id", None) or "").lstrip("/")
+    if not static:
+        return parent.startswith("rig_") or child.startswith("rig_")
     blob = f"{parent} {child}"
     if any(token in blob for token in _ROBOT_FRAME_TOKENS):
         return False
@@ -672,7 +679,7 @@ def _start_tf_listener(client):
     def ingest(msg, *, static: bool):
         setter = buffer.set_transform_static if static else buffer.set_transform
         for transform in getattr(msg, "transforms", ()) or ():
-            if not _keep_cctv_transform(transform):
+            if not _keep_cctv_transform(transform, static):
                 continue
             try:
                 setter(transform, "cctv")
