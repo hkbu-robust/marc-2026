@@ -1,0 +1,556 @@
+{
+ "about": "Second, independent labelling of the #114 test set (commands only, no labels seen). A field where the two labellers disagree is excluded from that field's accuracy; items the writer marked ambiguous are excluded from every field. The frozen labels in parser_test_set.json are not changed.",
+ "excluded_fields": {
+  "t18": [
+   "relation"
+  ]
+ },
+ "ambiguous_items": [
+  "t30",
+  "t34",
+  "t45",
+  "t60"
+ ],
+ "labeller_b": {
+  "t01": {
+   "intent": "find",
+   "target_type": "tumbler",
+   "landmark": "bench",
+   "relation": "on",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t02": {
+   "intent": "bring",
+   "target_type": "umbrella",
+   "landmark": "vending_machine",
+   "relation": "behind",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t03": {
+   "intent": "find",
+   "target_type": "cola_can",
+   "landmark": "trash_can",
+   "relation": "beside",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t04": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "police_car",
+   "relation": "front",
+   "scene_hint": null,
+   "pose_hint": "person_sitting",
+   "situation_hint": "accident"
+  },
+  "t05": {
+   "intent": "bring",
+   "target_type": "juice",
+   "landmark": "picnic_table",
+   "relation": "on",
+   "scene_hint": "park",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t06": {
+   "intent": "find",
+   "target_type": "long_umbrella",
+   "landmark": "taxi",
+   "relation": "beside",
+   "scene_hint": "road",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t07": {
+   "intent": "find",
+   "target_type": "master_chef_can",
+   "landmark": "postbox",
+   "relation": "near",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t08": {
+   "intent": "find",
+   "target_type": "wood_block",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": "grass",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t09": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "sports_car",
+   "relation": "left",
+   "scene_hint": null,
+   "pose_hint": "person_crouching",
+   "situation_hint": null
+  },
+  "t10": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "postbox",
+   "relation": "behind",
+   "scene_hint": null,
+   "pose_hint": "person_prone",
+   "situation_hint": "emergency"
+  },
+  "t11": {
+   "intent": "find",
+   "target_type": "disposable_cup",
+   "landmark": "hydrant",
+   "relation": "right",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t12": {
+   "intent": "bring",
+   "target_type": "sunblock",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": "park",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t13": {
+   "intent": "find",
+   "target_type": "pencilcase",
+   "landmark": "bicycle",
+   "relation": "beside",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t14": {
+   "intent": "find",
+   "target_type": "tissue",
+   "landmark": "suv",
+   "relation": "on",
+   "scene_hint": "parking",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t15": {
+   "intent": "find",
+   "target_type": "mug",
+   "landmark": "postbox",
+   "relation": "above",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t16": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "normal_car_1",
+   "relation": "front",
+   "scene_hint": "road",
+   "pose_hint": "person_lying_down",
+   "situation_hint": "accident"
+  },
+  "t17": {
+   "intent": "find",
+   "target_type": "tumbler",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": "parking_space",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t18": {
+   "intent": "find",
+   "target_type": "umbrella",
+   "landmark": "taxi",
+   "relation": "near",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t19": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "picnic_table",
+   "relation": "behind",
+   "scene_hint": null,
+   "pose_hint": "person_crouching",
+   "situation_hint": null
+  },
+  "t20": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "vending_machine",
+   "relation": null,
+   "scene_hint": null,
+   "pose_hint": "person_reaching",
+   "situation_hint": null
+  },
+  "t21": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "police_car",
+   "relation": "on",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": "abnormal"
+  },
+  "t22": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "bench",
+   "relation": "on",
+   "scene_hint": null,
+   "pose_hint": "person_reclining",
+   "situation_hint": "normal"
+  },
+  "t23": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": "road",
+   "pose_hint": "person_walking_away",
+   "situation_hint": null
+  },
+  "t24": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "hydrant",
+   "relation": "front",
+   "scene_hint": null,
+   "pose_hint": "person_sitting",
+   "situation_hint": "accident"
+  },
+  "t25": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "kick_scooter",
+   "relation": "beside",
+   "scene_hint": null,
+   "pose_hint": "person_bending",
+   "situation_hint": null
+  },
+  "t26": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "sports_car_2",
+   "relation": "near",
+   "scene_hint": null,
+   "pose_hint": "person_lying_down",
+   "situation_hint": "emergency"
+  },
+  "t27": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": "parking_space",
+   "pose_hint": "person_sitting",
+   "situation_hint": "normal"
+  },
+  "t28": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "trash_can",
+   "relation": "beside",
+   "scene_hint": "grass",
+   "pose_hint": "person_reaching",
+   "situation_hint": null
+  },
+  "t29": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "normal_car_2",
+   "relation": null,
+   "scene_hint": null,
+   "pose_hint": "person_walking",
+   "situation_hint": null
+  },
+  "t30": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "suv",
+   "relation": "beside",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": "accident"
+  },
+  "t31": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "taxi",
+   "relation": "beside",
+   "scene_hint": "road",
+   "pose_hint": "person_lying_down",
+   "situation_hint": "accident"
+  },
+  "t32": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "picnic_table",
+   "relation": "beside",
+   "scene_hint": null,
+   "pose_hint": "person_reclining",
+   "situation_hint": "normal"
+  },
+  "t33": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "vending_machine",
+   "relation": null,
+   "scene_hint": null,
+   "pose_hint": "person_walking",
+   "situation_hint": null
+  },
+  "t34": {
+   "intent": "find",
+   "target_type": "person",
+   "landmark": "hydrant",
+   "relation": "near",
+   "scene_hint": "road",
+   "pose_hint": "person_prone",
+   "situation_hint": null
+  },
+  "t35": {
+   "intent": "bring",
+   "target_type": "cracker_box",
+   "landmark": "picnic_table",
+   "relation": "on",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t36": {
+   "intent": "find",
+   "target_type": "cracker_box",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": "parking",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t37": {
+   "intent": "find",
+   "target_type": "mug",
+   "landmark": "trash_can",
+   "relation": "left",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t38": {
+   "intent": "bring",
+   "target_type": "tumbler",
+   "landmark": "police_car",
+   "relation": "near",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t39": {
+   "intent": "find",
+   "target_type": "long_umbrella",
+   "landmark": "bench",
+   "relation": "beside",
+   "scene_hint": "park",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t40": {
+   "intent": "find",
+   "target_type": "umbrella",
+   "landmark": "kick_scooter",
+   "relation": "on",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t41": {
+   "intent": "find",
+   "target_type": "juice",
+   "landmark": "vending_machine",
+   "relation": "front",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t42": {
+   "intent": "find",
+   "target_type": "disposable_cup",
+   "landmark": "picnic_table",
+   "relation": "on",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t43": {
+   "intent": "find",
+   "target_type": "sunblock",
+   "landmark": "trash_can",
+   "relation": "behind",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t44": {
+   "intent": "find",
+   "target_type": "tissue",
+   "landmark": "normal_car_1",
+   "relation": "right",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t45": {
+   "intent": "find",
+   "target_type": "wood_block",
+   "landmark": "bicycle",
+   "relation": "left",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t46": {
+   "intent": "find",
+   "target_type": "master_chef_can",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": "road",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t47": {
+   "intent": "find",
+   "target_type": "pencilcase",
+   "landmark": "sports_car",
+   "relation": "behind",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t48": {
+   "intent": "bring",
+   "target_type": "mug",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t49": {
+   "intent": "find",
+   "target_type": "cola_can",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": "grass",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t50": {
+   "intent": "find",
+   "target_type": "tumbler",
+   "landmark": "postbox",
+   "relation": "near",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t51": {
+   "intent": "find",
+   "target_type": "disposable_cup",
+   "landmark": "hydrant",
+   "relation": "above",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t52": {
+   "intent": "bring",
+   "target_type": "sunblock",
+   "landmark": "bench",
+   "relation": "beside",
+   "scene_hint": "park",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t53": {
+   "intent": "find",
+   "target_type": "cola_can",
+   "landmark": "sports_car_2",
+   "relation": "beside",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t54": {
+   "intent": "bring",
+   "target_type": "long_umbrella",
+   "landmark": null,
+   "relation": null,
+   "scene_hint": "parking",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t55": {
+   "intent": "find",
+   "target_type": "juice",
+   "landmark": "kick_scooter",
+   "relation": null,
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t56": {
+   "intent": "find",
+   "target_type": "wood_block",
+   "landmark": "trash_can",
+   "relation": "on",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t57": {
+   "intent": "find",
+   "target_type": "sunblock",
+   "landmark": "suv",
+   "relation": "beside",
+   "scene_hint": "parking_space",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t58": {
+   "intent": "find",
+   "target_type": "tissue",
+   "landmark": "bicycle",
+   "relation": "near",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t59": {
+   "intent": "find",
+   "target_type": "mug",
+   "landmark": "bench",
+   "relation": "on",
+   "scene_hint": "parking",
+   "pose_hint": null,
+   "situation_hint": null
+  },
+  "t60": {
+   "intent": "bring",
+   "target_type": "person",
+   "landmark": "vending_machine",
+   "relation": "near",
+   "scene_hint": null,
+   "pose_hint": null,
+   "situation_hint": null
+  }
+ }
+}
