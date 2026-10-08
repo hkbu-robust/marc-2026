@@ -55,6 +55,10 @@ REFINE_CROP_CAP = 8
 SMALL_TARGETS_PATH = Path(__file__).resolve().parent / "data" / "small_targets.json"
 ZOOM = 2
 ZOOM_CONF = 0.4  # max F1 of added target boxes on #87 held-out even scenes (#115)
+# Known variance (check in the #128 runs): the public lf08/hf08 umbrella is a ~10 px blob
+# in rig_7_a that this pass finds at ~0.5 in some runs and misses in others (the platform
+# re-renders each run). Found: both rounds ~97.6; missed: 25. One zoom-on smoke run found it
+# (86.61), the next missed it (83.44); see ablations/final-system/120b-implied-anchor-geometry.
 
 
 def _pad_box(
