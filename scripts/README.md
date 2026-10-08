@@ -14,6 +14,7 @@ All of them read #85 harness run folders (`run-NN/` with `robust_*.json` and
 | `stage1_regress.py` | whether a fresh run regressed against baseline runs (#110) |
 | `heldout_selection.py` | what the whole runtime round (detector, refinement, Qwen, guards, projection) does on #87 held-out cases (#115, #117) |
 | `small_target_classes.py` | which detector classes count as small (from the training labels; #115) |
+| `stage1_sensitivity.py` | which credited targets fail attribution under other scorer constants (#135) |
 
 `stage1_runs.py` holds what the replay and the gate share: the loader for logged
 rounds and the reverse-engineered scoring kernel.
@@ -140,10 +141,13 @@ python -m scripts.run_stage1_repeats ... --project fs-b --ros-domain-id 89 --vll
 - **Selection is held fixed.** The replay recomposes the logged target/anchor pair
   (and the logged fallthrough); a change that would make the ranking or Qwen pick
   another pair only shows in the GPU smoke run.
-- **Target credit off the logged point is a model.** The scorer is binary at about
-  1.9 m in the #88 rounds but may match the nearest object (#91). A replayed target
-  credited further out than anything the platform credited for that round is
-  counted as uncertain in the summary.
+- **Target credit off the logged point uses the organisers' kernel.** The point must be
+  strictly nearer the GT target than every other object or person in that camera, then
+  1 within `R_ACQUIRE` falling linearly to 0 at `R_MISS` (`stage1_runs.target_credit`).
+  The constants and the distractor margin are `MARC_SCORING_*` and private at competition
+  time, so never tune to the defaults; `stage1_sensitivity.py` replays a grid of them.
+  A replayed target credited further out than anything the platform credited for that
+  round is counted as uncertain in the summary.
 
 ## Camera geometry
 

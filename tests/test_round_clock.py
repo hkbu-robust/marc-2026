@@ -296,6 +296,13 @@ class QwenTimeBudgetTests(unittest.TestCase):
                 verifier(board)
         self.assertAlmostEqual(2.0, calls[0], places=3)
 
+    def test_answer_is_stale_only_when_a_later_round_has_started(self):
+        from marc_agent.round_clock import answer_is_stale
+
+        self.assertFalse(answer_is_stale(3, 3))
+        self.assertFalse(answer_is_stale(3, 2))
+        self.assertTrue(answer_is_stale(3, 4))
+
 
 if __name__ == "__main__":
     unittest.main()

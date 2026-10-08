@@ -173,13 +173,12 @@ _BRING_RE = re.compile(rf"\b(?:{_BRING_PATTERN})\b")
 _ACTION_RE = re.compile(rf"\b(?:{_FIND_PATTERN}|{_BRING_PATTERN})\b")
 
 _RELATION_PHRASES: tuple[tuple[Relation, str], ...] = (
-    (Relation.FRONT, r"(?:in\s+)?front\s+of|across\s+from"),
-    (Relation.ON, r"under(?:neath)?|beneath"),
+    (Relation.FRONT, r"(?:in\s+)?front\s+of"),
     (Relation.LEFT, r"(?:on|to)\s+the\s+left\s+(?:side\s+)?of"),
     (Relation.RIGHT, r"(?:on|to)\s+the\s+right\s+(?:side\s+)?of"),
     (Relation.ABOVE, r"above"),
     (Relation.BESIDE, r"(?:beside|alongside)"),
-    (Relation.NEAR, r"(?:near|close\s+to|around)"),
+    (Relation.NEAR, r"(?:near|close\s+to|around|across\s+from|under(?:neath)?|beneath)"),
     (Relation.ON, r"on(?:\s+top\s+of)?"),
     (Relation.BEHIND, r"behind"),
 )

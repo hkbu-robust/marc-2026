@@ -118,7 +118,7 @@ class CctvYoloTests(unittest.TestCase):
         sar = person_candidates_to_sar(people)
         self.assertEqual(1, len(objects))
         self.assertEqual(1, len(sar))
-        self.assertEqual("abnormal", sar[0].situation)
+        self.assertEqual("normal", sar[0].situation)  # organisers' pose fallback: reclining
 
     def test_pose_situation_mapping(self):
         self.assertEqual("accident", situation_for_pose("person_prone"))

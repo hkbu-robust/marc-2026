@@ -22,14 +22,14 @@
     "text": "Find the umbrella across from the hydrant.",
     "target_type": "umbrella",
     "landmark": "hydrant",
-    "relation": "front",
-    "note": "across from is the catalogue front relation"
+    "relation": "near",
+    "note": "not a catalogue relation; read as near, the default for an unlabelled relation (#113), which keeps the landmark"
   },
   {
     "text": "Find the mug under the picnic table.",
     "target_type": "mug",
     "landmark": "picnic_table",
-    "relation": "on",
-    "note": "the scorer has no under token; under names the support, which is on"
+    "relation": "near",
+    "note": "under is not a catalogue relation; near, not on, so support geometry does not lift the target"
   }
 ]

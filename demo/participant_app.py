@@ -66,7 +66,7 @@ from marc_agent.retrieval_state import (
     search_area_approach_goal,
     snapshot_approach_goal,
 )
-from marc_agent.round_clock import RoundClock
+from marc_agent.round_clock import RoundClock, answer_is_stale
 from marc_agent.stage2_delivery import Stage2Deadline, Stage2Delivery
 from mock_agent_vla import MockVLAGrounding
 from marc_agent.lidar_safety import advise, pointcloud2_xyz
@@ -125,6 +125,7 @@ class DemoParticipant:
         self._stage1_lock = threading.Lock()
         self._stage1_projector = None
         self._round_clock = RoundClock()
+        self._latest_round = 0
         self._stage2_clock = Stage2Deadline()
         self._qwen_verifier = get_default_verifier()
         self._approach_snap = None
@@ -147,6 +148,7 @@ class DemoParticipant:
     # -- Stage 1 --
 
     def _on_mission(self, mission):
+        self._latest_round = max(self._latest_round, int(mission.round))
         log.info("[Stage1] round %s/%s: \"%s\"",
                  mission.round, mission.total_rounds, mission.voice_command)
         self._experiment.event(
@@ -986,11 +988,16 @@ class DemoParticipant:
     # -- run --
 
     def _submit_stage1(self, grounding, mission):
-        """Submit, unless the local clock says the answer would land after the deadline."""
-        remaining = self._round_clock.remaining(self.client.now_s())
-        if remaining is not None and remaining <= 0.0:
-            note_decision("submit_dropped", reason="after_deadline", remaining_s=remaining)
-            log.warning("[Stage1] dropping answer after the deadline remaining=%.3f", remaining)
+        """Submit, unless the platform has already issued a later round."""
+        if answer_is_stale(mission.round, self._latest_round):
+            note_decision(
+                "submit_dropped", reason="superseded_round",
+                answer_round=int(mission.round), latest_round=self._latest_round,
+            )
+            log.warning(
+                "[Stage1] dropping answer for round %s: round %s has started",
+                mission.round, self._latest_round,
+            )
             return None
         return self.client.submit_grounding(grounding)
 

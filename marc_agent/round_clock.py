@@ -42,6 +42,16 @@ def scene_budget_fraction() -> float:
     return _env_float("MARC_QWEN_SCENE_BUDGET_FRACTION", DEFAULT_SCENE_BUDGET_FRACTION)
 
 
+def answer_is_stale(mission_round: int, latest_round: int) -> bool:
+    """True when the platform has issued a later round than the one being answered.
+
+    Submissions carry no round id, so an answer that outlives its round would be
+    read as the next round's. The round limit is simulation time and the local
+    clock is wall time, so only a newer mission can say the answer is late.
+    """
+    return int(mission_round) < int(latest_round)
+
+
 class RoundClock:
     """The current mission's time limit, counted down with a monotonic clock."""
 
