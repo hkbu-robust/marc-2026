@@ -20,12 +20,15 @@ surface, and projection falls back to the flat plane.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+log = logging.getLogger("marc_agent.ground_model")
 
 DEFAULT_PATH = Path(__file__).resolve().parent / "data" / "ground_model.npz"
 NEIGHBOURS = 12
@@ -119,8 +122,12 @@ _DEFAULT: Optional[GroundModel] = None
 
 
 def default_ground_model() -> Optional[GroundModel]:
-    """The shipped model, loaded once; None if the artefact is missing."""
+    """The shipped model, loaded once; None if the artefact is missing or unreadable
+    (projection then keeps the flat plane rather than failing at start-up)."""
     global _DEFAULT
     if _DEFAULT is None and DEFAULT_PATH.exists():
-        _DEFAULT = GroundModel.load(DEFAULT_PATH)
+        try:
+            _DEFAULT = GroundModel.load(DEFAULT_PATH)
+        except Exception as exc:  # e.g. a truncated file or a git-LFS pointer
+            log.warning("ground model %s unreadable (%s); using the flat plane", DEFAULT_PATH, exc)
     return _DEFAULT
