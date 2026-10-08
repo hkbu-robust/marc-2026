@@ -794,11 +794,18 @@ def _grounding_payload(
     )
 
 
-def fallback_grounding(command_text: str, camera_ids=()) -> GroundingResult:
+def fallback_grounding(command_text: str, detections: Optional[CctvDetectionRound] = None) -> GroundingResult:
     """A submission when the round produced none (#114: never end a round without one):
-    the lenient reading's fields, the first camera, the sentinel coordinates."""
+    the lenient reading's fields, the camera with the most candidates, the sentinel
+    coordinates."""
     parsed, _ = parse_command_lenient(command_text or "", expected_intent=Intent.FIND)
-    camera_id = sorted(camera_ids)[0] if camera_ids else ""
+    counts: dict[str, int] = {}
+    if detections is not None:
+        for camera in detections.camera_ids:
+            counts.setdefault(camera, 0)
+        for item in (*detections.objects, *detections.people):
+            counts[item.camera_id] = counts.get(item.camera_id, 0) + 1
+    camera_id = min(counts, key=lambda camera: (-counts[camera], camera)) if counts else ""
     note_decision("sentinel", reason="fallback_grounding", camera_id=camera_id,
                   target_type=parsed.target_type)
     return _grounding_payload(parsed, camera_id, IGNORED_CLASS_DUMMY_XYZ, IGNORED_CLASS_DUMMY_XYZ)

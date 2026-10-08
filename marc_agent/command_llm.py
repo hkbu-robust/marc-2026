@@ -16,8 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Optional
 
 from marc_agent.command_parser import (
@@ -31,6 +32,7 @@ from marc_agent.command_parser import (
     Relation,
     Situation,
     _SCENE_HINTS,
+    mentioned_landmarks,
     parse_command_lenient,
 )
 from marc_agent.experiment_log import note_decision
@@ -157,7 +159,7 @@ Fields:
 - landmark: the landmark the target is placed relative to, or null if none is named. One of:
 {landmarks}
   The landmark is the one the target itself is placed relative to, in the same phrase as the target ("find the mug behind the bench" -> bench), even when another place is mentioned first ("Near the taxi, find ..." makes the taxi only context). Put the other named landmarks in place_cues. A car without a named model ("my car", "a car") is not a landmark: null.
-- relation: the spatial word linking the target to that landmark, or null if there is none. "next to", "by" -> {NEXT_TO_RELATION.value}; "leaning against" -> {LEANING_AGAINST_RELATION.value}; "propped against" -> {PROPPED_AGAINST_RELATION.value}; "beside", "alongside" -> beside; "near", "close to", "around" -> near; "on", "on top of", "sitting/lying on" -> on; "above", "over" -> above; "in front of" -> front; "behind" -> behind; "left of" -> left; "right of" -> right. Something merely "left there" or "dropped somewhere" has relation null.
+- relation: the spatial word linking the target to that landmark, or null if there is none. "next to", "by" -> {NEXT_TO_RELATION.value}; "leaning against" -> {LEANING_AGAINST_RELATION.value}; "propped against" -> {PROPPED_AGAINST_RELATION.value}; "beside", "alongside" -> beside; "near", "close to", "around" -> near; "on", "on top of", "sitting/lying on" -> on; "above", "over" -> above; "in front of" -> front; "behind" -> behind; "left of" -> left; "right of" -> right. Something merely "left there", "left behind" (forgotten) or "dropped somewhere" has relation null: "behind" is a relation only when a landmark follows it ("behind the bench").
 - scene_hint: a stated place, or null. One of:
 {scenes}
 - pose_hint (person targets only, else null): one of {", ".join(POSES)}. Face-down = person_prone; lying on the back or side, collapsed, sprawled = person_lying_down; slumped or bent over = person_bending; crouching, squatting, kneeling = person_crouching; lounging, leaning back = person_reclining; standing = null.
@@ -184,12 +186,26 @@ class Reading:
     fixes: tuple[str, ...] = ()
 
 
-def to_parsed(record: dict, expected_intent: Optional[Intent]) -> tuple[Optional[ParsedCommand], tuple[str, ...]]:
-    """A decoded record as ``ParsedCommand``, after the cross-field rules; None on abstain."""
+def to_parsed(
+    record: dict, expected_intent: Optional[Intent], text: Optional[str] = None
+) -> tuple[Optional[ParsedCommand], tuple[str, ...]]:
+    """A decoded record as ``ParsedCommand``, after the cross-field rules; None on abstain.
+
+    With ``text``, a landmark or place cue the text does not name is dropped: the
+    model sometimes supplies a car model for a parking command that names no car."""
     fixes = []
     target = record.get("target_type")
     if target not in TARGETS or target == UNKNOWN:
         return None, ("abstain",)
+    if text is not None:
+        named = mentioned_landmarks(text)
+        if record.get("landmark") is not None and record["landmark"] not in named:
+            fixes.append("landmark_not_in_text")
+            record["landmark"] = None
+        cues = [cue for cue in record.get("place_cues") or () if cue in named]
+        if len(cues) != len(record.get("place_cues") or ()):
+            fixes.append("place_cue_not_in_text")
+        record["place_cues"] = cues
     if target != PERSON:
         for key in ("pose_hint", "situation_hint"):
             if record.get(key) is not None:
@@ -201,6 +217,11 @@ def to_parsed(record: dict, expected_intent: Optional[Intent]) -> tuple[Optional
         fixes.append("landmark_in_place_cues")
         cues = tuple(cue for cue in cues if cue != landmark)
     relation = record.get("relation")
+    if relation == "behind" and text is not None and not _BEHIND_SOMETHING.search(text.lower()):
+        # "left it behind" is the idiom (forgotten), not a place; the model still reads it
+        # as behind (dev: "I left my pencil case behind; please find it.").
+        fixes.append("behind_idiom")
+        relation = None
     if relation is not None and target == PERSON:
         fixes.append("relation_on_person")  # person commands carry no relation (SAR)
         relation = None
@@ -219,6 +240,10 @@ def to_parsed(record: dict, expected_intent: Optional[Intent]) -> tuple[Optional
         place_cues=cues,
     ), tuple(fixes)
 
+
+# "behind" followed by more words of the same clause names a place; at a clause end it is
+# the idiom "left (it) behind".
+_BEHIND_SOMETHING = re.compile(r"\bbehind\s+(?![,.;:!?])\w")
 
 Complete = Callable[[str, dict, float], str]  # (prompt, schema, timeout) -> JSON text
 
@@ -269,9 +294,10 @@ def read_command(
         try:
             reply = (complete or qwen_complete())(prompt(text), schema(), timeout_s)
             record = json.loads(reply)
-            parsed, fixes = to_parsed(record, expected_intent)
+            parsed, fixes = to_parsed(record, expected_intent, text)
             latency = time.perf_counter() - started
             if parsed is not None:
+                parsed = _rules_situation(parsed, text, expected_intent)
                 reading = Reading(parsed, "qwen", record.get("pose_hint"),
                                   record.get("situation_hint"), latency, None, fixes)
                 _note(reading)
@@ -282,10 +308,31 @@ def read_command(
             # No Qwen configured (tests, local runs) is a plain rules run, not a warning.
             level = logging.DEBUG if reason == "QwenConfigurationError" else logging.WARNING
             log.log(level, "[command-llm] Qwen parse failed (%s: %s); using the rules", reason, exc)
-    parsed, error = parse_command_lenient(text, expected_intent=expected_intent)
+    try:
+        parsed, error = parse_command_lenient(text, expected_intent=expected_intent)
+    except Exception as exc:  # the rules are meant never to raise; never end without a reading
+        parsed = ParsedCommand(intent=expected_intent or Intent.FIND, target_type=UNKNOWN)
+        error = f"rules_error:{type(exc).__name__}"
+        log.exception("[command-llm] rule parser raised; reading as unknown")
     reading = Reading(parsed, "partial" if error else "rules", fallback_reason=reason or error)
     _note(reading)
     return reading
+
+
+def _rules_situation(parsed: ParsedCommand, text: str, expected_intent) -> ParsedCommand:
+    """The situation cue SAR selection uses: the rule reading's, as before #114, else
+    Qwen's hint. Qwen fills situation_hint from the R03 table in its prompt and was wrong
+    on 6 of the 14 public SAR commands, which steers selection to the wrong person; the
+    submitted situation comes from R03 on the detected pose either way."""
+    if parsed.target_type != PERSON:
+        return parsed
+    try:
+        rules, _ = parse_command_lenient(text, expected_intent=expected_intent)
+    except Exception:
+        return parsed
+    if rules.target_type == PERSON and rules.situation is not None:
+        return replace(parsed, situation=rules.situation)
+    return parsed
 
 
 def _note(reading: Reading) -> None:

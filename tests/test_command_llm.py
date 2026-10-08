@@ -46,10 +46,29 @@ class SchemaTests(unittest.TestCase):
 @mock.patch.dict(os.environ, {"MARC_COMMAND_PARSER": "qwen"})
 class ReadCommandTests(unittest.TestCase):
     def test_a_valid_reply_is_used(self):
-        reading = command_llm.read_command("whatever", complete=lambda *a: _record())
+        reading = command_llm.read_command("Find the mug on the bench.", complete=lambda *a: _record())
         self.assertEqual("qwen", reading.source)
         self.assertEqual(("mug", "bench", Relation.ON),
                          (reading.parsed.target_type, reading.parsed.landmark, reading.parsed.relation))
+
+    def test_a_landmark_the_text_does_not_name_is_dropped(self):
+        reply = _record(target_type="tumbler", landmark="normal_car_1", relation=None,
+                        scene_hint="parking", place_cues=["suv"])
+        reading = command_llm.read_command(
+            "I dropped my tumbler as I got out of my car in the parking lot.",
+            complete=lambda *a: reply)
+        self.assertIsNone(reading.parsed.landmark)
+        self.assertEqual((), reading.parsed.place_cues)
+        self.assertIn("landmark_not_in_text", reading.fixes)
+
+    def test_left_behind_is_an_idiom_not_a_place(self):
+        reply = _record(target_type="pencilcase", landmark="picnic_table", relation="behind")
+        idiom = command_llm.read_command("I sat at the picnic table and left my pencil case behind.",
+                                         complete=lambda *a: reply)
+        place = command_llm.read_command("I left my pencil case behind the picnic table.",
+                                         complete=lambda *a: reply)
+        self.assertIsNone(idiom.parsed.relation)
+        self.assertEqual(Relation.BEHIND, place.parsed.relation)
 
     def test_cross_field_rules_are_fixed_not_raised(self):
         reply = _record(target_type="mug", pose_hint="person_prone", landmark=None,
@@ -75,6 +94,18 @@ class ReadCommandTests(unittest.TestCase):
                      "asdf qwer", "Find the person walking normally but needed help."):
             reading = command_llm.read_command(text, complete=lambda *a: "{")
             self.assertIn(reading.source, {"rules", "partial"})
+
+    def test_rules_correct_typos_only_when_a_word_was_not_understood(self):
+        from marc_agent.command_parser import parse_command_lenient
+        parsed, error = parse_command_lenient("Find the umberlla near the bench.",
+                                              expected_intent=Intent.FIND)
+        self.assertEqual(("umbrella", "bench", None), (parsed.target_type, parsed.landmark, error))
+        for text, landmark, scene in (
+            ("Find the mug on the bench near the beach.", "bench", None),
+            ("Find the mug I dropped in the parking spot.", None, "parking_space"),
+        ):
+            parsed, _ = parse_command_lenient(text, expected_intent=Intent.FIND)
+            self.assertEqual((landmark, scene), (parsed.landmark, parsed.scene_hint), text)
 
     def test_rules_mode_skips_qwen(self):
         with mock.patch.dict(os.environ, {"MARC_COMMAND_PARSER": "rules"}):

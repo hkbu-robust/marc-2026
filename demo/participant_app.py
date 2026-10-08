@@ -118,6 +118,7 @@ class DemoParticipant:
         self._state = RetrievalState()
         self._reveal = None
         self._last_detections = None
+        self._stage1_submitted_round = None
         self._last_stage1_candidates = None
         self._stage1_cache = StaticSceneCache.from_env()
         self._stage1_lock = threading.Lock()
@@ -170,12 +171,14 @@ class DemoParticipant:
                     terminal=True, round=mission.round,
                     error_type=type(exc).__name__,
                 )
-                log.exception("[Stage1] round %s failed; submitting the fallback", mission.round)
-                # Never end a round without a submission (#114).
-                cameras = getattr(self._last_detections, "camera_ids", ()) or ()
+                log.exception("[Stage1] round %s failed", mission.round)
+                # Never end a round without a submission (#114), and never submit twice.
+                if self._stage1_submitted_round == mission.round:
+                    return
                 try:
                     seq = self.client.submit_grounding(
-                        fallback_grounding(mission.voice_command, cameras))
+                        fallback_grounding(mission.voice_command, self._last_detections))
+                    self._stage1_submitted_round = mission.round
                     self._experiment.event(
                         "stage1.submission.completed", stage="stage1", round=mission.round,
                         sequence=seq, method="fallback_after_error",
@@ -227,9 +230,9 @@ class DemoParticipant:
         if grounding is None:  # never end a round without a submission (#114)
             log.info("[Stage1] no grounding (reason=%s); submitting the fallback",
                      round_result.failure_reason)
-            grounding = fallback_grounding(mission.voice_command,
-                                           self._last_detections.camera_ids)
+            grounding = fallback_grounding(mission.voice_command, self._last_detections)
         seq = self.client.submit_grounding(grounding)
+        self._stage1_submitted_round = mission.round
         self._experiment.event(
             "stage1.submission.completed", stage="stage1", round=mission.round,
             sequence=seq, camera_id=grounding.camera_id,

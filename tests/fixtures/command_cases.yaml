@@ -2369,17 +2369,10 @@
     },
     {
       "id": "error_ambiguous_landmark",
-      "tier": "attachment",
+      "tier": "invalid",
       "text": "Find the mug by the bench and the taxi.",
       "expected_intent": "find",
-      "expected": {
-        "intent": "find",
-        "target_type": "mug",
-        "landmark": "bench",
-        "relation": "near",
-        "situation": null,
-        "scene_hint": null
-      }
+      "expected_error": "ambiguous_landmark"
     },
     {
       "id": "reference_reordered_location",
@@ -3041,17 +3034,10 @@
     },
     {
       "id": "error_misspelled_target",
-      "tier": "surface",
+      "tier": "invalid",
       "text": "Find the umberlla near the bench.",
       "expected_intent": "find",
-      "expected": {
-        "intent": "find",
-        "target_type": "umbrella",
-        "landmark": "bench",
-        "relation": "near",
-        "situation": null,
-        "scene_hint": null
-      }
+      "expected_error": "unknown_target"
     },
     {
       "id": "error_support_then_behind_context",

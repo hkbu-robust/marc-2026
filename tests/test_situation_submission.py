@@ -8,6 +8,7 @@ from pathlib import Path
 
 from marc_agent.command_parser import Intent, ParsedCommand, Situation
 from marc_agent.experiment_log import decision_scope
+from marc_agent.types import CctvDetectionRound, ObjectCandidate
 from marc_agent.perception.stage1_pipeline import (
     IGNORED_CLASS_DUMMY_XYZ,
     fallback_grounding,
@@ -49,8 +50,10 @@ class SituationTests(unittest.TestCase):
 class FallbackTests(unittest.TestCase):
     def test_an_unreadable_command_still_submits(self):
         with decision_scope("stage1", 1) as notes:
-            grounding = fallback_grounding("do something", ["rig_b", "rig_a"])
-        self.assertEqual("rig_a", grounding.camera_id)
+            grounding = fallback_grounding("do something", CctvDetectionRound(
+                objects=[ObjectCandidate("rig_b:mug:0", "mug", (0, 0, 1, 1), 0.9, "rig_b", (640, 480))],
+                camera_ids=["rig_a", "rig_b"]))
+        self.assertEqual("rig_b", grounding.camera_id)  # the camera with the most candidates
         self.assertEqual("unknown", grounding.target_type)
         self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), list(grounding.target_coord))
         self.assertTrue([n for n in notes if n["decision"] == "sentinel"])
@@ -58,7 +61,7 @@ class FallbackTests(unittest.TestCase):
                          and n["target_type"] == "unknown"])
 
     def test_a_readable_command_keeps_its_fields(self):
-        grounding = fallback_grounding("Find the mug on the bench.", [])
+        grounding = fallback_grounding("Find the mug on the bench.")
         self.assertEqual(("mug", "bench", "on"),
                          (grounding.target_type, grounding.landmark, grounding.relation))
 

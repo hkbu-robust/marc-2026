@@ -937,7 +937,9 @@ def select_sar_candidate(
 ) -> SarSelectionResult:
     """Select one person with Qwen or the deterministic bounded fallback."""
     requested = command.situation.value if command.situation else None
-    if command.target_type != "person" or requested is None:
+    # A person command need not state a situation (#114): selection then simply has
+    # no situation cue, and the submitted situation comes from R03 on the chosen pose.
+    if command.target_type != "person":
         log.info(
             "[vlm] skipped reason=incomplete_sar_request target_type=%s situation=%s",
             command.target_type,
@@ -1158,7 +1160,7 @@ def select_sar_candidate(
                     if item.world_dist_m is not None
                     and (not poses or item.person.pose_class in poses)
                     and (not requires_support or item.horizontal_overlap >= 0.5)
-                    and situation_of(item) == requested
+                    and (requested is None or situation_of(item) == requested)
                 )
                 if nearby:
                     closest = min(

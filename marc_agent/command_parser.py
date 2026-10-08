@@ -200,7 +200,6 @@ def _normalize(text: str) -> str:
     text = re.sub(r"[^\w\s;,.']+", " ", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\batop\b", "on top of", text)
-    text = _correct_typos(text)
     for pattern, canonical in _SYNONYMS:
         text = pattern.sub(canonical, text)
     return text.strip(" ,.;")
@@ -543,7 +542,6 @@ def _resolve_target(text: str) -> tuple[str, bool]:
 # problems, and disclose that: "next to" is labelled near in 4 of 5 (beside once),
 # "leaning against" near (1 of 1), "propped against" beside (1 of 1). A command with no
 # relation word gets near downstream (#113), the organisers' label in 5 of 7 such problems.
-# "by" reads as "next to".
 NEXT_TO_RELATION = Relation.NEAR
 LEANING_AGAINST_RELATION = Relation.NEAR
 PROPPED_AGAINST_RELATION = Relation.BESIDE
@@ -571,7 +569,7 @@ def _relations_before_landmark(prefix: str, landmark: str) -> set[Relation]:
             matched = re.search(rf"\b(?:{pattern})\b", prefix)
         if matched:
             relations.add(relation)
-    if re.search(rf"\b(?:{_NEXT_TO_PATTERN}|by)(?:\s+(?:an?|the))?{_MODIFIERS}\s*$", prefix):
+    if re.search(rf"\b(?:{_NEXT_TO_PATTERN})(?:\s+(?:an?|the))?{_MODIFIERS}\s*$", prefix):
         relations.add(NEXT_TO_RELATION)
     if re.search(rf"\bleaning\s+against(?:\s+(?:an?|the))?{_MODIFIERS}\s*$", prefix):
         relations.add(LEANING_AGAINST_RELATION)
@@ -1099,26 +1097,57 @@ _VOCABULARY = _vocabulary()
 _KNOWN_WORDS = frozenset(re.findall(r"[a-z]{5,}", Path(__file__).read_text(encoding="utf-8"))) - _VOCABULARY
 
 
+# Typo correction only when a word was not understood, so a correct word that happens to
+# be one edit from a catalogue word ("beach", "cable", "spots") is never rewritten.
+_TYPO_RETRY = frozenset({ParseErrorCode.UNKNOWN_TARGET, ParseErrorCode.UNKNOWN_LANDMARK})
+
+
+def _typo_corrected(text: str) -> Optional[str]:
+    normalized = _normalize(text or "")
+    corrected = _correct_typos(normalized)
+    return corrected if corrected != normalized else None
+
+
+def _parse_for_stage(text: str, expected_intent: Optional[Intent]) -> ParsedCommand:
+    """``parse_command``; a Stage 1 command phrased as "bring" is read without the
+    stage's intent, as run_stage1_candidate_pipeline always has."""
+    try:
+        return parse_command(text, expected_intent=expected_intent)
+    except CommandParseError as error:
+        if error.code is not ParseErrorCode.INTENT_MISMATCH:
+            raise
+        return parse_command(text)
+
+
+def mentioned_landmarks(text: str) -> frozenset[str]:
+    """Landmark types the text names (aliases, synonyms, typo correction)."""
+    found = {match.value for match in _matches(_normalize(text or ""), _LANDMARK_ALIASES)}
+    corrected = _typo_corrected(text)
+    if corrected:
+        found |= {match.value for match in _matches(corrected, _LANDMARK_ALIASES)}
+    return frozenset(found)
+
+
 def parse_command_lenient(
     text: str,
     *,
     expected_intent: Optional[Intent] = None,
 ) -> tuple[ParsedCommand, Optional[str]]:
-    """``parse_command`` that never raises (#114). On a parse error, a partial reading:
+    """``parse_command`` that never raises (#114); on an unknown target or landmark it
+    retries once with typo correction. On a parse error, a partial reading:
     the first-mentioned catalogue object (else person, else ``unknown``), the first
     landmark, no relation. Returns the reading and the error code, if any."""
-    try:
-        return parse_command(text, expected_intent=expected_intent), None
-    except CommandParseError as error:
-        code = error.code.value
-        if error.code is ParseErrorCode.INTENT_MISMATCH:
-            # A Stage 1 command phrased as "bring": read it without the stage's intent,
-            # as run_stage1_candidate_pipeline always has.
-            try:
-                return parse_command(text), None  # keeps the stated intent
-            except CommandParseError as retry:
-                code = retry.code.value
-    normalized = _normalize(text or "")
+    code = None
+    for attempt in (text, _typo_corrected(text)):
+        if attempt is None:
+            continue
+        try:
+            return _parse_for_stage(attempt, expected_intent), None
+        except CommandParseError as error:
+            code = code or error.code.value
+            if error.code not in _TYPO_RETRY:
+                break
+    normalized = _typo_corrected(text) or _normalize(text or "")
     objects = sorted(_matches(normalized, _OBJECT_ALIASES), key=lambda item: item.start)
     if objects:
         target = objects[0].value
@@ -1155,6 +1184,7 @@ __all__ = [
     "VEHICLE_LANDMARKS",
     "implicit_anchor_classes",
     "parse_command",
+    "mentioned_landmarks",
     "parse_command_lenient",
     "uses_vehicle_anchor",
 ]
