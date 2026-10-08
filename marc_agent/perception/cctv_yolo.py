@@ -55,10 +55,10 @@ REFINE_CROP_CAP = 8
 SMALL_TARGETS_PATH = Path(__file__).resolve().parent / "data" / "small_targets.json"
 ZOOM = 2
 ZOOM_CONF = 0.4  # max F1 of added target boxes on #87 held-out even scenes (#115)
-# Known variance (check in the #128 runs): the public lf08/hf08 umbrella is a ~10 px blob
-# in rig_7_a that this pass finds at ~0.5 in some runs and misses in others (the platform
-# re-renders each run). Found: both rounds ~97.6; missed: 25. One zoom-on smoke run found it
-# (86.61), the next missed it (83.44); see ablations/final-system/120b-implied-anchor-geometry.
+# The public lf08/hf08 rig_7_a umbrella scores 0.47-0.65 here in 13 of 14 logged frames
+# (0.36 once). A smoke run that "missed" it had hit CUDA OOM on a shared GPU, and this pass
+# skipped those cameras; OOM now retries once, is logged in decision.tiled_refine, and fails
+# the regression gate (ablations/final-system/115-tiled-refinement/lf08-oom.md).
 
 
 def _pad_box(
@@ -457,7 +457,10 @@ class CctvYoloDetector:
         objects: list[ObjectCandidate],
         target_type: str,
     ) -> list[ObjectCandidate]:
-        """Target-class boxes the full-frame pass missed, found on a zoomed pass."""
+        """Target-class boxes the full-frame pass missed, found on a zoomed pass.
+
+        Cameras skipped after a second CUDA OOM are listed in ``last_zoom_skipped``."""
+        self.last_zoom_skipped = []
         counts: dict[str, int] = defaultdict(int)
         occupied: dict[str, list[tuple[float, float, float, float]]] = defaultdict(list)
         for item in objects:
@@ -469,18 +472,25 @@ class CctvYoloDetector:
             frame = frames[camera_id]
             if frame.rgb is None:
                 continue
-            try:
-                predicted = self._predict_frame(
-                    np.asarray(frame.rgb),
-                    confidence=ZOOM_CONF,
-                    imgsz=ZOOM * self.contract.imgsz,
-                )
-            except Exception as exc:
-                if not _is_cuda_oom(exc):
-                    raise
-                log.warning("[cctv-yolo] zoomed refine OOM camera=%s; skipping", camera_id)
-                predicted = []
+            predicted = None
+            for attempt in (1, 2):  # on CUDA OOM, free the cache and retry once
+                try:
+                    predicted = self._predict_frame(
+                        np.asarray(frame.rgb),
+                        confidence=ZOOM_CONF,
+                        imgsz=ZOOM * self.contract.imgsz,
+                    )
+                    break
+                except Exception as exc:
+                    if not _is_cuda_oom(exc):
+                        raise
+                    log.warning("[cctv-yolo] zoomed refine OOM camera=%s attempt=%d",
+                                camera_id, attempt)
+                    _release_cuda()
             _release_cuda()
+            if predicted is None:
+                self.last_zoom_skipped.append(camera_id)
+                continue
             for class_name, confidence, box in predicted:
                 if class_name != target_type or _same_object(box, occupied[camera_id]):
                     continue
@@ -805,6 +815,8 @@ def _zoomed_refine(target_type: str, round_: CctvDetectionRound) -> list[ObjectC
         elapsed_ms,
         ",".join(item.candidate_id for item in added) or "-",
     )
+    skipped = getattr(_detector, "last_zoom_skipped", None)
+    skipped = list(skipped) if isinstance(skipped, list) else []
     note_decision(
         "tiled_refine",
         target=target_type,
@@ -812,5 +824,6 @@ def _zoomed_refine(target_type: str, round_: CctvDetectionRound) -> list[ObjectC
         candidates=[item.candidate_id for item in added],
         cameras=sorted({item.camera_id for item in added}),
         ms=round(elapsed_ms),
+        **({"oom_skipped": skipped} if skipped else {}),
     )
     return added
