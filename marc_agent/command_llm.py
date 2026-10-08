@@ -208,10 +208,7 @@ def to_parsed(record: dict, expected_intent: Optional[Intent]) -> tuple[Optional
         fixes.append("relation_without_landmark")
         relation = None
     situation = record.get("situation_hint")
-    intent = Intent(record["intent"]) if record.get("intent") in INTENTS else Intent.FIND
-    if expected_intent is not None and intent != expected_intent:
-        fixes.append("intent_from_stage")
-        intent = expected_intent
+    intent = Intent(record["intent"]) if record.get("intent") in INTENTS else (expected_intent or Intent.FIND)
     return ParsedCommand(
         intent=intent,
         target_type=target,
@@ -226,12 +223,13 @@ def to_parsed(record: dict, expected_intent: Optional[Intent]) -> tuple[Optional
 Complete = Callable[[str, dict, float], str]  # (prompt, schema, timeout) -> JSON text
 
 
-def qwen_complete(config=None) -> Complete:
+def qwen_complete(config=None, post=None) -> Complete:
     """A text-only, schema-constrained chat completion against the served vLLM."""
     from marc_agent.perception.qwen_remote import _post
     from marc_agent.perception.qwen_runtime import QwenRemoteConfig
 
     config = config or QwenRemoteConfig.load()
+    post = post or _post
 
     def complete(text: str, json_schema: dict, timeout_s: float) -> str:
         body = json.dumps({
@@ -246,7 +244,7 @@ def qwen_complete(config=None) -> Complete:
                                 "json_schema": {"name": "command", "schema": json_schema, "strict": True}},
         }).encode("utf-8")
         headers = {"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"}
-        raw = _post(config.chat_completions_url, body, headers, timeout_s)
+        raw = post(config.chat_completions_url, body, headers, timeout_s)
         return json.loads(raw)["choices"][0]["message"]["content"]
 
     return complete
@@ -281,7 +279,9 @@ def read_command(
             reason = "abstain"
         except Exception as exc:  # any failure falls back to the rules
             reason = type(exc).__name__
-            log.warning("[command-llm] Qwen parse failed (%s: %s); using the rules", reason, exc)
+            # No Qwen configured (tests, local runs) is a plain rules run, not a warning.
+            level = logging.DEBUG if reason == "QwenConfigurationError" else logging.WARNING
+            log.log(level, "[command-llm] Qwen parse failed (%s: %s); using the rules", reason, exc)
     parsed, error = parse_command_lenient(text, expected_intent=expected_intent)
     reading = Reading(parsed, "partial" if error else "rules", fallback_reason=reason or error)
     _note(reading)

@@ -15,15 +15,14 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
+from marc_agent.command_llm import read_command
 from marc_agent.command_parser import (
     LANDMARK_TYPES,
-    CommandParseError,
     Intent,
-    ParseErrorCode,
     ParsedCommand,
     Relation,
     implicit_anchor_classes,
-    parse_command,
+    parse_command_lenient,
 )
 from marc_agent.perception.cctv_project import (
     CctvProjector,
@@ -39,6 +38,7 @@ from marc_agent.perception.object_selection import (
     select_object_candidate,
 )
 from marc_agent.perception.occlusion_hypothesis import add_hypotheses
+from marc_agent.perception.situation_rules import DEFAULT_SITUATION, resolve_situation
 from marc_agent.perception.sar_selection import (
     QwenSarVerifier,
     SarSelectionResult,
@@ -453,21 +453,8 @@ def run_stage1_candidate_pipeline(
     """Parse one request, collect all-camera candidates, and select SAR or objects."""
     started = time.perf_counter()
     parse_started = time.perf_counter()
-    try:
-        parsed = parse_command(command_text, expected_intent=expected_intent)
-    except CommandParseError as exc:
-        if exc.code is ParseErrorCode.INTENT_MISMATCH and expected_intent is Intent.FIND:
-            parsed = parse_command(command_text)
-        else:
-            return Stage1CandidateResult(
-                command_text,
-                None,
-                CctvDetectionRound(),
-                None,
-                f"command_parse:{exc.code.value}",
-                (time.perf_counter() - started) * 1000.0,
-                parse_ms=(time.perf_counter() - parse_started) * 1000.0,
-            )
+    # Qwen under a JSON schema, else the lenient rules; never raises (#114).
+    parsed = read_command(command_text, expected_intent=expected_intent).parsed
     parse_ms = (time.perf_counter() - parse_started) * 1000.0
 
     log.info(
@@ -764,6 +751,7 @@ def _grounding_payload(
     anchor_xyz: tuple[float, float, float],
     *,
     anchor_class: Optional[str] = None,
+    person_pose: Optional[str] = None,
 ) -> GroundingResult:
     """The submitted fields, filled where the scorer needs what the command omits.
 
@@ -786,8 +774,15 @@ def _grounding_payload(
         relation, relation_source = Relation.NEAR, "default"
     else:
         relation, relation_source = None, "none"
-    if is_object:
-        note_decision("field_source", landmark=landmark_source, relation=relation_source)
+    situation = situation_source = None
+    if not is_object:
+        situation, situation_source = submitted_situation(parsed, person_pose, anchor_class)
+    note_decision(
+        "field_source",
+        target_type="unknown" if parsed.target_type == "unknown" else "stated",
+        landmark=landmark_source, relation=relation_source,
+        **({"situation": situation_source} if situation_source else {}),
+    )
     return _grounding_result_cls()(
         camera_id=camera_id,
         target_type=parsed.target_type,
@@ -795,8 +790,39 @@ def _grounding_payload(
         target_coord=_xyz_list(target_xyz),
         landmark=landmark,
         relation=relation.value if relation is not None else None,
-        situation=parsed.situation.value if parsed.situation else None,
+        situation=situation,
     )
+
+
+def fallback_grounding(command_text: str, camera_ids=()) -> GroundingResult:
+    """A submission when the round produced none (#114: never end a round without one):
+    the lenient reading's fields, the first camera, the sentinel coordinates."""
+    parsed, _ = parse_command_lenient(command_text or "", expected_intent=Intent.FIND)
+    camera_id = sorted(camera_ids)[0] if camera_ids else ""
+    note_decision("sentinel", reason="fallback_grounding", camera_id=camera_id,
+                  target_type=parsed.target_type)
+    return _grounding_payload(parsed, camera_id, IGNORED_CLASS_DUMMY_XYZ, IGNORED_CLASS_DUMMY_XYZ)
+
+
+def submitted_situation(
+    parsed: ParsedCommand, pose: Optional[str], support: Optional[str]
+) -> tuple[str, str]:
+    """The SAR situation to submit and its source (#114).
+
+    The organisers' R03 pose x support matrix on the selected person's detected pose,
+    with the anchor's class as support (and the stated scene as surface): correct in
+    138/140 #88 SAR rounds, the 2 misses being wrong-person selections (#118). Without
+    a detected pose, the situation the text states; else the R03 default."""
+    if pose:
+        situation = resolve_situation(pose, support=support, surface=parsed.scene_hint)
+        note_decision("situation", source="r03", pose=pose, support=support,
+                      surface=parsed.scene_hint, value=situation)
+        return situation, "r03"
+    if parsed.situation is not None:
+        note_decision("situation", source="hint", value=parsed.situation.value)
+        return parsed.situation.value, "hint"
+    note_decision("situation", source="default", value=DEFAULT_SITUATION)
+    return DEFAULT_SITUATION, "default"
 
 
 def _scene_landmark_class(
@@ -824,10 +850,6 @@ def _compose_person(
 ) -> Stage1RoundResult:
     parsed = candidates.parsed
     selection = candidates.sar_selection
-    if parsed is None:
-        reason = candidates.failure_reason or "command_parse"
-        log.info("[stage1] skip submit reason=%s", reason)
-        return Stage1RoundResult(candidates, None, None, reason)
     if selection is None or selection.selected is None:
         return _compose_last_resort(
             candidates, projector, parsed, "no_person_selected"
@@ -872,6 +894,7 @@ def _compose_person(
         target_xyz,
         anchor_xyz,
         anchor_class=anchor.class_name if anchor is not None else None,
+        person_pose=person.pose_class,
     )
     log.info(
         "[stage1] grounding camera=%s target_id=%s anchor_id=%s method=%s "
@@ -934,10 +957,6 @@ def _compose_object(
     projector: CctvProjector,
 ) -> Stage1RoundResult:
     parsed = candidates.parsed
-    if parsed is None:
-        reason = candidates.failure_reason or "command_parse"
-        log.info("[stage1] skip submit reason=%s", reason)
-        return Stage1RoundResult(candidates, None, None, reason)
 
     chosen = candidates.object_selection
     ranked = rank_object_candidates(
@@ -1100,10 +1119,10 @@ def compose_stage1_grounding(
     projector: CctvProjector,
 ) -> Stage1RoundResult:
     """Project a selected candidate into a GroundingResult, or dummy XYZ."""
+    if candidates.parsed is None:  # e.g. a replayed round logged before #114
+        reading, _ = parse_command_lenient(candidates.command_text, expected_intent=Intent.FIND)
+        candidates = replace(candidates, parsed=reading)
     parsed = candidates.parsed
-    if parsed is None:
-        reason = candidates.failure_reason or "command_parse"
-        return Stage1RoundResult(candidates, None, None, reason)
     if parsed.target_type == "person":
         result = _compose_person(candidates, projector)
     else:

@@ -52,6 +52,7 @@ from marc_agent.perception.cctv_round import (
 )
 from marc_agent.perception.stage1_pipeline import (
     StaticSceneCache,
+    fallback_grounding,
     get_default_verifier,
     log_qwen_startup_status,
     run_stage1_round,
@@ -169,7 +170,18 @@ class DemoParticipant:
                     terminal=True, round=mission.round,
                     error_type=type(exc).__name__,
                 )
-                log.exception("[Stage1] round %s failed", mission.round)
+                log.exception("[Stage1] round %s failed; submitting the fallback", mission.round)
+                # Never end a round without a submission (#114).
+                cameras = getattr(self._last_detections, "camera_ids", ()) or ()
+                try:
+                    seq = self.client.submit_grounding(
+                        fallback_grounding(mission.voice_command, cameras))
+                    self._experiment.event(
+                        "stage1.submission.completed", stage="stage1", round=mission.round,
+                        sequence=seq, method="fallback_after_error",
+                    )
+                except Exception:
+                    log.exception("[Stage1] fallback submission failed")
 
     def _execute_stage1(self, mission):
         timeout_s = discovery_timeout_from_limit(getattr(mission, "time_limit", None))
@@ -212,17 +224,11 @@ class DemoParticipant:
                  round_result.failure_reason
                  or self._last_stage1_candidates.failure_reason)
         grounding = round_result.grounding
-        if grounding is None:
-            log.info(
-                "[Stage1] skip submit reason=%s (no zero-coordinate fallback)",
-                round_result.failure_reason,
-            )
-            self._experiment.event(
-                "stage1.round.completed", stage="stage1", status="failed",
-                terminal=True, round=mission.round,
-                failure_reason=round_result.failure_reason,
-            )
-            return
+        if grounding is None:  # never end a round without a submission (#114)
+            log.info("[Stage1] no grounding (reason=%s); submitting the fallback",
+                     round_result.failure_reason)
+            grounding = fallback_grounding(mission.voice_command,
+                                           self._last_detections.camera_ids)
         seq = self.client.submit_grounding(grounding)
         self._experiment.event(
             "stage1.submission.completed", stage="stage1", round=mission.round,

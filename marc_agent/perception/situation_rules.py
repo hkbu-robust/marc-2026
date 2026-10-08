@@ -1,6 +1,8 @@
 """Public R03 pose×support situation rules (version 2026.1).
 
-Visual labels only. The submitted GroundingResult.situation stays parser-derived.
+The submitted GroundingResult.situation comes from this matrix applied to the selected
+person's detected pose, with the anchor's class as support (#114,
+``stage1_pipeline.submitted_situation``); the text's situation is only a fallback.
 Unknown support uses the pose fallback below, then ``abnormal`` — never invent
 ``emergency`` without a known road/parking, non-mount, or fallen-vehicle support.
 """

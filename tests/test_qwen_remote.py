@@ -339,18 +339,20 @@ class QwenRemoteTests(unittest.TestCase):
             verifier.set_budget_timeout(4.0)
             self.assertAlmostEqual(1.6, verifier._scene_timeout_s())
 
-    def test_warm_up_sends_a_small_then_a_six_image_board(self):
+    def test_warm_up_sends_a_small_then_a_six_image_board_then_a_command_parse(self):
         calls = []
 
         def post(_url, body, _headers, timeout):
             payload = json.loads(body)
-            images = sum(1 for item in payload["messages"][0]["content"]
-                         if item["type"] == "image_url")
-            calls.append((timeout, images))
+            content = payload["messages"][0]["content"]
+            if isinstance(content, str):  # the command reader's text-only request (#114)
+                calls.append((timeout, payload["response_format"]["type"]))
+            else:
+                calls.append((timeout, sum(1 for item in content if item["type"] == "image_url")))
             return json.dumps({"choices": [{"message": {"content": "READY"}}]}).encode()
 
         RemoteQwenSarVerifier(_config(), post=post).warm_up()
-        self.assertEqual([(90.0, 1), (90.0, 6)], calls)
+        self.assertEqual([(90.0, 1), (90.0, 6), (90.0, "json_schema")], calls)
 
     def test_timeout_retry_exhausted_raises(self):
         calls = []

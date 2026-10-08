@@ -1113,10 +1113,9 @@ def parse_command_lenient(
         code = error.code.value
         if error.code is ParseErrorCode.INTENT_MISMATCH:
             # A Stage 1 command phrased as "bring": read it without the stage's intent,
-            # as run_stage1_candidate_pipeline does, and keep the stage's intent.
+            # as run_stage1_candidate_pipeline always has.
             try:
-                parsed = parse_command(text)
-                return replace(parsed, intent=expected_intent or parsed.intent), None
+                return parse_command(text), None  # keeps the stated intent
             except CommandParseError as retry:
                 code = retry.code.value
     normalized = _normalize(text or "")

@@ -1,0 +1,1125 @@
+{
+ "about": "#88 cache-off runs 01-10, every SAR round: the submitted person's detected pose, the submitted anchor's class, the parsed scene hint and the platform's expected situation (#114, R03 route).",
+ "rounds": [
+  {
+   "run": "run-01",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-01",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-01",
+   "round": "sar03_bench_lie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-01",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-01",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-01",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-01",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-01",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-01",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-01",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-01",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-01",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-01",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-01",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-02",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-02",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-02",
+   "round": "sar03_bench_lie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-02",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-02",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-02",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-02",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-02",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-02",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-02",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-02",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-02",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-02",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-02",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-03",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-03",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-03",
+   "round": "sar03_bench_lie",
+   "pose": "person_reclining",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-03",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-03",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-03",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-03",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-03",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-03",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-03",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-03",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-03",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-03",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-03",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-04",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-04",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-04",
+   "round": "sar03_bench_lie",
+   "pose": "person_reclining",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-04",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-04",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-04",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-04",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-04",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-04",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-04",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-04",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-04",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-04",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-04",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-05",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-05",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-05",
+   "round": "sar03_bench_lie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-05",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-05",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-05",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-05",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-05",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-05",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-05",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-05",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-05",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-05",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-05",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-06",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-06",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-06",
+   "round": "sar03_bench_lie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-06",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-06",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-06",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-06",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-06",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-06",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-06",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-06",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-06",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-06",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-06",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-07",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-07",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-07",
+   "round": "sar03_bench_lie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-07",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-07",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-07",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-07",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-07",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-07",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-07",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-07",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-07",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-07",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-07",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-08",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-08",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-08",
+   "round": "sar03_bench_lie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-08",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-08",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-08",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-08",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-08",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-08",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-08",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-08",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-08",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-08",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-08",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-09",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-09",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-09",
+   "round": "sar03_bench_lie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-09",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-09",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-09",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-09",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-09",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-09",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-09",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-09",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-09",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-09",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-09",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-10",
+   "round": "sar01_trash_sit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-10",
+   "round": "sar02_vending_sit",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-10",
+   "round": "sar03_bench_lie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-10",
+   "round": "sar04_table_lie",
+   "pose": "person_lying_down",
+   "anchor_class": "picnic_table",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-10",
+   "round": "sar06_parking_collapsed",
+   "pose": "person_lying_down",
+   "anchor_class": "kick_scooter",
+   "scene_hint": "parking",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-10",
+   "round": "sar07_parking_prone",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-10",
+   "round": "sar08_fallenbike_down",
+   "pose": "person_bending",
+   "anchor_class": "bicycle",
+   "scene_hint": null,
+   "expected": "emergency"
+  },
+  {
+   "run": "run-10",
+   "round": "sar09_park_bending",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-10",
+   "round": "sarH1_park_needhelp",
+   "pose": "person_bending",
+   "anchor_class": "trash_can",
+   "scene_hint": "park",
+   "expected": "emergency"
+  },
+  {
+   "run": "run-10",
+   "round": "sarH2_parking_bikeacc",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  },
+  {
+   "run": "run-10",
+   "round": "sarH3_climbed_machine",
+   "pose": "person_sitting",
+   "anchor_class": "vending_machine",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-10",
+   "round": "sarH4_parking_trashsit",
+   "pose": "person_sitting",
+   "anchor_class": "trash_can",
+   "scene_hint": "parking",
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-10",
+   "round": "sarH5_taxi_benchlie",
+   "pose": "person_bending",
+   "anchor_class": "bench",
+   "scene_hint": null,
+   "expected": "abnormal"
+  },
+  {
+   "run": "run-10",
+   "round": "sarH6_most_critical",
+   "pose": "person_prone",
+   "anchor_class": "bicycle",
+   "scene_hint": "parking",
+   "expected": "accident"
+  }
+ ]
+}
