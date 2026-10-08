@@ -93,10 +93,10 @@ Qwen is warmed before the agent registers, including one schema-constrained pars
 | Implied-anchor commands decided by geometry | `MARC_IMPLIED_ANCHOR_GEOMETRY` (on) | hf07 35 → 75.7 (#120 option b) |
 | Qwen command reader under a JSON schema, lenient rule fallback | `MARC_COMMAND_PARSER` (qwen) | blind test set: no-submission 33/60 → 0; target 23 → 55/56 (#114) |
 | SAR situation from R03 on the detected pose | — | 138/140 on #88 SAR rounds (#114) |
-| Class-first ranking: rank only the class the command names while any box of it exists | `MARC_CLASS_FIRST` (on) | CPU replay of the held-out ranking: geometry top-1 252 → 272 of 433, of which 14 are `on`/`above` label artefacts; the rest +6/325; no public round changes (#135) |
-| Cross-class guard: Qwen's board and pick stay in the named class when one exists | `MARC_CROSS_CLASS_GUARD` (on) | 61/433 held-out Qwen picks were cross-class, 5 within 1 m (#135) |
+| Class-first ranking: rank only the class the command names while any box of it exists | `MARC_CLASS_FIRST` (**off**) | failed its go/no-go: end to end on the 433 held-out cases with Qwen, no relation other than `on`/`above` gains a gold pick (+0, credit −0.001 [−0.011, +0.009]); the +18 gold picks are the `on`/`above` label artefact and carry no credit (#135) |
+| Cross-class guard: Qwen's board and pick stay in the named class when one exists | `MARC_CROSS_CLASS_GUARD` (**off**) | same arm; 61/433 Qwen picks were cross-class, 5 within 1 m (#135) |
 | Stated person relation is submitted, never filled in | `MARC_PERSON_RELATION` (on) | the scorer scores landmark and relation on any person problem that carries a relation; public SAR problems carry none, so 0 points there (#135) |
-| Bounded pair likelihood for directional and near/beside ranking | `MARC_PAIR_LIKELIHOOD` (**off**) | not measured fairly yet (#135) |
+| Bounded pair likelihood for directional and near/beside ranking | `MARC_PAIR_LIKELIHOOD` (**off**) | failed its go/no-go on the parsed relation: all 433 +0.0004 [−0.012, +0.013]; right +0.052, behind −0.041, front +0.018, left +0.004 (#135) |
 | Organisers' situation table and pose fallback, with their support names | — | their `situation_rules.yaml` and `people_poses.yaml`; the public labels do not change (#135) |
 | Robustness: registration retry, `restart: on-failure`, drop an answer once a later round has started, any camera frame name in the TF filter, zoom/crop passes skipped under 4 s left, the named landmark as the anchor of a sentinel round | — | insurance against rare total-loss modes (#135) |
 

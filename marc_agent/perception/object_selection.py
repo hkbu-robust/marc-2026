@@ -190,11 +190,13 @@ def _env_enabled(name: str, default: str = "1") -> bool:
 
 
 def class_first_enabled() -> bool:
-    return _env_enabled("MARC_CLASS_FIRST")
+    """Off: no end-to-end held-out gain (#135, 135-good-faith/heldout-selection)."""
+    return _env_enabled("MARC_CLASS_FIRST", "0")
 
 
 def cross_class_guard_enabled() -> bool:
-    return _env_enabled("MARC_CROSS_CLASS_GUARD")
+    """Off for the same reason as class-first."""
+    return _env_enabled("MARC_CROSS_CLASS_GUARD", "0")
 
 
 def _target_classes(parsed: ParsedCommand) -> frozenset[str]:

@@ -680,6 +680,7 @@ class ObjectSelectionTests(unittest.TestCase):
         ids = [item.target.candidate_id for item in ranked]
         self.assertEqual(["rig_3:tumbler:0"], ids)
 
+    @patch.dict(os.environ, {"MARC_CLASS_FIRST": "1", "MARC_CROSS_CLASS_GUARD": "1"})
     def test_named_class_stays_on_the_board_when_another_class_fits_the_relation(self):
         parsed = parse_command("Find the tumbler on the bench.")
         round_ = CctvDetectionRound(
@@ -1486,6 +1487,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual({f"cam:umbrella:{index}" for index in range(4)}, seen)
         self.assertEqual(1, len(calls))
 
+    @patch.dict(os.environ, {"MARC_CLASS_FIRST": "1", "MARC_CROSS_CLASS_GUARD": "1"})
     def test_remote_verifier_screens_detector_classes_before_final_choice(self):
         text = "Find the mug."
         parsed = parse_command(text)
@@ -2287,6 +2289,14 @@ class ObjectSelectionTests(unittest.TestCase):
 
 
 class ClassFirstTests(unittest.TestCase):
+    def test_both_mechanisms_are_off_by_default(self):
+        from marc_agent.perception.object_selection import (
+            class_first_enabled, cross_class_guard_enabled,
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(class_first_enabled())
+            self.assertFalse(cross_class_guard_enabled())
+
     def _round(self, mug_box, juice_box) -> CctvDetectionRound:
         return CctvDetectionRound(
             objects=[
@@ -2304,12 +2314,13 @@ class ClassFirstTests(unittest.TestCase):
         parsed = ParsedCommand(
             Intent.FIND, "mug", landmark="bench", relation=Relation.LEFT,
         )
-        ranked = rank_object_candidates(
-            parsed,
-            self._round((500.0, 220.0, 560.0, 280.0), (40.0, 220.0, 100.0, 280.0)),
-            command_text="Find the mug to the left of the bench.",
-            visual_proposals=True,
-        )
+        with patch.dict(os.environ, {"MARC_CLASS_FIRST": "1"}):
+            ranked = rank_object_candidates(
+                parsed,
+                self._round((500.0, 220.0, 560.0, 280.0), (40.0, 220.0, 100.0, 280.0)),
+                command_text="Find the mug to the left of the bench.",
+                visual_proposals=True,
+            )
         self.assertEqual("mug", ranked[0].target.class_name)
 
     def test_another_class_is_kept_when_the_named_class_is_absent(self):
@@ -2318,10 +2329,11 @@ class ClassFirstTests(unittest.TestCase):
         )
         round_ = self._round((500.0, 220.0, 560.0, 280.0), (40.0, 220.0, 100.0, 280.0))
         round_.objects = [item for item in round_.objects if item.class_name != "mug"]
-        ranked = rank_object_candidates(
-            parsed, round_, command_text="Find the mug to the left of the bench.",
-            visual_proposals=True,
-        )
+        with patch.dict(os.environ, {"MARC_CLASS_FIRST": "1"}):
+            ranked = rank_object_candidates(
+                parsed, round_, command_text="Find the mug to the left of the bench.",
+                visual_proposals=True,
+            )
         self.assertEqual("juice", ranked[0].target.class_name)
 
     def test_qwen_cannot_submit_another_class_when_the_named_class_is_present(self):
