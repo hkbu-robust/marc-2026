@@ -480,7 +480,7 @@ def run_stage1_candidate_pipeline(
             (time.perf_counter() - started) * 1000.0,
         )
 
-    detections = refine_detection_round(parsed, detections)
+    detections = refine_detection_round(parsed, detections, clock=clock)
     selection_started = time.perf_counter()
     selected_verifier = _select_verifier(verifier, clock, client)
     prepare_scene = getattr(selected_verifier, "prepare_scene", None)
@@ -794,10 +794,31 @@ def _grounding_payload(
     )
 
 
-def fallback_grounding(command_text: str, detections: Optional[CctvDetectionRound] = None) -> GroundingResult:
+def _named_landmark_xyz(projector, detections, parsed):
+    """The named landmark's projected origin, when a box of that class is visible."""
+    if projector is None or detections is None or not parsed.landmark:
+        return None
+    matches = [item for item in detections.objects if item.class_name == parsed.landmark]
+    if not matches:
+        return None
+    best = max(matches, key=lambda item: (item.confidence, item.candidate_id))
+    xyz = projector.project_landmark(
+        best.camera_id, best.bbox_xyxy, best.class_name, best.image_size
+    )
+    if xyz is None:
+        return None
+    note_decision("fallback_anchor", source="landmark", candidate=best.candidate_id)
+    return xyz
+
+
+def fallback_grounding(
+    command_text: str,
+    detections: Optional[CctvDetectionRound] = None,
+    projector=None,
+) -> GroundingResult:
     """A submission when the round produced none (#114: never end a round without one):
     the lenient reading's fields, the camera with the most candidates, the sentinel
-    coordinates."""
+    target, and the named landmark's point when that landmark is visible."""
     parsed, _ = parse_command_lenient(command_text or "", expected_intent=Intent.FIND)
     counts: dict[str, int] = {}
     if detections is not None:
@@ -806,9 +827,10 @@ def fallback_grounding(command_text: str, detections: Optional[CctvDetectionRoun
         for item in (*detections.objects, *detections.people):
             counts[item.camera_id] = counts.get(item.camera_id, 0) + 1
     camera_id = min(counts, key=lambda camera: (-counts[camera], camera)) if counts else ""
+    anchor_xyz = _named_landmark_xyz(projector, detections, parsed) or IGNORED_CLASS_DUMMY_XYZ
     note_decision("sentinel", reason="fallback_grounding", camera_id=camera_id,
                   target_type=parsed.target_type)
-    return _grounding_payload(parsed, camera_id, IGNORED_CLASS_DUMMY_XYZ, IGNORED_CLASS_DUMMY_XYZ)
+    return _grounding_payload(parsed, camera_id, IGNORED_CLASS_DUMMY_XYZ, anchor_xyz)
 
 
 def submitted_situation(
@@ -1085,19 +1107,20 @@ def _compose_last_resort(
     """Submit parser fields with a dummy XYZ so the round always ends.
 
     Does not invent a detection box. A picnic table is not a pencil case.
+    The named landmark is projected as the anchor when a box of that class is visible.
     """
-    del projector
     camera_id = _dummy_camera_id(candidates.detections, parsed)
     note_decision(
         "sentinel", reason=reason, camera_id=camera_id,
         target_type=parsed.target_type,
     )
     xyz = IGNORED_CLASS_DUMMY_XYZ
+    anchor_xyz = _named_landmark_xyz(projector, candidates.detections, parsed) or xyz
     grounding = _grounding_payload(
         parsed,
         camera_id,
         xyz,
-        xyz,
+        anchor_xyz,
         anchor_class=_scene_landmark_class(
             candidates.detections, camera_id, parsed, candidates.command_text
         ),

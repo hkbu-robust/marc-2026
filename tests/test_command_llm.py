@@ -70,6 +70,14 @@ class ReadCommandTests(unittest.TestCase):
         self.assertIsNone(idiom.parsed.relation)
         self.assertEqual(Relation.BEHIND, place.parsed.relation)
 
+    def test_a_person_relation_is_kept(self):
+        reply = _record(target_type="person", landmark="bench", relation="on")
+        reading = command_llm.read_command(
+            "Find the person lying on the bench.", complete=lambda *a: reply,
+        )
+        self.assertEqual(Relation.ON, reading.parsed.relation)
+        self.assertNotIn("relation_on_person", reading.fixes)
+
     def test_cross_field_rules_are_fixed_not_raised(self):
         reply = _record(target_type="mug", pose_hint="person_prone", landmark=None,
                         relation="on", place_cues=["bench"])

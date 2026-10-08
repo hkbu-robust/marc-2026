@@ -74,13 +74,13 @@ class SituationRulesTests(unittest.TestCase):
                     support,
                 )
 
-    def test_unknown_support_uses_pose_fallback_not_emergency(self):
+    def test_unknown_support_uses_the_official_pose_fallback(self):
         for pose, expected in POSE_FALLBACK.items():
             self.assertEqual(resolve_situation(pose), expected, pose)
-            self.assertNotEqual(resolve_situation(pose), "emergency")
-        self.assertEqual(resolve_situation("person_crouching"), "abnormal")
+        self.assertEqual(resolve_situation("person_bending"), "emergency")
+        self.assertEqual(resolve_situation("person_reclining"), "normal")
         self.assertEqual(resolve_situation("person_lying_down"), "abnormal")
-        self.assertEqual(resolve_situation("person_bending"), "abnormal")
+        self.assertEqual(resolve_situation("not_a_pose"), "normal")
 
     def test_surface_used_when_support_unknown(self):
         self.assertEqual(

@@ -93,6 +93,12 @@ Qwen is warmed before the agent registers, including one schema-constrained pars
 | Implied-anchor commands decided by geometry | `MARC_IMPLIED_ANCHOR_GEOMETRY` (on) | hf07 35 → 75.7 (#120 option b) |
 | Qwen command reader under a JSON schema, lenient rule fallback | `MARC_COMMAND_PARSER` (qwen) | blind test set: no-submission 33/60 → 0; target 23 → 55/56 (#114) |
 | SAR situation from R03 on the detected pose | — | 138/140 on #88 SAR rounds (#114) |
+| Class-first ranking: rank only the class the command names while any box of it exists | `MARC_CLASS_FIRST` (**off**) | failed its go/no-go: end to end on the 433 held-out cases with Qwen, no relation other than `on`/`above` gains a gold pick (+0, credit −0.001 [−0.011, +0.009]); the +18 gold picks are the `on`/`above` label artefact and carry no credit (#135) |
+| Cross-class guard: Qwen's board and pick stay in the named class when one exists | `MARC_CROSS_CLASS_GUARD` (**off**) | same arm; 61/433 Qwen picks were cross-class, 5 within 1 m (#135) |
+| Stated person relation is submitted, never filled in | `MARC_PERSON_RELATION` (on) | the scorer scores landmark and relation on any person problem that carries a relation; public SAR problems carry none, so 0 points there (#135) |
+| Bounded pair likelihood for directional and near/beside ranking | `MARC_PAIR_LIKELIHOOD` (**off**) | failed its go/no-go on the parsed relation: all 433 +0.0004 [−0.012, +0.013]; right +0.052, behind −0.041, front +0.018, left +0.004 (#135) |
+| Organisers' situation table and pose fallback, with their support names | — | their `situation_rules.yaml` and `people_poses.yaml`; the public labels do not change (#135) |
+| Robustness: registration retry, `restart: on-failure`, drop an answer once a later round has started, any camera frame name in the TF filter, zoom/crop passes skipped under 4 s left, the named landmark as the anchor of a sentinel round | — | insurance against rare total-loss modes (#135) |
 
 ### Decisions informed by public rounds (disclosed)
 
@@ -127,6 +133,8 @@ Qwen is warmed before the agent registers, including one schema-constrained pars
   - Low-confidence detections still vary between runs (#123).
   - On a shared development GPU, CUDA out-of-memory skips the zoomed pass. It now retries
     once, logs the skip, and the regression gate fails such runs.
+  - The late-answer drop keys on a newer mission, not on the local clock, because the round limit
+    is simulation time and the clock is wall time (#135).
   - Wall-clock round time is 18-21 s (simulation time p95 4 s, limit 30 s simulation). The
     Qwen budget uses wall clock, so on a slower judging GPU Qwen may be skipped late in a
     round (geometry answers); the 3.5 s camera-discovery settle per round is the first thing

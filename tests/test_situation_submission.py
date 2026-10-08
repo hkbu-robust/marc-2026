@@ -36,7 +36,7 @@ class SituationTests(unittest.TestCase):
     def test_text_hint_then_default_without_a_detected_pose(self):
         self.assertEqual(("emergency", "hint"),
                          submitted_situation(_person(situation=Situation.EMERGENCY), None, None))
-        self.assertEqual(("abnormal", "default"), submitted_situation(_person(), None, None))
+        self.assertEqual(("normal", "default"), submitted_situation(_person(), None, None))
 
     def test_the_detected_pose_wins_over_the_text(self):
         # "face-down on the bench" reads as prone, but the detected pose is bending (sar03).

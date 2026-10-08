@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from marc_agent.command_parser import Intent, ParsedCommand, parse_command
+from marc_agent.command_parser import Intent, ParsedCommand, Relation, parse_command
 from marc_agent.experiment_log import decision_scope
 from marc_agent.perception.object_selection import (
     ObjectSelection,
@@ -680,7 +680,8 @@ class ObjectSelectionTests(unittest.TestCase):
         ids = [item.target.candidate_id for item in ranked]
         self.assertEqual(["rig_3:tumbler:0"], ids)
 
-    def test_remote_qwen_can_recover_a_target_mislabeled_as_another_mission_object(self):
+    @patch.dict(os.environ, {"MARC_CLASS_FIRST": "1", "MARC_CROSS_CLASS_GUARD": "1"})
+    def test_named_class_stays_on_the_board_when_another_class_fits_the_relation(self):
         parsed = parse_command("Find the tumbler on the bench.")
         round_ = CctvDetectionRound(
             objects=[
@@ -689,20 +690,25 @@ class ObjectSelectionTests(unittest.TestCase):
                 _object("rig_good:mug:0", "mug", (250, 170, 290, 220), "rig_good"),
                 _object("rig_good:bench:0", "bench", (150, 200, 420, 390), "rig_good"),
             ],
+            frames={
+                "rig_bad": CctvFrame("rig_bad", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)),
+                "rig_good": CctvFrame("rig_good", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8)),
+            },
             camera_ids=["rig_bad", "rig_good"],
         )
         boards = []
         selected = select_object_candidate(
             parsed,
             round_,
+            command_text="Find the tumbler on the bench.",
             verifier=lambda board: boards.append(board) or (
                 "rig_good:mug:0|rig_good:bench:0"
             ),
         )
-        self.assertIn("rig_good:mug:0", boards[0].candidate_ids)
-        self.assertNotIn("rig_bad:tumbler:0", boards[0].candidate_ids)
-        self.assertEqual("rig_good:mug:0", selected.target.candidate_id)
-        self.assertEqual("qwen", selected.method)
+        self.assertTrue(boards)
+        self.assertIn("rig_bad:tumbler:0", boards[0].candidate_ids)
+        self.assertNotIn("rig_good:mug:0", boards[0].candidate_ids)
+        self.assertEqual("rig_bad:tumbler:0", selected.target.candidate_id)
 
     def test_mug_command_does_not_alias_tumbler(self):
         parsed = parse_command("Find the mug on the picnic table.")
@@ -1481,6 +1487,7 @@ class ObjectSelectionTests(unittest.TestCase):
         self.assertEqual({f"cam:umbrella:{index}" for index in range(4)}, seen)
         self.assertEqual(1, len(calls))
 
+    @patch.dict(os.environ, {"MARC_CLASS_FIRST": "1", "MARC_CROSS_CLASS_GUARD": "1"})
     def test_remote_verifier_screens_detector_classes_before_final_choice(self):
         text = "Find the mug."
         parsed = parse_command(text)
@@ -1511,10 +1518,9 @@ class ObjectSelectionTests(unittest.TestCase):
             parsed, round_, command_text=text, verifier=Verifier()
         )
         self.assertEqual("cam:mug:1", selected.target.candidate_id)
-        self.assertEqual(3, len(calls))
+        self.assertEqual(1, len(calls))
+        self.assertTrue(all(item.target.class_name == "mug" for item in calls[0].ranked))
         self.assertEqual(2, len(calls[0].ranked))
-        self.assertEqual(2, len(calls[1].ranked))
-        self.assertIn("copy only the chosen row's first field", calls[-1].prompt)
 
     def test_remote_near_landmark_keeps_all_proposals_for_final_choice(self):
         text = "Find the umbrella near the trash can."
@@ -2280,6 +2286,77 @@ class ObjectSelectionTests(unittest.TestCase):
             occupancy_at=occupancy_at,
         )
         self.assertEqual("cam_road:umbrella:0", ranked[0].target.candidate_id)
+
+
+class ClassFirstTests(unittest.TestCase):
+    def test_both_mechanisms_are_off_by_default(self):
+        from marc_agent.perception.object_selection import (
+            class_first_enabled, cross_class_guard_enabled,
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(class_first_enabled())
+            self.assertFalse(cross_class_guard_enabled())
+
+    def _round(self, mug_box, juice_box) -> CctvDetectionRound:
+        return CctvDetectionRound(
+            objects=[
+                _object("rig_a:bench:0", "bench", (300.0, 180.0, 420.0, 420.0), "rig_a"),
+                _object("rig_a:juice:0", "juice", juice_box, "rig_a", 0.95),
+                _object("rig_a:mug:0", "mug", mug_box, "rig_a", 0.4),
+            ],
+            frames={"rig_a": CctvFrame(
+                "rig_a", 640, 480, np.zeros((480, 640, 3), dtype=np.uint8),
+            )},
+            camera_ids=["rig_a"],
+        )
+
+    def test_a_wrong_class_that_fits_the_relation_loses_to_the_named_class(self):
+        parsed = ParsedCommand(
+            Intent.FIND, "mug", landmark="bench", relation=Relation.LEFT,
+        )
+        with patch.dict(os.environ, {"MARC_CLASS_FIRST": "1"}):
+            ranked = rank_object_candidates(
+                parsed,
+                self._round((500.0, 220.0, 560.0, 280.0), (40.0, 220.0, 100.0, 280.0)),
+                command_text="Find the mug to the left of the bench.",
+                visual_proposals=True,
+            )
+        self.assertEqual("mug", ranked[0].target.class_name)
+
+    def test_another_class_is_kept_when_the_named_class_is_absent(self):
+        parsed = ParsedCommand(
+            Intent.FIND, "mug", landmark="bench", relation=Relation.LEFT,
+        )
+        round_ = self._round((500.0, 220.0, 560.0, 280.0), (40.0, 220.0, 100.0, 280.0))
+        round_.objects = [item for item in round_.objects if item.class_name != "mug"]
+        with patch.dict(os.environ, {"MARC_CLASS_FIRST": "1"}):
+            ranked = rank_object_candidates(
+                parsed, round_, command_text="Find the mug to the left of the bench.",
+                visual_proposals=True,
+            )
+        self.assertEqual("juice", ranked[0].target.class_name)
+
+    def test_qwen_cannot_submit_another_class_when_the_named_class_is_present(self):
+        text = "Find the mug to the left of the bench."
+        parsed = parse_command(text)
+        round_ = self._round((40.0, 200.0, 90.0, 260.0), (120.0, 200.0, 170.0, 260.0))
+
+        class Verifier:
+            method = "qwen_remote"
+            last_metrics = None
+            last_finish_reason = "stop"
+
+            def __call__(self, board):
+                self.classes = {item.target.class_name for item in board.ranked}
+                return "rig_a:juice:0"
+
+        verifier = Verifier()
+        with patch.dict(os.environ, {"MARC_CLASS_FIRST": "0", "MARC_CROSS_CLASS_GUARD": "1"}):
+            selected = select_object_candidate(
+                parsed, round_, command_text=text, verifier=verifier,
+            )
+        self.assertEqual({"mug"}, verifier.classes)
+        self.assertEqual("mug", selected.target.class_name)
 
 
 if __name__ == "__main__":

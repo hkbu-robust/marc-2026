@@ -29,6 +29,7 @@ from marc_agent.command_parser import Intent
 from marc_agent.experiment_log import (
     current_experiment,
     decision_scope,
+    note_decision,
     start_experiment,
 )
 from marc_agent.navigation_runtime import NavStatus, Stage2Navigator
@@ -65,7 +66,7 @@ from marc_agent.retrieval_state import (
     search_area_approach_goal,
     snapshot_approach_goal,
 )
-from marc_agent.round_clock import RoundClock
+from marc_agent.round_clock import RoundClock, answer_is_stale
 from marc_agent.stage2_delivery import Stage2Deadline, Stage2Delivery
 from mock_agent_vla import MockVLAGrounding
 from marc_agent.lidar_safety import advise, pointcloud2_xyz
@@ -124,6 +125,7 @@ class DemoParticipant:
         self._stage1_lock = threading.Lock()
         self._stage1_projector = None
         self._round_clock = RoundClock()
+        self._latest_round = 0
         self._stage2_clock = Stage2Deadline()
         self._qwen_verifier = get_default_verifier()
         self._approach_snap = None
@@ -146,6 +148,7 @@ class DemoParticipant:
     # -- Stage 1 --
 
     def _on_mission(self, mission):
+        self._latest_round = max(self._latest_round, int(mission.round))
         log.info("[Stage1] round %s/%s: \"%s\"",
                  mission.round, mission.total_rounds, mission.voice_command)
         self._experiment.event(
@@ -176,8 +179,14 @@ class DemoParticipant:
                 if self._stage1_submitted_round == mission.round:
                     return
                 try:
-                    seq = self.client.submit_grounding(
-                        fallback_grounding(mission.voice_command, self._last_detections))
+                    seq = self._submit_stage1(
+                        fallback_grounding(
+                            mission.voice_command, self._last_detections, self._stage1_projector,
+                        ),
+                        mission,
+                    )
+                    if seq is None:
+                        return
                     self._stage1_submitted_round = mission.round
                     self._experiment.event(
                         "stage1.submission.completed", stage="stage1", round=mission.round,
@@ -230,8 +239,12 @@ class DemoParticipant:
         if grounding is None:  # never end a round without a submission (#114)
             log.info("[Stage1] no grounding (reason=%s); submitting the fallback",
                      round_result.failure_reason)
-            grounding = fallback_grounding(mission.voice_command, self._last_detections)
-        seq = self.client.submit_grounding(grounding)
+            grounding = fallback_grounding(
+                mission.voice_command, self._last_detections, self._stage1_projector,
+            )
+        seq = self._submit_stage1(grounding, mission)
+        if seq is None:
+            return
         self._stage1_submitted_round = mission.round
         self._experiment.event(
             "stage1.submission.completed", stage="stage1", round=mission.round,
@@ -974,8 +987,36 @@ class DemoParticipant:
 
     # -- run --
 
+    def _submit_stage1(self, grounding, mission):
+        """Submit, unless the platform has already issued a later round."""
+        if answer_is_stale(mission.round, self._latest_round):
+            note_decision(
+                "submit_dropped", reason="superseded_round",
+                answer_round=int(mission.round), latest_round=self._latest_round,
+            )
+            log.warning(
+                "[Stage1] dropping answer for round %s: round %s has started",
+                mission.round, self._latest_round,
+            )
+            return None
+        return self.client.submit_grounding(grounding)
+
+    def _connect_with_retry(self, attempts: int = 3) -> bool:
+        delay_s = 2.0
+        for attempt in range(1, attempts + 1):
+            if self.client.connect():
+                return True
+            if attempt == attempts:
+                return False
+            log.warning(
+                "[agent] registration failed attempt=%d; retrying in %.0fs", attempt, delay_s,
+            )
+            time.sleep(delay_s)
+            delay_s = min(delay_s * 2.0, 10.0)
+        return False
+
     def run(self):
-        if not self.client.connect():
+        if not self._connect_with_retry():
             raise SystemExit("Registration failed -- check the runtime and the token.")
         fetch_cctv_round(self.client)
         self.client.run()

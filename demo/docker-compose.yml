@@ -18,6 +18,7 @@
 # ===========================================================================
 services:
   agent:
+    restart: on-failure
     build:
       context: ..                 # starter kit root (includes marc_sdk + demo)
       dockerfile: demo/Dockerfile

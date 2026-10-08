@@ -1,0 +1,35 @@
+[
+  {
+    "text": "Find the coffee cup on the bench.",
+    "target_type": "mug",
+    "landmark": "bench",
+    "relation": "on",
+    "note": "coffee cup is the catalogue mug"
+  },
+  {
+    "text": "Find the box of crackers beside the trash can.",
+    "target_type": "cracker_box",
+    "landmark": "trash_can",
+    "relation": "beside"
+  },
+  {
+    "text": "Find the kleenex near the picnic table.",
+    "target_type": "tissue",
+    "landmark": "picnic_table",
+    "relation": "near"
+  },
+  {
+    "text": "Find the umbrella across from the hydrant.",
+    "target_type": "umbrella",
+    "landmark": "hydrant",
+    "relation": "near",
+    "note": "not a catalogue relation; read as near, the default for an unlabelled relation (#113), which keeps the landmark"
+  },
+  {
+    "text": "Find the mug under the picnic table.",
+    "target_type": "mug",
+    "landmark": "picnic_table",
+    "relation": "near",
+    "note": "under is not a catalogue relation; near, not on, so support geometry does not lift the target"
+  }
+]

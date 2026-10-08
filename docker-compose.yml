@@ -38,6 +38,7 @@ services:
               capabilities: [gpu]
 
   agent:
+    restart: on-failure
     depends_on:
       qwen:
         condition: service_healthy

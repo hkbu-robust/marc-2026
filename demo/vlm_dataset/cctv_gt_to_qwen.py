@@ -456,7 +456,7 @@ def _gt_support_ok(person: dict, landmarks: List[dict]) -> bool:
     if not gt_support:
         return True
     kind = r03_support_class(str(gt_support))
-    if kind not in ("seating", "non_mount", "fallen_vehicle"):
+    if kind not in ("seating", "non_mount", "vehicle_fallen"):
         return True
     for lm in landmarks:
         if str(lm.get("class") or "") != str(gt_support):

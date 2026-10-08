@@ -480,7 +480,8 @@ class Stage1RoundTests(unittest.TestCase):
         )
         self.assertIsNotNone(result.grounding)
         self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
-        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
+        # the visible named landmark anchors the sentinel round
+        self.assertNotEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
         self.assertEqual("umbrella", result.grounding.target_type)
         self.assertEqual("vending_machine", result.grounding.landmark)
         self.assertEqual("ignored_class_dummy", result.method)
@@ -805,7 +806,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("picnic_table", result.grounding.landmark)
         self.assertEqual("ignored_class_dummy", result.method)
         self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
-        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
+        self.assertNotEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
 
     def test_empty_parking_space_submits_tumbler_with_nearest_car(self):
         def detector(client, *, stub_path=None):
@@ -843,7 +844,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("tumbler", result.grounding.target_type)
         self.assertEqual("rig_a:tumbler:0", result.target_id)
 
-    def test_sitting_on_vending_submits_person_relation_none(self):
+    def test_sitting_on_vending_submits_the_stated_person_relation(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
                 objects=[
@@ -876,7 +877,7 @@ class Stage1RoundTests(unittest.TestCase):
             projector=_geometry(),
         )
         self.assertIsNotNone(result.grounding)
-        self.assertIsNone(result.grounding.relation)
+        self.assertEqual("on", result.grounding.relation)
         self.assertEqual("vending_machine", result.grounding.landmark)
         self.assertEqual("rig_a:person_sitting:0", result.target_id)
 

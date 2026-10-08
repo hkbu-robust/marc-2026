@@ -10,17 +10,20 @@ scorer; these rules reproduce all 330 #88 cache-off rounds: categorical componen
 are exact matches (a SAR round's "type" is its situation), anchor credit is
 ``max(0, 1 - d/5 m)`` on the 3-D distance, and the total is ``100 * sum(w*c) / sum(w)``
 with the round's logged weights (SAR rounds weight landmark and relation 0).
-Target credit was binary there: 1 up to 1.854 m, 0 from 1.976 m. #91 found August
-rounds scoring 0 at 0.23-0.69 m, so the scorer may match the nearest object instead;
-a recomputed target credited further from the expected point than both
-``TARGET_CERTAIN_M`` and the distance the platform credited for that round is flagged
-uncertain.
+A moved target uses the organisers' kernel: it must be strictly nearer the GT
+target than every other object or person in that camera, then 1 within
+``R_ACQUIRE`` (2 m) falling linearly to 0 at ``R_MISS`` (5 m). Those constants
+and the distractor margin are ``MARC_SCORING_*`` and private at competition
+time. An unmoved target keeps the platform's logged credit. A recomputed
+target further from the expected point than both ``TARGET_CERTAIN_M`` and the
+distance the platform credited is flagged uncertain.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -34,6 +37,9 @@ TARGET_UNCREDITED_M = 1.976  # smallest distance not credited
 TARGET_RADIUS_M = (TARGET_CREDITED_M + TARGET_UNCREDITED_M) / 2.0
 TARGET_CERTAIN_M = 0.5
 UNMOVED_M = 1e-3  # a replayed target this close to the logged one keeps its logged credit
+# Public defaults from the organisers' scorer. Competition values are MARC_SCORING_*.
+R_ACQUIRE_M = 2.0
+R_MISS_M = 5.0
 
 
 @dataclass(frozen=True)
@@ -153,21 +159,86 @@ def _matches(submitted, expected) -> float:
     return 1.0 if expected is not None and submitted == expected else 0.0
 
 
-def score(round_: LoggedRound, submission: dict) -> RoundScore:
-    """Score a (replayed) submission for this round with the reverse-engineered kernel.
+def _scoring_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
 
-    A target at the logged point keeps the platform's logged credit, so rounds the
-    replay does not move score exactly as they did.
+
+def kernel_params() -> dict[str, float]:
+    """Organiser defaults, overridable with the same MARC_SCORING_* names as the platform."""
+    return {
+        "r_acquire": _scoring_float("MARC_SCORING_R_ACQUIRE", R_ACQUIRE_M),
+        "r_miss": _scoring_float("MARC_SCORING_R_MISS", R_MISS_M),
+        "d_max": _scoring_float("MARC_SCORING_D_MAX", ANCHOR_ZERO_M),
+        "margin": _scoring_float("MARC_SCORING_DISTRACTOR_MARGIN", 0.0),
+    }
+
+
+def target_credit(
+    point,
+    gt,
+    distractors=None,
+    *,
+    r_acquire: float = R_ACQUIRE_M,
+    r_miss: float = R_MISS_M,
+    margin: float = 0.0,
+) -> float:
+    """Attribution, then 1 inside the acquire radius, linear to 0 at the miss radius.
+
+    The point must be strictly nearer the GT target than every distractor. Landmarks
+    are not distractors; the caller passes the other objects and people in that camera.
+    """
+    if not gt:
+        return 1.0 if not point else 0.0
+    if not point:
+        return 0.0
+    d_target = math.dist(list(point), list(gt))
+    others = [item for item in (distractors or []) if item]
+    if others:
+        d_near = min(math.dist(list(point), list(item)) for item in others)
+        if d_target >= d_near - margin:
+            return 0.0
+    elif d_target > r_miss:
+        return 0.0
+    if d_target <= r_acquire:
+        return 1.0
+    if d_target >= r_miss or r_miss <= r_acquire:
+        return 0.0
+    return 1.0 - (d_target - r_acquire) / (r_miss - r_acquire)
+
+
+def score(round_: LoggedRound, submission: dict) -> RoundScore:
+    """Score a (replayed) submission with the organisers' kernel.
+
+    A target at the logged point keeps the platform's logged credit, so a replay
+    that does not move the point matches the run file. A moved point is rescored
+    by attribution and the acquire/miss radii, not by a fixed radius.
     """
     expected = round_.expected
     logged = round_.detail.get("submission") or {}
+    params = kernel_params()
     anchor_m = math.dist(submission["anchor_coord"], expected["anchor_coord"])
     target_m = math.dist(submission["target_coord"], expected["target_coord"])
     unmoved = (
         logged.get("target_coord") is not None
         and math.dist(submission["target_coord"], logged["target_coord"]) < UNMOVED_M
     )
-    target = round_.detail["target"] if unmoved else float(target_m <= TARGET_RADIUS_M)
+    if unmoved:
+        target = round_.detail["target"]
+    else:
+        target = target_credit(
+            submission["target_coord"],
+            expected["target_coord"],
+            expected.get("distractor_coords"),
+            r_acquire=params["r_acquire"],
+            r_miss=params["r_miss"],
+            margin=params["margin"],
+        )
     credited_m = TARGET_CERTAIN_M
     if round_.detail["target"] and logged.get("target_coord") is not None:
         credited_m = max(credited_m, math.dist(logged["target_coord"], expected["target_coord"]))
@@ -180,7 +251,7 @@ def score(round_: LoggedRound, submission: dict) -> RoundScore:
         ),
         "landmark": _matches(submission.get("landmark"), expected.get("landmark_prefix")),
         "relation": _matches(submission.get("relation"), expected.get("relation")),
-        "anchor": max(0.0, 1.0 - anchor_m / ANCHOR_ZERO_M),
+        "anchor": max(0.0, 1.0 - anchor_m / params["d_max"]),
         "target": target,
     }
     weights = round_.detail["weights"]

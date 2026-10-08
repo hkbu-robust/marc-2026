@@ -276,7 +276,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "trash_can",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": "parking"
       }
@@ -290,7 +290,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "vending_machine",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -304,7 +304,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bench",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -318,7 +318,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "picnic_table",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -360,7 +360,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bicycle",
-        "relation": null,
+        "relation": "near",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -374,7 +374,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "trash_can",
-        "relation": null,
+        "relation": "near",
         "situation": "emergency",
         "scene_hint": "park"
       }
@@ -388,7 +388,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "trash_can",
-        "relation": null,
+        "relation": "near",
         "situation": "emergency",
         "scene_hint": "park"
       }
@@ -402,7 +402,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bicycle",
-        "relation": null,
+        "relation": "near",
         "situation": "accident",
         "scene_hint": "parking"
       }
@@ -416,7 +416,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "vending_machine",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -430,7 +430,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "trash_can",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": "parking"
       }
@@ -444,7 +444,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bench",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -1956,7 +1956,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "trash_can",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -1970,7 +1970,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "vending_machine",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -2012,7 +2012,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "trash_can",
-        "relation": null,
+        "relation": "near",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2026,7 +2026,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "picnic_table",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -2040,7 +2040,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bicycle",
-        "relation": null,
+        "relation": "near",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2054,7 +2054,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bicycle",
-        "relation": null,
+        "relation": "near",
         "situation": "accident",
         "scene_hint": null
       }
@@ -2068,7 +2068,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bench",
-        "relation": null,
+        "relation": "near",
         "situation": "normal",
         "scene_hint": null
       }
@@ -2082,7 +2082,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "postbox",
-        "relation": null,
+        "relation": "beside",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2096,7 +2096,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "trash_can",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -2110,7 +2110,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "vending_machine",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -2152,7 +2152,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "trash_can",
-        "relation": null,
+        "relation": "near",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2166,7 +2166,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "picnic_table",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -2180,7 +2180,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bicycle",
-        "relation": null,
+        "relation": "near",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2194,7 +2194,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bicycle",
-        "relation": null,
+        "relation": "near",
         "situation": "accident",
         "scene_hint": null
       }
@@ -2208,7 +2208,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bench",
-        "relation": null,
+        "relation": "near",
         "situation": "normal",
         "scene_hint": null
       }
@@ -2222,7 +2222,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "postbox",
-        "relation": null,
+        "relation": "beside",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2348,7 +2348,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bench",
-        "relation": null,
+        "relation": "near",
         "situation": null,
         "scene_hint": null
       }
@@ -2453,7 +2453,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bench",
-        "relation": null,
+        "relation": "beside",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2467,7 +2467,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bench",
-        "relation": null,
+        "relation": "near",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2537,7 +2537,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bicycle",
-        "relation": null,
+        "relation": "near",
         "situation": "normal",
         "scene_hint": null
       }
@@ -2649,7 +2649,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bicycle",
-        "relation": null,
+        "relation": "beside",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2663,7 +2663,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bench",
-        "relation": null,
+        "relation": "beside",
         "situation": "normal",
         "scene_hint": null
       }
@@ -2691,7 +2691,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "trash_can",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
@@ -2705,7 +2705,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "postbox",
-        "relation": null,
+        "relation": "beside",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2789,7 +2789,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "bench",
-        "relation": null,
+        "relation": "beside",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2859,7 +2859,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "normal_car_1",
-        "relation": null,
+        "relation": "near",
         "situation": "emergency",
         "scene_hint": null
       }
@@ -2873,7 +2873,7 @@
         "intent": "find",
         "target_type": "person",
         "landmark": "normal_car_2",
-        "relation": null,
+        "relation": "on",
         "situation": "abnormal",
         "scene_hint": null
       }
