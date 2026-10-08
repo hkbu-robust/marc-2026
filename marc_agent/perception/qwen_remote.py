@@ -346,6 +346,14 @@ class RemoteQwenSarVerifier:
         scene = _SceneBoard(tuple(frame for _ in range(6)),
                             "Describe each image in at most five words, one line per image.")
         self._complete(scene, max_tokens=SCENE_MAX_TOKENS, timeout_s=WARMUP_TIMEOUT_S)
+        # The command reader's JSON-schema grammar compiles on its first use (~30 s,
+        # #114); compile it here, with the reader's own schema, so round 1 does not.
+        from marc_agent import command_llm
+
+        command_llm.qwen_complete(self.config, post=self._post)(
+            command_llm.prompt("Find the mug near the bench."), command_llm.schema(),
+            WARMUP_TIMEOUT_S,
+        )
 
     def _with_scene_reference(self, board: "CandidateBoard") -> "CandidateBoard":
         description = self._scene_description

@@ -69,7 +69,8 @@ class CommandFixtureTests(unittest.TestCase):
                 _assert_parsed(self, result, case["expected"])
                 if result.target_type == "person":
                     self.assertIsNone(result.relation)
-                    self.assertIsNotNone(result.situation)
+                    if case["expected"].get("situation") is not None:
+                        self.assertIsNotNone(result.situation)
                 else:
                     self.assertIsNone(result.situation)
                     if result.relation is not None:
@@ -311,13 +312,13 @@ class CommandFixtureTests(unittest.TestCase):
         self.assertEqual("road", result.scene_hint)
 
     def test_major_target_evidence_regressions(self):
-        with self.assertRaises(CommandParseError) as caught:
-            parse_command(
-                "A person is seated and someone is standing. Find the one near the bench "
-                "while a third person is collapsed on the road.",
-                expected_intent=Intent.FIND,
-            )
-        self.assertEqual(ParseErrorCode.UNKNOWN_SITUATION, caught.exception.code)
+        # No stated situation is no longer an error: R03 decides the submitted one (#114).
+        result = parse_command(
+            "A person is seated and someone is standing. Find the one near the bench "
+            "while a third person is collapsed on the road.",
+            expected_intent=Intent.FIND,
+        )
+        self.assertIsNone(result.situation)
 
         cases = (
             ("Find the person walking normally but needed help.", ParseErrorCode.CONFLICTING_SITUATION),

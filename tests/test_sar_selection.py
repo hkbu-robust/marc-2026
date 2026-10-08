@@ -584,7 +584,9 @@ class SarSelectionTests(unittest.TestCase):
         warmup.assert_called_once()
         self.assertIn("backend=local", "\n".join(captured.output))
 
-    def test_parse_failure_does_not_fetch_cctv(self):
+    def test_an_unreadable_command_still_fetches_cctv(self):
+        """#114: a round never ends without a submission, so an unreadable command
+        still reads the cameras (the partial reading has target type unknown)."""
         called = False
 
         def detector(client, *, stub_path=None):
@@ -597,8 +599,8 @@ class SarSelectionTests(unittest.TestCase):
             "do something",
             detector=detector,
         )
-        self.assertFalse(called)
-        self.assertTrue(result.failure_reason.startswith("command_parse:"))
+        self.assertTrue(called)
+        self.assertEqual("unknown", result.parsed.target_type)
 
     def test_no_landmark_does_not_attach_nearest_object(self):
         text = (

@@ -7,8 +7,9 @@ Callers and tests use :func:`parse_command`; normalization and phrase rules stay
 from __future__ import annotations
 
 import re
+from pathlib import Path
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Iterable, Optional
 
@@ -104,6 +105,7 @@ _LANDMARK_ALIASES = {
 }
 
 MISSION_OBJECT_TYPES = frozenset(_OBJECT_ALIASES)
+_VOCABULARY: frozenset[str] = frozenset()  # filled below, once the alias tables exist
 LANDMARK_TYPES = frozenset(_LANDMARK_ALIASES)
 SEATING_LANDMARKS = frozenset({"picnic_table", "bench"})
 VEHICLE_LANDMARKS = frozenset(
@@ -133,8 +135,11 @@ _SCENE_HINTS = (
     ("park", "park"),
 )
 
-_PERSON_WORD_PATTERN = r"person|people|someone|somebody"
-_PERSON_PRONOUN_PATTERN = r"them|they"
+_PERSON_WORD_PATTERN = (
+    r"person|people|someone|somebody|man|men|woman|women|guy|lady|kid|child|boy|girl|"
+    r"victim|pedestrian|student|cyclist|individual"
+)
+_PERSON_PRONOUN_PATTERN = r"them|they|him|her|he|she"
 _PERSON_REFERENCE_PATTERN = rf"{_PERSON_WORD_PATTERN}|one|{_PERSON_PRONOUN_PATTERN}"
 _PERSON_MENTION_PATTERN = rf"one\s+person|{_PERSON_REFERENCE_PATTERN}"
 _ANAPHORIC_PERSON_TARGET_PATTERN = (
@@ -159,7 +164,6 @@ _VEHICLE_CUE_RE = re.compile(
     r"\b(?:(?:got|getting)\s+out\s+of|out\s+of)\s+(?:my|the|an?)\s+car\b|"
     r"\b(?:my|the)\s+car\b"
 )
-_DEMONSTRATIVE_PLACE_RE = re.compile(r"\b(?:there|here)\b")
 _OFF_SUPPORT_RE = re.compile(
     r"\b(?:(?:fallen|fell|falling)\s+)?off(?:\s+of)?\s+(?:(?:an?|the)\s+)?$"
 )
@@ -196,7 +200,71 @@ def _normalize(text: str) -> str:
     text = re.sub(r"[^\w\s;,.']+", " ", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\batop\b", "on top of", text)
+    for pattern, canonical in _SYNONYMS:
+        text = pattern.sub(canonical, text)
     return text.strip(" ,.;")
+
+
+# Everyday words for catalogue classes and places, mapped to the phrases the alias
+# tables know (#114). Generic English, not taken from the public commands.
+_SYNONYMS = tuple(
+    (re.compile(pattern), canonical)
+    for pattern, canonical in (
+        (r"\b(?:thermos(?:es)?|flasks?|water\s+bottles?|drink\s+bottles?)\b", "tumbler"),
+        (r"\b(?:trash\s*cans?|trashcans?|rubbish\s+bins?|dust\s*bins?|garbage\s+bins?|"
+         r"waste\s+bins?|litter\s+bins?)\b", "trash can"),
+        (r"\b(?:car\s+park|parking\s+garage)\b", "parking lot"),
+        (r"\bparking\s+(?:spot|bay|stall|place)s?\b", "parking space"),
+        (r"\b(?:cop|patrol)\s+cars?\b", "police car"),
+        (r"\be\s+scooters?\b", "kick scooter"),
+        (r"\b(?:soda|coke|cola)\s+(?:tin|can)s?\b", "cola can"),
+        (r"\bsun\s*screen\s+lotion\b", "sunscreen"),
+        (r"(?<!picnic )(?<!outdoor )\btables?\b", "picnic table"),
+    )
+)
+
+
+def _vocabulary() -> frozenset[str]:
+    words = set()
+    for aliases in (*_OBJECT_ALIASES.values(), *_LANDMARK_ALIASES.values()):
+        for alias in aliases:
+            words.update(alias.split())
+    for pattern, _ in _SYNONYMS:  # synonym words are catalogue words too
+        words.update(re.findall(r"[a-z]{5,}", pattern.pattern))
+    words.update(("person", "people", "someone", "somebody", "woman", "student",
+                  "pedestrian", "cyclist", "parking", "behind", "beside", "alongside",
+                  "above", "front", "right", "left", "near"))
+    return frozenset(word for word in words if len(word) >= 5)
+
+
+def _edit_distance_one(a: str, b: str) -> bool:
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diffs = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+        return len(diffs) == 1 or (
+            len(diffs) == 2 and diffs[1] == diffs[0] + 1
+            and a[diffs[0]] == b[diffs[1]] and a[diffs[1]] == b[diffs[0]]
+        )
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+def _correct_typos(text: str) -> str:
+    """Words of 5+ letters one edit from exactly one catalogue word become that word.
+
+    Words this parser's own patterns use (poses, situation cues, relations: "bending"
+    is one edit from "vending") are never rewritten."""
+    vocabulary = _VOCABULARY
+
+    def fix(match: re.Match) -> str:
+        word = match.group(0)
+        if word in vocabulary or word in _KNOWN_WORDS:
+            return word
+        close = [known for known in vocabulary if _edit_distance_one(word, known)]
+        return close[0] if len(close) == 1 else word
+
+    return re.sub(r"\b[a-z]{5,}\b", fix, text)
 
 
 def _phrase_pattern(phrase: str) -> re.Pattern[str]:
@@ -468,8 +536,17 @@ def _resolve_target(text: str) -> tuple[str, bool]:
     raise CommandParseError(ParseErrorCode.UNKNOWN_TARGET, "no supported mission target was found")
 
 
-def _next_to_relation(landmark: str) -> Relation:
-    return Relation.NEAR if landmark in {"trash_can", "taxi", "bicycle"} else Relation.BESIDE
+# One relation per phrase, whatever the landmark (#114; the old tables were keyed to
+# the landmark class). Team decision, 2026-10-08: where a phrase's label is not obvious,
+# follow the organisers' own labelling of it in their published (public practice)
+# problems, and disclose that: "next to" is labelled near in 4 of 5 (beside once),
+# "leaning against" near (1 of 1), "propped against" beside (1 of 1). A command with no
+# relation word gets near downstream (#113), the organisers' label in 5 of 7 such problems.
+NEXT_TO_RELATION = Relation.NEAR
+LEANING_AGAINST_RELATION = Relation.NEAR
+PROPPED_AGAINST_RELATION = Relation.BESIDE
+# Up to two modifier words between a relation word and its landmark ("on the old bench").
+_MODIFIERS = r"(?:\s+(?!(?:on|behind|near|beside|next|of|to)\b)[a-z']+){0,2}"
 
 
 def _is_leading_relation(prefix: str) -> bool:
@@ -486,16 +563,18 @@ def _relations_before_landmark(prefix: str, landmark: str) -> set[Relation]:
     for relation, pattern in _RELATION_PHRASES:
         if relation in {Relation.ON, Relation.BEHIND}:
             matched = re.search(
-                rf"\b(?:{pattern})(?:\s+(?:an?|the))?\s*$", prefix
+                rf"\b(?:{pattern})(?:\s+(?:an?|the))?{_MODIFIERS}\s*$", prefix
             )
         else:
             matched = re.search(rf"\b(?:{pattern})\b", prefix)
         if matched:
             relations.add(relation)
-    if re.search(rf"\b(?:{_NEXT_TO_PATTERN})\s+(?:(?:an?|the)\s+)?$", prefix):
-        relations.add(_next_to_relation(landmark))
-    if re.search(r"\b(?:propped|leaning)\s+against\s+(?:(?:an?|the)\s+)?$", prefix):
-        relations.add(Relation.NEAR if landmark == "trash_can" else Relation.BESIDE)
+    if re.search(rf"\b(?:{_NEXT_TO_PATTERN})(?:\s+(?:an?|the))?{_MODIFIERS}\s*$", prefix):
+        relations.add(NEXT_TO_RELATION)
+    if re.search(rf"\bleaning\s+against(?:\s+(?:an?|the))?{_MODIFIERS}\s*$", prefix):
+        relations.add(LEANING_AGAINST_RELATION)
+    if re.search(rf"\bpropped(?:\s+up)?\s+against(?:\s+(?:an?|the))?{_MODIFIERS}\s*$", prefix):
+        relations.add(PROPPED_AGAINST_RELATION)
     return relations
 
 
@@ -506,9 +585,11 @@ def _pronoun_relations(text: str, landmark: str) -> set[Relation]:
         if re.search(rf"\b(?:{pattern})\s+it\b", text)
     }
     if re.search(rf"\b(?:{_NEXT_TO_PATTERN})\s+it\b", text):
-        relations.add(_next_to_relation(landmark))
-    if re.search(r"\bagainst\s+its\s+side\b", text):
-        relations.add(Relation.BESIDE)
+        relations.add(NEXT_TO_RELATION)
+    if re.search(r"\bleaning\s+against\s+(?:it|its\s+side)\b", text):
+        relations.add(LEANING_AGAINST_RELATION)
+    if re.search(r"\bpropped(?:\s+up)?\s+against\s+(?:it|its\s+side)\b", text):
+        relations.add(PROPPED_AGAINST_RELATION)
     return relations
 
 
@@ -564,20 +645,6 @@ def implicit_anchor_classes(parsed: ParsedCommand, text: str = "") -> frozenset[
     if parsed.scene_hint == "park":
         return SEATING_LANDMARKS
     return frozenset()
-
-
-def _implicit_support_on(
-    text: str, landmark: Optional[str], relations: set[Relation]
-) -> set[Relation]:
-    """Placement at a seating landmark with no attached relation is ``on``."""
-    if relations or landmark not in SEATING_LANDMARKS:
-        return relations
-    if not re.search(rf"\b(?:{_PLACEMENT_PATTERN})\b", text):
-        return relations
-    if re.search(r"\bbehind\s*$", text) and not _DEMONSTRATIVE_PLACE_RE.search(text):
-        return relations
-    relations.add(Relation.ON)
-    return relations
 
 
 def _choose_landmark(
@@ -849,6 +916,16 @@ def _has_sar_target_description(fragment: str) -> bool:
     return True
 
 
+def _stated_situation(text: str) -> Optional[Situation]:
+    """The situation the text states, or None: the submitted one comes from R03 (#114)."""
+    try:
+        return _resolve_situation(text)
+    except CommandParseError as error:
+        if error.code == ParseErrorCode.UNKNOWN_SITUATION:
+            return None
+        raise
+
+
 def _scene_hint(text: str, target_type: str, is_sar: bool) -> Optional[str]:
     for phrase, value in _SCENE_HINTS:
         for match in _phrase_pattern(phrase).finditer(text):
@@ -986,14 +1063,14 @@ def parse_command(
             intent=intent,
             target_type="person",
             landmark=landmark,
-            situation=_resolve_situation(evidence_scope),
+            situation=_stated_situation(evidence_scope),
             scene_hint=hint,
             place_cues=cues,
         )
 
-    relations = _implicit_support_on(
-        scope, landmark, _relation_candidates(scope, landmarks, landmark)
-    )
+    # Placement with no relation word states no relation (#114); the submission layer
+    # fills a default (#113).
+    relations = _relation_candidates(scope, landmarks, landmark)
     if relations and landmark is None:
         raise CommandParseError(
             ParseErrorCode.UNKNOWN_LANDMARK,
@@ -1015,6 +1092,83 @@ def parse_command(
     )
 
 
+_VOCABULARY = _vocabulary()
+# Every word in this module's patterns and phrase tables: real words, never "typos".
+_KNOWN_WORDS = frozenset(re.findall(r"[a-z]{5,}", Path(__file__).read_text(encoding="utf-8"))) - _VOCABULARY
+
+
+# Typo correction only when a word was not understood, so a correct word that happens to
+# be one edit from a catalogue word ("beach", "cable", "spots") is never rewritten.
+_TYPO_RETRY = frozenset({ParseErrorCode.UNKNOWN_TARGET, ParseErrorCode.UNKNOWN_LANDMARK})
+
+
+def _typo_corrected(text: str) -> Optional[str]:
+    normalized = _normalize(text or "")
+    corrected = _correct_typos(normalized)
+    return corrected if corrected != normalized else None
+
+
+def _parse_for_stage(text: str, expected_intent: Optional[Intent]) -> ParsedCommand:
+    """``parse_command``; a Stage 1 command phrased as "bring" is read without the
+    stage's intent, as run_stage1_candidate_pipeline always has."""
+    try:
+        return parse_command(text, expected_intent=expected_intent)
+    except CommandParseError as error:
+        if error.code is not ParseErrorCode.INTENT_MISMATCH:
+            raise
+        return parse_command(text)
+
+
+def mentioned_landmarks(text: str) -> frozenset[str]:
+    """Landmark types the text names (aliases, synonyms, typo correction)."""
+    found = {match.value for match in _matches(_normalize(text or ""), _LANDMARK_ALIASES)}
+    corrected = _typo_corrected(text)
+    if corrected:
+        found |= {match.value for match in _matches(corrected, _LANDMARK_ALIASES)}
+    return frozenset(found)
+
+
+def parse_command_lenient(
+    text: str,
+    *,
+    expected_intent: Optional[Intent] = None,
+) -> tuple[ParsedCommand, Optional[str]]:
+    """``parse_command`` that never raises (#114); on an unknown target or landmark it
+    retries once with typo correction. On a parse error, a partial reading:
+    the first-mentioned catalogue object (else person, else ``unknown``), the first
+    landmark, no relation. Returns the reading and the error code, if any."""
+    code = None
+    for attempt in (text, _typo_corrected(text)):
+        if attempt is None:
+            continue
+        try:
+            return _parse_for_stage(attempt, expected_intent), None
+        except CommandParseError as error:
+            code = code or error.code.value
+            if error.code not in _TYPO_RETRY:
+                break
+    normalized = _typo_corrected(text) or _normalize(text or "")
+    objects = sorted(_matches(normalized, _OBJECT_ALIASES), key=lambda item: item.start)
+    if objects:
+        target = objects[0].value
+    elif _PERSON_WORD_RE.search(normalized):
+        target = "person"
+    else:
+        target = "unknown"
+    landmarks = sorted(_matches(normalized, _LANDMARK_ALIASES), key=lambda item: item.start)
+    try:
+        hint = _scene_hint(normalized, target, target == "person")
+    except CommandParseError:
+        hint = None
+    intent = expected_intent or (Intent.BRING if _BRING_RE.search(normalized) else Intent.FIND)
+    return ParsedCommand(
+        intent=intent,
+        target_type=target,
+        landmark=landmarks[0].value if landmarks else None,
+        scene_hint=hint,
+    ), code
+
+
 __all__ = [
     "CommandParseError",
     "Intent",
@@ -1030,5 +1184,7 @@ __all__ = [
     "VEHICLE_LANDMARKS",
     "implicit_anchor_classes",
     "parse_command",
+    "mentioned_landmarks",
+    "parse_command_lenient",
     "uses_vehicle_anchor",
 ]

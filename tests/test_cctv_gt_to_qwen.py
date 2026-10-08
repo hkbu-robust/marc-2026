@@ -40,7 +40,7 @@ class SarLabelTests(unittest.TestCase):
     def test_runtime_sample_skips_unparseable_instruction(self):
         with mock.patch.object(q, "_runtime_round", return_value=(None, None, None)):
             self.assertIsNone(q._runtime_sample(
-                "/tmp/unused.png", {}, "cam", "Find the person.", {},
+                "/tmp/unused.png", {}, "cam", "Find the laptop.", {},
                 "llama-factory", "/tmp", "unused", situation="normal",
             ))
 
