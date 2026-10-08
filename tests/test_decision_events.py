@@ -159,6 +159,7 @@ class ObjectSelectorTests(unittest.TestCase):
         self.assertEqual("deterministic_fallback", failed.method)
         self.assertEqual(geometry.grounding, failed.grounding)
 
+    @patch.dict(os.environ, {"MARC_IMPLIED_ANCHOR_GEOMETRY": "0"})  # the re-pick path (#120)
     def test_malformed_anchor_repick_records_the_failed_step(self):
         # Seen live: Qwen answers the anchor re-pick with the target id only.
         text = "Find the tumbler I dropped as I got out of my car in the parking lot."
