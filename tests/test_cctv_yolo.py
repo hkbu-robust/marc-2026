@@ -202,6 +202,33 @@ class CctvYoloTests(unittest.TestCase):
         self.assertEqual((330.0, 190.0, 338.0, 198.0), extra[0].bbox_xyxy)
         self.assertEqual("zoom", extra[0].source)
 
+    def test_zoomed_refine_retries_once_on_cuda_oom_then_records_the_skip(self):
+        detector = CctvYoloDetector.__new__(CctvYoloDetector)
+        detector.contract = RuntimeContract.load()
+        detector.model = object()
+        calls = []
+
+        def oom_once(rgb, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+            return [("tumbler", 0.7, (330.0, 190.0, 338.0, 198.0))]
+
+        detector._predict_frame = oom_once
+        frames = {"cam": CctvFrame("cam", 1280, 720, np.zeros((720, 1280, 3), dtype=np.uint8))}
+        with patch("marc_agent.perception.cctv_yolo._release_cuda"):
+            extra = detector.refine_zoomed(frames, [], "tumbler")
+        self.assertEqual(["cam:tumbler:0"], [item.candidate_id for item in extra])
+        self.assertEqual([], detector.last_zoom_skipped)
+
+        def always_oom(rgb, **_kwargs):
+            raise RuntimeError("CUDA out of memory.")
+
+        detector._predict_frame = always_oom
+        with patch("marc_agent.perception.cctv_yolo._release_cuda"):
+            self.assertEqual([], detector.refine_zoomed(frames, [], "tumbler"))
+        self.assertEqual(["cam"], detector.last_zoom_skipped)
+
     def test_zoomed_pass_runs_only_for_small_targets_when_enabled(self):
         detector = Mock()
         detector.contract = RuntimeContract.load()

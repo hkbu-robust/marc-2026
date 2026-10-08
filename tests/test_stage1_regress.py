@@ -145,5 +145,17 @@ class GateTests(unittest.TestCase):
         self.assertIn("new decisions: projection_proxy:x", text)
 
 
+class GpuMemoryCheckTests(unittest.TestCase):
+    def test_oom_lines_in_a_run_log_fail_the_check(self):
+        import tempfile
+        from scripts.stage1_regress import gpu_memory_check
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "agent.log").write_text("ok\n")
+            self.assertTrue(gpu_memory_check(run).ok)
+            (run / "agent.log").write_text("[cctv-yolo] zoomed refine OOM camera=rig_1_a attempt=1\n")
+            self.assertFalse(gpu_memory_check(run).ok)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -160,6 +160,17 @@ def _run_test(path: Path) -> tuple[Path, int, str]:
     return path, proc.returncode, (proc.stdout + proc.stderr)[-2000:]
 
 
+def gpu_memory_check(run_dir: Path) -> Check:
+    """A run where CUDA ran out of memory skipped detector passes, so its rounds are not
+    representative (#115: on a shared GPU, the zoomed pass was skipped for most of a run)."""
+    lines = 0
+    for log in Path(run_dir).glob("*.log"):
+        lines += sum(1 for line in log.read_text(errors="replace").splitlines()
+                     if " OOM" in line or "out of memory" in line.lower())
+    return Check("no CUDA out-of-memory skips", lines == 0,
+                 f"{lines} OOM log lines" if lines else "none")
+
+
 def unit_tests() -> Check:
     """Each test file runs as its own script (``unittest discover`` trips on demo/)."""
     paths = sorted((REPO / "tests").glob("test_*.py"))
@@ -319,6 +330,7 @@ def compare(
         for problem in rounds if problem not in by_problem
     ]
     checks = invariants(candidate, baselines)
+    checks.append(gpu_memory_check(candidate_dir))
     checks.append(unit_tests() if run_tests else Check("unit tests", True, "skipped"))
     return report(candidate, baselines, verdicts, checks, allow)
 
