@@ -127,6 +127,12 @@ Qwen is warmed before the agent registers, including one schema-constrained pars
   - Low-confidence detections still vary between runs (#123).
   - On a shared development GPU, CUDA out-of-memory skips the zoomed pass. It now retries
     once, logs the skip, and the regression gate fails such runs.
+  - Wall-clock round time is 18-21 s (simulation time p95 4 s, limit 30 s simulation). The
+    Qwen budget uses wall clock, so on a slower judging GPU Qwen may be skipped late in a
+    round (geometry answers); the 3.5 s camera-discovery settle per round is the first thing
+    to trim if that shows up.
+  - Stage 2 shares the Stage 1 grounding; an unreadable *bring* command still skips the
+    Stage 2 submission (no sentinel navigation target).
 - **The paper must change** where it contradicts this record:
   - Guards override Qwen, so it is not true that Qwen alone selects with guards as fallback.
   - Scene cues infer anchors; they do not just break ties.

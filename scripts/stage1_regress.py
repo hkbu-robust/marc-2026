@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from marc_agent.command_parser import CommandParseError, Intent, ParseErrorCode, parse_command
+from marc_agent.command_parser import Intent, parse_command_lenient
 from marc_agent.perception.stage1_pipeline import IGNORED_CLASS_DUMMY_XYZ
 from scripts.stage1_runs import COMPONENTS, LoggedRound, LoggedRun, read_run
 from scripts.stage1_scores import SAME_ANSWER_M
@@ -137,15 +137,11 @@ def _parse_check(round_: LoggedRound) -> Optional[str]:
     command = (round_.pipeline or {}).get("command")
     if not command:
         return "no logged command"
-    try:
-        try:
-            parsed = parse_command(command, expected_intent=Intent.FIND)
-        except CommandParseError as exc:
-            if exc.code is not ParseErrorCode.INTENT_MISMATCH:
-                raise
-            parsed = parse_command(command)  # as run_stage1_candidate_pipeline does
-    except CommandParseError as exc:
-        return f"parse error {exc.code.value}"
+    # The runtime's rule reading (the fallback of command_llm.read_command, #114): Qwen is
+    # not available offline, and the rules must already read every public command.
+    parsed, error = parse_command_lenient(command, expected_intent=Intent.FIND)
+    if error is not None:
+        return f"parse error {error}"
     want = "person" if round_.is_person else round_.expected.get("target_type")
     if parsed.target_type != want:
         return f"target {parsed.target_type}, expected {want}"

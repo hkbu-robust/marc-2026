@@ -15,7 +15,7 @@ class ObjectCandidate:
     confidence: float
     camera_id: str
     image_size: tuple[int, int]
-    source: str = "detector"  # or "zoom", "landmark_crop"
+    source: str = "detector"  # or "zoom", "landmark_crop", "occlusion_hypothesis"
 
 
 @dataclass(frozen=True)
