@@ -13,6 +13,7 @@ from scripts.frozen_eval import case_store
 from scripts.frozen_eval.geometry import geometry_from_gt, ground_point, project_point
 from scripts.frozen_eval.heldout import assemble_case, stratum, wilson
 from scripts.frozen_eval.public import confirm, propose
+from scripts.frozen_eval.refresh_final import merge_case
 from scripts.frozen_eval.relations import object_choices, relations_between, sar_check
 
 # rig_3_b as the generator reports it.
@@ -229,6 +230,35 @@ class CaseStoreTests(unittest.TestCase):
             self._write(root, "public", "pub-1", confirmed=False)
             with self.assertRaises(ValueError):
                 case_store.freeze(root)
+
+
+class FinalVersionTests(unittest.TestCase):
+    def test_final_version_sits_beside_v1(self):
+        spec = GoldMatchingTests.SPEC
+        cand = GoldMatchingTests._cand
+        v1 = assemble_case(spec, GoldMatchingTests._detection(None, [
+            cand(None, "rig_3_b:bench:0", "bench", [200, 100, 300, 160])]))
+        detection = {"parsed": {"target_type": "mug"}, "decisions": [], "ms": 1.0, "detector": {},
+                     "oom": {"messages": [], "zoom_skipped": []},
+                     "candidates": [cand(None, "rig_3_b:mug:0", "mug", [101, 101, 121, 121], "zoom")]}
+        parse = {"parsed_final": {"target_type": "mug"}, "source": "qwen", "fallback_reason": None,
+                 "fixes": [], "pose_hint": None, "situation_hint": None, "latency_s": 0.5,
+                 "rules_parsed": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame = root / "f.png"
+            Image.new("RGB", (4, 4)).save(frame)
+            case = merge_case(dict(v1), parse, detection, {})
+            case_store.write_case(root, "heldout", case, {"rig_3_b": frame})
+            old = case_store.read_cases(root, "heldout")[0]
+            new = case_store.read_cases(root, "heldout", version="final")[0]
+        self.assertTrue(old.tags["detector_miss"])
+        self.assertEqual(old.gold["anchor_ids"], ["rig_3_b:bench:0"])
+        self.assertFalse(new.tags["detector_miss"])
+        self.assertTrue(new.tags["anchor_miss"])
+        self.assertEqual(new.gold["target_ids"], ["rig_3_b:mug:0"])
+        self.assertEqual(new.tags["target_from"], ["zoom"])
+        self.assertEqual(old.parsed_final, {"target_type": "mug"})
 
 
 if __name__ == "__main__":

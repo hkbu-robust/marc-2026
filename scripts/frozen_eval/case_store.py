@@ -17,6 +17,12 @@ Layout under the sets root (``05-frozen-eval-sets/``)::
   ``relation``, ``recipe_id``;
 - ``tags``: strata and the per-case flags counted in the manifest.
 
+Held-out cases may also carry a second candidate version from the final system's
+detector code (``refresh_final.py``): ``candidates_final``, ``gold_final``
+(target/anchor ID sets), ``tags_final`` and the final reader's ``parsed_final``.
+``load_set(..., version="final")`` returns cases with those candidates, gold IDs and
+miss flags in place of version 1; ``Case.parsed_final`` is set either way.
+
 Freeze before scoring: ``freeze`` refuses to overwrite a manifest, and
 ``load_set`` fails on any missing, extra or changed file.
 
@@ -56,6 +62,8 @@ class Case:
     gold: dict
     tags: dict
     source: dict = field(default_factory=dict)
+    parsed_final: dict | None = None
+    version: str = "v1"
 
     def frame(self, camera_id: str) -> np.ndarray:
         from PIL import Image
@@ -89,24 +97,36 @@ def _case_files(root: Path, set_name: str) -> list[Path]:
     return sorted(p for p in (root / set_name / "cases").rglob("*") if p.is_file())
 
 
-def _read_case(case_dir: Path) -> Case:
+VERSIONS = ("v1", "final")
+
+
+def _read_case(case_dir: Path, version: str = "v1") -> Case:
     raw = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
     if raw.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"{case_dir}: schema {raw.get('schema_version')} != {SCHEMA_VERSION}")
+    if version not in VERSIONS:
+        raise ValueError(f"version {version!r} not in {VERSIONS}")
+    candidates, gold, tags = raw["candidates"], raw["gold"], raw["tags"]
+    if version == "final":
+        if "candidates_final" not in raw:
+            raise ValueError(f"{case_dir}: no final candidate version (refresh_final.py)")
+        candidates = raw["candidates_final"]
+        gold = {**gold, **raw["gold_final"]}
+        tags = {**tags, **raw["tags_final"]}
     return Case(
         case_id=raw["case_id"], set=raw["set"], kind=raw["kind"], command=raw["command"],
         parsed=raw["parsed"], frames={cam: case_dir / rel for cam, rel in raw["frames"].items()},
-        candidates=raw["candidates"], gold=raw["gold"], tags=raw["tags"],
-        source=raw.get("source") or {},
+        candidates=candidates, gold=gold, tags=tags,
+        source=raw.get("source") or {}, parsed_final=raw.get("parsed_final"), version=version,
     )
 
 
-def read_cases(root: Path, set_name: str) -> list[Case]:
+def read_cases(root: Path, set_name: str, version: str = "v1") -> list[Case]:
     """All cases of one set, without checksum verification (for building the manifest)."""
     cases_dir = root / set_name / "cases"
     if not cases_dir.is_dir():
         return []
-    return [_read_case(d) for d in sorted(cases_dir.iterdir()) if d.is_dir()]
+    return [_read_case(d, version) for d in sorted(cases_dir.iterdir()) if d.is_dir()]
 
 
 def counts(cases: list[Case]) -> dict:
@@ -174,12 +194,15 @@ def verify(root: Path, set_name: str) -> None:
         raise ValueError(f"{set_name}: {len(changed)} changed files (e.g. {changed[:3]})")
 
 
-def load_set(root: Path, set_name: str, *, verify_checksums: bool = True) -> list[Case]:
-    """The frozen cases of one set. Every selector arm loads its inputs through this."""
+def load_set(root: Path, set_name: str, *, verify_checksums: bool = True,
+             version: str = "v1") -> list[Case]:
+    """The frozen cases of one set. Every selector arm loads its inputs through this.
+
+    ``version="final"`` selects the final system's candidates and gold IDs (#87 refresh)."""
     root = Path(root)
     if verify_checksums:
         verify(root, set_name)
-    return read_cases(root, set_name)
+    return read_cases(root, set_name, version)
 
 
 def main(argv=None) -> int:
