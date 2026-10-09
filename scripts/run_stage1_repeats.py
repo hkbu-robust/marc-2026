@@ -67,6 +67,16 @@ def platform_log(project: str) -> str:
                    capture=True, check=False).stdout
 
 
+def own_score_files(new_scores: list[Path], platform_log_text: str) -> list[Path]:
+    """The score files this run's platform wrote.
+
+    Parallel series share the platform's results folder, so "new since the run
+    started" can include another series' file. The scoreboard logs the file it
+    records; keep only those, or everything new if the log names none."""
+    logged = set(re.findall(r"Scoreboard\.record: .*?file=\S*/([^/,\s]+\.json)", platform_log_text))
+    return [path for path in new_scores if path.name in logged] if logged else new_scores
+
+
 def wait_finished(project: str, timeout_s: float) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -175,7 +185,10 @@ def one_run(index: int, args, env: dict) -> dict:
                 capture=True, check=False, env=env).stdout,
         encoding="utf-8",
     )
-    new_scores = sorted(set(results.glob("*.json")) - before - {results / "_summary.json"})
+    new_scores = own_score_files(
+        sorted(set(results.glob("*.json")) - before - {results / "_summary.json"}),
+        (run_dir / "platform.log").read_text(encoding="utf-8"),
+    )
     for path in new_scores:
         shutil.copy2(path, run_dir / path.name)
     record = {
