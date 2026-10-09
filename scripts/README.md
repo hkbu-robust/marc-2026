@@ -15,6 +15,7 @@ All of them read #85 harness run folders (`run-NN/` with `robust_*.json` and
 | `heldout_selection.py` | what the whole runtime round (detector, refinement, Qwen, guards, projection) does on #87 held-out cases (#115, #117) |
 | `small_target_classes.py` | which detector classes count as small (from the training labels; #115) |
 | `stage1_sensitivity.py` | which credited targets fail attribution under other scorer constants (#135) |
+| `paper_numbers.py` | the paper's numbers as LaTeX macros (`numbers.tex`) from `final-experiments/` (#130; mapping in `data/paper_numbers.yaml`, input formats in `docs/paper/paper_numbers_inputs.md`) |
 
 `stage1_runs.py` holds what the replay and the gate share: the loader for logged
 rounds and the reverse-engineered scoring kernel.

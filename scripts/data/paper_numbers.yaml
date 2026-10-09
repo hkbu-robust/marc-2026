@@ -1,0 +1,760 @@
+# Paper numbers (#130): macro -> source file (relative to final-experiments/) -> value -> format.
+# Read by `python -m scripts.paper_numbers`; see that module for the extraction kinds.
+#
+# Every source is under ~/marc-2026-work/experiments/ablations/final-system/final-experiments/.
+# Never point a macro at the frozen-system outputs (04-repeated-runs/, 05-frozen-eval-sets/,
+# 09-pipeline-review/) or at development folders elsewhere under final-system/.
+#
+# Where a producing issue has no fixed output format yet, the source is a JSON file the
+# issue must write; the comment above each block names the file and keys
+# (collected in docs/paper/paper_numbers_inputs.md).
+#
+# Format keys: decimals, percent (x100, adds \%), scale, sign (+ on positive),
+# text (LaTeX-escaped string; strip = prefix to drop, chars = keep the first N).
+
+macros:
+
+# ---------------------------------------------------------------------------------------
+# #127 provenance. 127-provenance/provenance.json (to be written by #127):
+#   tag, commit, agent_image_digest, vllm_image_digest, platform_image_digest,
+#   detector_weights_sha256, vllm_gpu_fraction, submission_tag, submission_commit
+# ---------------------------------------------------------------------------------------
+
+- name: ProvTag
+  population: "final-system-v1 provenance (#127)"
+  source: 127-provenance/provenance.json
+  json: tag
+  format: {text: true}
+- name: ProvCommit
+  population: "final-system-v1 provenance (#127), short form"
+  source: 127-provenance/provenance.json
+  json: commit
+  format: {text: true, chars: 7}
+- name: ProvAgentDigest
+  population: "agent image marc-agent:final-system-v1 (#127), first 12 hex digits"
+  source: 127-provenance/provenance.json
+  json: agent_image_digest
+  format: {text: true, strip: "sha256:", chars: 12}
+- name: ProvVllmDigest
+  population: "vLLM image marc-qwen-vllm:qualifier-b2360c86 (#127), first 12 hex digits"
+  source: 127-provenance/provenance.json
+  json: vllm_image_digest
+  format: {text: true, strip: "sha256:", chars: 12}
+- name: ProvPlatformDigest
+  population: "platform image marc-platform:practice (#127), first 12 hex digits"
+  source: 127-provenance/provenance.json
+  json: platform_image_digest
+  format: {text: true, strip: "sha256:", chars: 12}
+- name: ProvDetectorSha
+  population: "detector weights SHA-256 (#127), first 8 hex digits"
+  source: 127-provenance/provenance.json
+  json: detector_weights_sha256
+  format: {text: true, strip: "sha256:", chars: 8}
+- name: ProvVllmGpuFraction
+  population: "vLLM --vllm-gpu-fraction for every run (#127)"
+  source: 127-provenance/provenance.json
+  json: vllm_gpu_fraction
+  format: {decimals: 2}
+- name: ProvSubmissionTag
+  population: "finals submission tag (#127, after #132)"
+  source: 127-provenance/provenance.json
+  json: submission_tag
+  format: {text: true}
+- name: ProvSubmissionCommit
+  population: "finals submission commit (#127, after #132), short form"
+  source: 127-provenance/provenance.json
+  json: submission_commit
+  format: {text: true, chars: 7}
+
+# ---------------------------------------------------------------------------------------
+# #128 headline. `python -m scripts.stage1_scores 128-repeated-runs/run-* --label final-system-v1
+#   --out 128-repeated-runs/analysis` (runs.csv, rounds.csv, summary.md; existing format).
+# ---------------------------------------------------------------------------------------
+
+- name: StageOneRuns
+  population: "public, final-system-v1 (#128), number of runs"
+  source: 128-repeated-runs/analysis/runs.csv
+  csv: {agg: count}
+- each:
+  - {M: Mean, agg: mean}
+  - {M: Sd, agg: sd}
+  - {M: Median, agg: median}
+  - {M: IqrLow, agg: q1}
+  - {M: IqrHigh, agg: q3}
+  - {M: Min, agg: min}
+  - {M: Max, agg: max}
+  name: StageOne$M
+  population: "public, 10 runs x 33 rounds, final-system-v1 (#128), Stage 1 average ($agg over runs)"
+  source: 128-repeated-runs/analysis/runs.csv
+  csv: {column: stage1_average, agg: $agg}
+  format: {decimals: 2}
+- name: StageOneLost
+  population: "public, 10 runs, final-system-v1 (#128), points lost per run on average (100 - mean)"
+  expr: 100 - StageOneMean
+  format: {decimals: 2}
+- each:
+  - {M: CiClusters, g: 1, d: 0}
+  - {M: CiLow, g: 3, d: 2}
+  - {M: CiHigh, g: 4, d: 2}
+  name: StageOne$M
+  population: "public, 10 runs, final-system-v1 (#128), problem-level 95% CI, bootstrap over the 19 configuration clusters"
+  source: 128-repeated-runs/analysis/summary.md
+  regex: 'Problem-level 95% CI \(bootstrap over (\d+) configuration clusters, round scores averaged over runs\): ([\d.]+) \[([\d.]+), ([\d.]+)\]'
+  group: $g
+  format: {decimals: $d}
+- each:
+  - {M: Camera, c: camera}
+  - {M: Type, c: object_type}
+  - {M: Landmark, c: landmark}
+  - {M: Relation, c: relation}
+  - {M: Anchor, c: anchor}
+  - {M: Target, c: target}
+  name: StageOne${M}Credit
+  population: "public, 10 runs, final-system-v1 (#128), mean over runs of the $c credit (rounds where it has weight)"
+  source: 128-repeated-runs/analysis/runs.csv
+  csv: {column: $c, agg: mean}
+  format: {decimals: 3}
+- name: StageOneRoundsPerRun
+  population: "public practice rounds per run (#128)"
+  source: 128-repeated-runs/analysis/rounds.csv
+  csv: {agg: count}
+- name: StageOneStableRounds
+  population: "public, 10 runs (#128), rounds with the same answer in every run (camera; target and anchor within 0.5 m)"
+  source: 128-repeated-runs/analysis/rounds.csv
+  csv: {agg: count, where: {answer_changes: 0}}
+- name: StageOneChangedRounds
+  population: "public, 10 runs (#128), rounds whose answer changed in at least one run"
+  source: 128-repeated-runs/analysis/rounds.csv
+  csv: {agg: count, where: {answer_changes: {not: 0}}}
+- name: StageOneAnswerChanges
+  population: "public, 10 runs (#128), answer changes against each round's most common answer"
+  source: 128-repeated-runs/analysis/rounds.csv
+  csv: {column: answer_changes, agg: sum}
+- each:
+  - {M: SimPNinetyFive, g: 1, d: 2}
+  - {M: SimMax, g: 2, d: 2}
+  - {M: SimRounds, g: 3, d: 0}
+  name: StageOne$M
+  population: "public, 10 runs x 33 rounds pooled (#128), round time in simulation time"
+  source: 128-repeated-runs/analysis/summary.md
+  regex: 'p95 ([\d.]+) s, max ([\d.]+) s, over (\d+) rounds'
+  group: $g
+  format: {decimals: $d}
+- name: StageOneTimeLimit
+  population: "public (#128), mission time limit (simulation s)"
+  source: 128-repeated-runs/analysis/summary.md
+  regex: 'mission time limit\(s\): ([\d.]+) s'
+  format: {decimals: 0}
+- name: StageOneRoundsOverLimit
+  population: "public, 10 runs x 33 rounds (#128), rounds over the time limit"
+  source: 128-repeated-runs/analysis/summary.md
+  regex: 'rounds over the limit: (\d+)'
+- each:
+  - {M: WallPNinetyFive, agg: p95}
+  - {M: WallMax, agg: max}
+  name: StageOne$M
+  population: "public, 10 runs x 33 rounds pooled (#128), round wall time on our GPU (not the judging GPU)"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {column: round_time_s, agg: $agg}
+  format: {decimals: 1}
+
+# #128 checks. 128-repeated-runs/numbers.json (to be written by #128):
+#   zoom_umbrella_hits: {lf08: <runs where tiled_refine added rig_7_a:umbrella:*>, hf08: ..., runs: 10}
+#   oom_reruns: <runs re-run because of oom_skipped>
+- each:
+  - {M: LfEight, k: lf08}
+  - {M: HfEight, k: hf08}
+  name: ZoomUmbrellaHits$M
+  population: "public, 10 runs (#128), runs where the zoomed pass found the $k umbrella"
+  source: 128-repeated-runs/numbers.json
+  json: zoom_umbrella_hits.$k
+- name: ZoomUmbrellaRuns
+  population: "public (#128), runs checked for the lf08/hf08 umbrella"
+  source: 128-repeated-runs/numbers.json
+  json: zoom_umbrella_hits.runs
+- name: StageOneOomReruns
+  population: "public (#128), runs re-run after a CUDA OOM skip"
+  source: 128-repeated-runs/numbers.json
+  json: oom_reruns
+
+# ---------------------------------------------------------------------------------------
+# #128 -> #97 decision paths. `python -m scripts.stage1_decisions 128-repeated-runs/run-*/experiments/*
+#   --out 128-repeated-runs/decisions` (rounds.csv: one row per round, 330 rows).
+# Columns path, selector_reason, qwen_skipped, sentinel, landmark_proxy, projection_proxy exist.
+# New rounds.csv columns #128 must add to stage1_decisions (from the final system's events):
+#   parse_source (command_parse.source: qwen|rules|partial), parse_latency_s,
+#   field_target_type (stated|unknown), field_landmark (stated|inferred|none),
+#   field_relation (stated|default|none), field_situation (r03|hint|default; SAR only),
+#   ground_model (ground_model.ground: applied|uncalibrated_camera|fingerprint_mismatch:*|...),
+#   tiled_added (tiled_refine.added summed over the round), tiled_oom (oom_skipped count),
+#   implied_anchor (implied_anchor.chosen or empty), fallback_anchor (True/False).
+# ---------------------------------------------------------------------------------------
+
+- name: DecRounds
+  population: "public, 10 runs x 33 rounds (#128), rounds counted"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count}
+- each:
+  - {M: QwenKept, p: Qwen choice accepted}
+  - {M: GuardOverride, p: geometry override}
+  - {M: GeometryOnly, p: geometry only (no Qwen)}
+  - {M: QwenFallback, p: Qwen fallback}
+  name: Dec$M
+  population: "public, 10 runs x 33 rounds (#128), rounds on path \"$p\""
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {path: $p}}
+- each:
+  - {M: QwenKept, p: Qwen choice accepted}
+  - {M: GuardOverride, p: geometry override}
+  - {M: GeometryOnly, p: geometry only (no Qwen)}
+  name: Dec${M}Pct
+  population: "public, 10 runs x 33 rounds (#128), share of rounds on path \"$p\""
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: share, where: {path: $p}}
+  format: {percent: true, decimals: 1}
+- each:
+  - {M: Support, r: support_geometry_guard}
+  - {M: Weak, r: weak_override_guard}
+  - {M: SceneEvidence, r: scene_evidence_guard}
+  - {M: CrossClass, r: cross_class_guard}
+  - {M: SarPose, r: pose_geometry_override}
+  - {M: SarSupport, r: support_geometry_override}
+  - {M: SarPlace, r: place_geometry_override}
+  - {M: SarLandmark, r: landmark_geometry_override}
+  name: DecGuard$M
+  population: "public, 10 runs x 33 rounds (#128), guard overrides by $r"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {path: geometry override, selector_reason: $r}}
+- each:
+  - {M: Parking, r: parking_geometry}
+  - {M: Implied, r: implied_anchor_geometry}
+  name: DecGeometry$M
+  population: "public, 10 runs x 33 rounds (#128), geometry-only route $r (no Qwen call)"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {path: geometry only (no Qwen), selector_reason: $r}}
+- name: DecQwenSkipped
+  population: "public, 10 runs x 33 rounds (#128), rounds where Qwen was skipped (qwen_skipped, any reason)"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {qwen_skipped: "*"}}
+- name: DecFallbackGrounding
+  population: "public, 10 runs x 33 rounds (#128), always-submit fallback grounding (sentinel target)"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {sentinel: fallback_grounding}}
+- name: DecSentinel
+  population: "public, 10 runs x 33 rounds (#128), rounds with any sentinel coordinate"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {sentinel: "*"}}
+- name: DecLandmarkProxy
+  population: "public, 10 runs x 33 rounds (#128), landmark-context proxies (0 by construction)"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {landmark_proxy: "True"}}
+  emit: false
+- name: DecProjectionProxy
+  population: "public, 10 runs x 33 rounds (#128), projection proxies (0 by construction)"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {projection_proxy: "*"}}
+  emit: false
+- name: DecProxy
+  population: "public, 10 runs x 33 rounds (#128), proxy candidates of any kind (removed by design)"
+  expr: DecLandmarkProxy + DecProjectionProxy
+- name: DecFallbackAnchor
+  population: "public, 10 runs x 33 rounds (#128), fallback anchor from the named landmark"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {fallback_anchor: "True"}}
+- each:
+  - {M: Qwen, s: qwen}
+  - {M: Rules, s: rules}
+  - {M: Partial, s: partial}
+  name: DecParse$M
+  population: "public, 10 runs x 33 rounds (#128), commands read by $s (command_parse.source)"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {parse_source: $s}}
+- each:
+  - {M: Median, agg: median}
+  - {M: PNinetyFive, agg: p95}
+  name: DecParseLatency$M
+  population: "public, 10 runs x 33 rounds (#128), command-reading latency in s ($agg)"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {column: parse_latency_s, agg: $agg}
+  format: {decimals: 2}
+- name: DecGroundApplied
+  population: "public, 10 runs x 33 rounds (#128), submissions projected on the calibrated ground"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {ground_model: applied}}
+- name: DecGroundFlat
+  population: "public, 10 runs x 33 rounds (#128), submissions on the flat-plane fallback"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {ground_model: {not: applied}}}
+- name: DecTiledAdded
+  population: "public, 10 runs x 33 rounds (#128), candidates added by the zoomed pass"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {column: tiled_added, agg: sum}
+- name: DecTiledAddedRounds
+  population: "public, 10 runs x 33 rounds (#128), rounds where the zoomed pass added a candidate"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {tiled_added: {not: 0}}}
+- name: DecTiledOom
+  population: "public, 10 runs x 33 rounds (#128), zoomed-pass CUDA OOM skips (must be 0)"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {column: tiled_oom, agg: sum}
+- name: DecImpliedAnchor
+  population: "public, 10 runs x 33 rounds (#128), anchors chosen by the implied-anchor rule"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {implied_anchor: "*"}}
+- each:
+  - {M: TargetStated, c: field_target_type, v: stated}
+  - {M: TargetUnknown, c: field_target_type, v: unknown}
+  - {M: LandmarkStated, c: field_landmark, v: stated}
+  - {M: LandmarkInferred, c: field_landmark, v: inferred}
+  - {M: LandmarkNone, c: field_landmark, v: none}
+  - {M: RelationStated, c: field_relation, v: stated}
+  - {M: RelationDefault, c: field_relation, v: default}
+  - {M: SituationRthree, c: field_situation, v: r03}
+  - {M: SituationHint, c: field_situation, v: hint}
+  - {M: SituationDefault, c: field_situation, v: default}
+  name: Field$M
+  population: "public, 10 runs x 33 rounds (#128), submitted fields with $c = $v"
+  source: 128-repeated-runs/decisions/rounds.csv
+  csv: {agg: count, where: {$c: $v}}
+
+# ---------------------------------------------------------------------------------------
+# #87 frozen evaluation sets. Sources written by #87's existing tools:
+#   87-eval-sets/manifest.json (case_store freeze; sets.<set>.counts.*; pass
+#     --notes with {"near_duplicates_dropped": N, "frozen_candidate_version": "..."}),
+#   87-eval-sets/label-audit/audit_score.json (save the stdout of `heldout audit-score`),
+#   87-eval-sets/heldout_detector_recall_final.json (same schema as heldout_detector_recall.json,
+#     recomputed with the final candidates; a new name so the version-1 file is never read).
+# ---------------------------------------------------------------------------------------
+
+- each:
+  - {M: HeldCases, k: sets.heldout.counts.cases}
+  - {M: HeldObjectCases, k: sets.heldout.counts.kind.object}
+  - {M: HeldSarCases, k: sets.heldout.counts.kind.sar}
+  - {M: HeldDetectorMiss, k: sets.heldout.counts.detector_miss.true}
+  - {M: HeldAnchorMiss, k: sets.heldout.counts.anchor_miss.true}
+  - {M: HeldRareCases, k: sets.heldout.counts.stratum.rare}
+  - {M: PubCases, k: sets.public.counts.cases}
+  - {M: HeldNearDuplicates, k: notes.near_duplicates_dropped}
+  name: Eval$M
+  population: "frozen #87 sets, final candidates ($k)"
+  source: 87-eval-sets/manifest.json
+  json: $k
+- each:
+  - {M: "", k: overall.all}
+  - {M: Sunblock, k: by_class.sunblock}
+  - {M: Tissue, k: by_class.tissue}
+  - {M: Cup, k: by_class.disposable_cup}
+  - {M: LyingDown, k: by_class.person_lying_down}
+  - {M: RelOn, k: by_relation.on}
+  name: EvalDetRecall$M
+  population: "held-out generated chungmu scenes, final candidates (#87), detector recall $k"
+  source: 87-eval-sets/heldout_detector_recall_final.json
+  json: $k.2
+  format: {percent: true, decimals: 1}
+- name: EvalDetMissCiLow
+  population: "held-out (#87), Wilson 95% CI on the miss rate, low end"
+  source: 87-eval-sets/heldout_detector_recall_final.json
+  json: overall.all.3.0
+  emit: false
+- name: EvalDetMissCiHigh
+  population: "held-out (#87), Wilson 95% CI on the miss rate, high end"
+  source: 87-eval-sets/heldout_detector_recall_final.json
+  json: overall.all.3.1
+  emit: false
+- name: EvalDetRecallLow
+  population: "held-out (#87), detector recall 95% Wilson CI low (1 - miss-rate high)"
+  expr: 1 - EvalDetMissCiHigh
+  format: {percent: true, decimals: 1}
+- name: EvalDetRecallHigh
+  population: "held-out (#87), detector recall 95% Wilson CI high (1 - miss-rate low)"
+  expr: 1 - EvalDetMissCiLow
+  format: {percent: true, decimals: 1}
+- name: EvalAuditCases
+  population: "held-out (#87), label-audit cases checked by a person"
+  source: 87-eval-sets/label-audit/audit_score.json
+  json: audited
+- name: EvalAuditErrors
+  population: "held-out (#87), label-audit errors"
+  source: 87-eval-sets/label-audit/audit_score.json
+  json: label_errors
+- each:
+  - {M: Rate, k: error_rate}
+  - {M: Low, k: wilson95.0}
+  - {M: High, k: wilson95.1}
+  name: EvalAuditError$M
+  population: "held-out (#87), label-audit error rate with Wilson 95% CI ($k)"
+  source: 87-eval-sets/label-audit/audit_score.json
+  json: $k
+  format: {percent: true, decimals: 1}
+
+# ---------------------------------------------------------------------------------------
+# #89 offline selector arms. 89-selector-arms/numbers.json (to be written by #89):
+#   {"heldout"|"public": {
+#      "cases": N, "shortlist_recall": r,
+#      "arms": {"A"|"B"|"C"|"D": {"exact_raw": r, "exact_guarded": r,
+#               "target_credit": r, "anchor_credit": r,
+#               "invalid_rate": r, "fallback_rate": r, "latency_p50_s": s, "latency_p95_s": s}},
+#      "diff": {"C_minus_A"|"C_minus_B"|"C_minus_D": {"exact_raw"|"exact_guarded"|"target_credit":
+#               {"value": d, "ci": [lo, hi], "mcnemar_p": p}}},
+#      "strata": {"rare"|"seen": {"C_minus_B": {"value": d, "ci": [lo, hi]}}}},
+#    "validity": {"public_C_matches_run01": k, "rounds": 33}}
+# Rates and credits as fractions 0-1. exact_* = object joint exact match + SAR person exact
+# match, detector misses excluded; target_credit = exact-kernel target credit of the
+# answer; anchor_credit = 1 - d/5, held-out odd scenes only. Primary: C - B, heldout,
+# exact match (declared before scoring). Arm D keys may be absent (cut first).
+# ---------------------------------------------------------------------------------------
+
+- each:
+  - {S: Held, s: heldout, P: "held-out generated chungmu scenes (#87 frozen)"}
+  - {S: Pub, s: public, P: "public frozen capture of #128 run-01, 33 rounds"}
+  name: Sel${S}Cases
+  population: "$P, cases (#89)"
+  source: 89-selector-arms/numbers.json
+  json: $s.cases
+- each:
+  - {S: Held, s: heldout, P: "held-out generated chungmu scenes (#87 frozen)"}
+  - {S: Pub, s: public, P: "public frozen capture of #128 run-01, 33 rounds"}
+  name: Sel${S}ShortlistRecall
+  population: "$P, shortlist recall of non-miss cases (#89)"
+  source: 89-selector-arms/numbers.json
+  json: $s.shortlist_recall
+  format: {percent: true, decimals: 1}
+- each:
+  - - {S: Held, s: heldout, P: "held-out generated chungmu scenes (#87 frozen)"}
+    - {S: Pub, s: public, P: "public frozen capture of #128 run-01"}
+  - - {A: A}
+    - {A: B}
+    - {A: C}
+    - {A: D}
+  - - {M: ExactRaw, k: exact_raw}
+    - {M: ExactGuarded, k: exact_guarded}
+  name: Sel${S}${A}${M}
+  population: "$P, arm $A, $k (#89)"
+  source: 89-selector-arms/numbers.json
+  json: $s.arms.$A.$k
+  format: {percent: true, decimals: 1}
+- each:
+  - - {S: Held, s: heldout, P: "held-out generated chungmu scenes (#87 frozen)"}
+    - {S: Pub, s: public, P: "public frozen capture of #128 run-01"}
+  - - {A: A}
+    - {A: B}
+    - {A: C}
+    - {A: D}
+  - - {M: TargetCredit, k: target_credit}
+    - {M: AnchorCredit, k: anchor_credit}
+  name: Sel${S}${A}${M}
+  population: "$P, arm $A, $k under the exact kernel (#89; held-out anchor on odd scenes only)"
+  source: 89-selector-arms/numbers.json
+  json: $s.arms.$A.$k
+  format: {decimals: 3}
+- each:
+  - - {S: Held, s: heldout, P: "held-out generated chungmu scenes (#87 frozen)"}
+    - {S: Pub, s: public, P: "public frozen capture of #128 run-01"}
+  - - {A: A}
+    - {A: B}
+    - {A: D}
+  - - {M: ExactRaw, k: exact_raw}
+    - {M: ExactGuarded, k: exact_guarded}
+  - - {V: "", j: value}
+    - {V: Low, j: ci.0}
+    - {V: High, j: ci.1}
+  name: Sel${S}CMinus${A}${M}${V}
+  population: "$P, arm C - arm $A on $k, paired cluster bootstrap 95% CI (#89)"
+  source: 89-selector-arms/numbers.json
+  json: $s.diff.C_minus_$A.$k.$j
+  format: {percent: true, decimals: 1, sign: true}
+- each:
+  - - {S: Held, s: heldout, P: "held-out generated chungmu scenes (#87 frozen)"}
+    - {S: Pub, s: public, P: "public frozen capture of #128 run-01"}
+  - - {A: A}
+    - {A: B}
+    - {A: D}
+  - - {V: "", j: value}
+    - {V: Low, j: ci.0}
+    - {V: High, j: ci.1}
+  name: Sel${S}CMinus${A}TargetCredit${V}
+  population: "$P, arm C - arm $A on exact-kernel target credit, paired cluster bootstrap 95% CI (#89)"
+  source: 89-selector-arms/numbers.json
+  json: $s.diff.C_minus_$A.target_credit.$j
+  format: {decimals: 3, sign: true}
+- each:
+  - {M: ExactRaw, k: exact_raw}
+  - {M: ExactGuarded, k: exact_guarded}
+  name: SelHeldCMinusB${M}P
+  population: "held-out (#87 frozen), primary comparison C - B on $k, exact McNemar p (#89)"
+  source: 89-selector-arms/numbers.json
+  json: heldout.diff.C_minus_B.$k.mcnemar_p
+  format: {decimals: 3}
+- each:
+  - - {T: Rare, t: rare}
+    - {T: Seen, t: seen}
+  - - {V: "", j: value}
+    - {V: Low, j: ci.0}
+    - {V: High, j: ci.1}
+  name: SelHeld${T}CMinusB${V}
+  population: "held-out (#87 frozen), stratum $t, C - B on the primary metric, paired 95% CI (#89)"
+  source: 89-selector-arms/numbers.json
+  json: heldout.strata.$t.C_minus_B.$j
+  format: {percent: true, decimals: 1, sign: true}
+- each:
+  - - {A: B}
+    - {A: C}
+    - {A: D}
+  - - {M: InvalidRate, k: invalid_rate}
+    - {M: FallbackRate, k: fallback_rate}
+  name: SelHeld${A}${M}
+  population: "held-out (#87 frozen), arm $A, $k (#89)"
+  source: 89-selector-arms/numbers.json
+  json: heldout.arms.$A.$k
+  format: {percent: true, decimals: 1}
+- each:
+  - - {A: B}
+    - {A: C}
+    - {A: D}
+  - - {M: LatencyMedian, k: latency_p50_s}
+    - {M: LatencyPNinetyFive, k: latency_p95_s}
+  name: SelHeld${A}${M}
+  population: "held-out (#87 frozen), arm $A, $k (offline, batch one) (#89)"
+  source: 89-selector-arms/numbers.json
+  json: heldout.arms.$A.$k
+  format: {decimals: 2}
+- name: SelValidityMatches
+  population: "public (#89 arm C vs #128 run-01), rounds where arm C matches the live choice"
+  source: 89-selector-arms/numbers.json
+  json: validity.public_C_matches_run01
+
+# ---------------------------------------------------------------------------------------
+# #90 end-to-end selector configurations, 3 runs each. stage1_scores output per configuration:
+#   90-e2e-selector-arms/config-1-no-vlm/analysis/runs.csv
+#   90-e2e-selector-arms/config-2-base-qwen/analysis/runs.csv
+# Configuration 3 = #128 runs 01-03 (read from 128-repeated-runs/analysis/runs.csv).
+# ---------------------------------------------------------------------------------------
+
+- each:
+  - - {C: NoVlm, src: 90-e2e-selector-arms/config-1-no-vlm/analysis/runs.csv, P: "configuration 1 (no VLM, rule reading)"}
+    - {C: BaseQwen, src: 90-e2e-selector-arms/config-2-base-qwen/analysis/runs.csv, P: "configuration 2 (base Qwen)"}
+  - - {M: Mean, c: stage1_average, agg: mean, d: 2}
+    - {M: Sd, c: stage1_average, agg: sd, d: 2}
+    - {M: AnchorCredit, c: anchor, agg: mean, d: 3}
+    - {M: TargetCredit, c: target, agg: mean, d: 3}
+  name: Ee${C}${M}
+  population: "public, 3 runs x 33 rounds, $P (#90), $c $agg"
+  source: $src
+  csv: {column: $c, agg: $agg}
+  format: {decimals: $d}
+- each:
+  - {M: Mean, c: stage1_average, agg: mean, d: 2}
+  - {M: Sd, c: stage1_average, agg: sd, d: 2}
+  - {M: AnchorCredit, c: anchor, agg: mean, d: 3}
+  - {M: TargetCredit, c: target, agg: mean, d: 3}
+  name: EeTuned${M}
+  population: "public, #128 runs 01-03 = configuration 3 (fine-tuned Qwen, deployed) (#90), $c $agg"
+  source: 128-repeated-runs/analysis/runs.csv
+  csv: {column: $c, agg: $agg, where: {run: [run-01, run-02, run-03]}}
+  format: {decimals: $d}
+- name: EeTunedMinusBase
+  population: "public, 3 runs each (#90), configuration 3 - 2 (fine-tuning effect, end to end)"
+  expr: EeTunedMean - EeBaseQwenMean
+  format: {decimals: 2, sign: true}
+- name: EeTunedMinusNoVlm
+  population: "public, 3 runs each (#90), configuration 3 - 1 (whole VLM path incl. parsing)"
+  expr: EeTunedMean - EeNoVlmMean
+  format: {decimals: 2, sign: true}
+
+# ---------------------------------------------------------------------------------------
+# #129 row 1 / 1b: ground calibration x footprint prior. stage1_replay output per cell
+# (runs.csv, cases.csv, summary.md; existing format) in
+#   129-ablations/ground-<G>-footprint-<F>/ (as in the #129 command; cases = held-out odd scenes).
+# Held-out target error is not in the replay output: 129-ablations/numbers.json (to be written
+# by #129): ground_footprint."ground-<G>-footprint-<F>".heldout_target_median_m.
+# ---------------------------------------------------------------------------------------
+
+- each:
+  - - {X: Both, cell: ground-1-footprint-1, P: "calibrated ground + footprint prior"}
+    - {X: CalibOnly, cell: ground-1-footprint-0, P: "calibrated ground only"}
+    - {X: FootOnly, cell: ground-0-footprint-1, P: "footprint prior only"}
+    - {X: Flat, cell: ground-0-footprint-0, P: "flat plane"}
+  - - {M: Mean, c: replay_average, agg: mean, d: 2}
+    - {M: Sd, c: replay_average, agg: sd, d: 2}
+    - {M: PubAnchorCredit, c: replay_anchor, agg: mean, d: 3}
+  name: Gf${X}${M}
+  population: "public, CPU replay of the 10 #128 runs, $P (#129 row 1), $c $agg"
+  source: 129-ablations/$cell/runs.csv
+  csv: {column: $c, agg: $agg}
+  format: {decimals: $d}
+- each:
+  - {X: Both, cell: ground-1-footprint-1, P: "calibrated ground + footprint prior"}
+  - {X: CalibOnly, cell: ground-1-footprint-0, P: "calibrated ground only"}
+  - {X: FootOnly, cell: ground-0-footprint-1, P: "footprint prior only"}
+  - {X: Flat, cell: ground-0-footprint-0, P: "flat plane"}
+  name: Gf${X}Flips
+  population: "public, CPU replay of the 10 #128 runs, $P (#129 row 1), target-credit flips vs the logged runs"
+  source: 129-ablations/$cell/summary.md
+  regex: 'Target credit flips: (\d+)'
+- each:
+  - - {X: Both, cell: ground-1-footprint-1, P: "calibrated ground + footprint prior"}
+    - {X: CalibOnly, cell: ground-1-footprint-0, P: "calibrated ground only"}
+    - {X: FootOnly, cell: ground-0-footprint-1, P: "footprint prior only"}
+    - {X: Flat, cell: ground-0-footprint-0, P: "flat plane"}
+  - - {M: HeldCases, c: case_id, agg: count, d: 0}
+    - {M: HeldAnchorCredit, c: credit, agg: mean, d: 3}
+    - {M: HeldAnchorMedErr, c: error_m, agg: median, d: 2}
+  name: Gf${X}${M}
+  population: "held-out odd scenes (#87 frozen), $P (#129 row 1), anchor $c $agg (m for errors)"
+  source: 129-ablations/$cell/cases.csv
+  csv: {column: $c, agg: $agg}
+  format: {decimals: $d}
+- each:
+  - {X: Both, cell: ground-1-footprint-1, P: "calibrated ground + footprint prior"}
+  - {X: CalibOnly, cell: ground-1-footprint-0, P: "calibrated ground only"}
+  - {X: FootOnly, cell: ground-0-footprint-1, P: "footprint prior only"}
+  - {X: Flat, cell: ground-0-footprint-0, P: "flat plane"}
+  name: Gf${X}HeldTargetMedErr
+  population: "held-out odd scenes (#87 frozen), $P (#129 row 1), median target 3-D error (m)"
+  source: 129-ablations/numbers.json
+  json: ground_footprint.$cell.heldout_target_median_m
+  format: {decimals: 2}
+- each:
+  - {X: Both}
+  - {X: CalibOnly}
+  - {X: FootOnly}
+  name: Gf${X}Gain
+  population: "public, CPU replay of the 10 #128 runs (#129 row 1), Stage 1 average gain over the flat plane"
+  expr: Gf${X}Mean - GfFlatMean
+  format: {decimals: 2, sign: true}
+- name: GfMaxMoveMm
+  population: "public replay with default flags (#129 row 1), largest coordinate change vs the log (mm; must be < 1)"
+  source: 129-ablations/ground-1-footprint-1/summary.md
+  regex: 'Largest coordinate change vs the log: ([\d.]+) mm'
+  format: {decimals: 3}
+- name: CalibFreeMean
+  population: "public replay, footprint prior only = calibration-free (#129 row 1b), Stage 1 average"
+  expr: GfFootOnlyMean
+  format: {decimals: 2}
+- name: CalibFreeHeldAnchorCredit
+  population: "held-out odd scenes, footprint prior only = calibration-free (#129 row 1b), anchor credit"
+  expr: GfFootOnlyHeldAnchorCredit
+  format: {decimals: 3}
+- name: CalibFreeHeldAnchorMedErr
+  population: "held-out odd scenes, footprint prior only = calibration-free (#129 row 1b), median anchor error (m)"
+  expr: GfFootOnlyHeldAnchorMedErr
+  format: {decimals: 2}
+
+# #129 row 2: command reading. `python -m scripts.parser_bakeoff --sets test public
+#   --out 129-ablations/parser` (bakeoff.md; existing format). Values are "k/n" text.
+# The "old rules" row is never read (no frozen-system content).
+- each:
+  - - {R: Qwen, reader: qwen}
+    - {R: Rules, reader: lenient rules}
+  - - {S: Test, set: test, P: "blind parser test set (60 commands, adjudicated)"}
+    - {S: Pub, set: public, P: "33 public commands"}
+  - - {F: NoSubmit, g: 1, k: no submission}
+    - {F: Target, g: 2, k: target_type correct}
+    - {F: Landmark, g: 3, k: landmark correct}
+    - {F: Relation, g: 4, k: relation correct}
+  name: Parser${R}${S}${F}
+  population: "$P, reader \"$reader\", $k (k/n) (#129 row 2)"
+  source: 129-ablations/parser/bakeoff.md
+  regex: '### ${set} \(\d+ commands\)(?:(?!###)[\s\S])*?\| ${reader} \| (\d+/\d+) \| (\d+/\d+) \| (\d+/\d+) \| (\d+/\d+) \|'
+  group: $g
+  format: {text: true}
+
+# #129 row 3: zoomed small-target pass. 129-ablations/numbers.json (to be written by #129):
+#   zoom: {gold_target_misses: {without: n, with: n},
+#          recall: {disposable_cup|tissue|sunblock|umbrella: {without: r, with: r}},
+#          fp_per_frame: {without: x, with: x}}
+- each:
+  - {W: Without, w: without}
+  - {W: With, w: with}
+  name: ZoomHeldMisses$W
+  population: "held-out (#87 frozen), gold-target detector misses $w the zoomed pass (#129 row 3)"
+  source: 129-ablations/numbers.json
+  json: zoom.gold_target_misses.$w
+- each:
+  - - {C: Cup, c: disposable_cup}
+    - {C: Tissue, c: tissue}
+    - {C: Sunblock, c: sunblock}
+    - {C: Umbrella, c: umbrella}
+  - - {W: Without, w: without}
+    - {W: With, w: with}
+  name: ZoomRecall${C}${W}
+  population: "held-out (#87 frozen), detector recall of $c $w the zoomed pass (#129 row 3)"
+  source: 129-ablations/numbers.json
+  json: zoom.recall.$c.$w
+  format: {percent: true, decimals: 0}
+- each:
+  - {W: Without, w: without}
+  - {W: With, w: with}
+  name: ZoomFpPerFrame$W
+  population: "held-out (#87 frozen), false positives per frame $w the zoomed pass (#129 row 3)"
+  source: 129-ablations/numbers.json
+  json: zoom.fp_per_frame.$w
+  format: {decimals: 2}
+
+# ---------------------------------------------------------------------------------------
+# #136 loss ledger. 136-loss-ledger/numbers.json (to be written by #136):
+#   {"rounds33"|"configs19": {"score": s, "lost": l,
+#      "by_cause": {"hidden_target"|"labelling_convention"|"anchor_projection"|
+#                   "target_projection"|"instance"|"camera"|"sar": points}},
+#    "visibility": {"unobservable_rounds": n, "agreement": fraction},
+#    "counterfactual": {"low": s, "high": s}  (omit if cut),
+#    "anchor_error": {"median_m": m, "depth_median_m": m, "lateral_median_m": m,
+#                     "worst_class": "name", "worst_m": m},
+#    "heldout_contrast": {"lost_per_object_case": l}}
+# Points on the Stage 1 scale (0-100), mean over the 10 #128 runs; causes sum to "lost".
+# ---------------------------------------------------------------------------------------
+
+- each:
+  - - {Q: Rounds, q: rounds33, P: "public, 33 rounds, mean of 10 #128 runs"}
+    - {Q: Configs, q: configs19, P: "public, 19 distinct configurations, mean of 10 #128 runs"}
+  - - {M: Score, k: score}
+    - {M: Lost, k: lost}
+    - {M: Hidden, k: by_cause.hidden_target}
+    - {M: Convention, k: by_cause.labelling_convention}
+    - {M: Anchor, k: by_cause.anchor_projection}
+    - {M: TargetProj, k: by_cause.target_projection}
+    - {M: Instance, k: by_cause.instance}
+    - {M: Camera, k: by_cause.camera}
+    - {M: Sar, k: by_cause.sar}
+  name: Ledger${Q}${M}
+  population: "$P, loss ledger $k (points) (#136)"
+  source: 136-loss-ledger/numbers.json
+  json: $q.$k
+  format: {decimals: 2}
+- name: LedgerUnobservableRounds
+  population: "public, 33 rounds (#136), rounds whose target both raters mark not visible in every camera"
+  source: 136-loss-ledger/numbers.json
+  json: visibility.unobservable_rounds
+- name: LedgerRaterAgreement
+  population: "public visibility crops (#136), agreement of the two blind raters"
+  source: 136-loss-ledger/numbers.json
+  json: visibility.agreement
+  format: {percent: true, decimals: 0}
+- each:
+  - {M: Low, k: low}
+  - {M: High, k: high}
+  name: LedgerCounterfactual$M
+  population: "public, 10 #128 runs (#136), what-if score under a cleaner benchmark ($k end; not a score)"
+  source: 136-loss-ledger/numbers.json
+  json: counterfactual.$k
+  format: {decimals: 1}
+- each:
+  - {M: Median, k: median_m}
+  - {M: DepthMedian, k: depth_median_m}
+  - {M: LateralMedian, k: lateral_median_m}
+  - {M: WorstM, k: worst_m}
+  name: AnchorErr$M
+  population: "public, 10 #128 runs (#136), anchor 3-D error under the final projection, $k (m)"
+  source: 136-loss-ledger/numbers.json
+  json: anchor_error.$k
+  format: {decimals: 2}
+- name: AnchorErrWorstClass
+  population: "public, 10 #128 runs (#136), landmark class with the largest anchor error"
+  source: 136-loss-ledger/numbers.json
+  json: anchor_error.worst_class
+  format: {text: true}
+- name: LedgerHeldLostPerCase
+  population: "held-out object cases, #89 arm C guarded (#136 contrast), points lost per case"
+  source: 136-loss-ledger/numbers.json
+  json: heldout_contrast.lost_per_object_case
+  format: {decimals: 1}
