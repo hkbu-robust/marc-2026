@@ -982,7 +982,9 @@ def _same_object_pair(left: ObjectSelection, right: ObjectSelection) -> bool:
 
 
 def landmark_fallback_enabled() -> bool:
-    return os.environ.get("MARC_LANDMARK_FALLBACK", "0").strip().lower() not in {
+    """On: neutral on the 433 held-out cases under the exact kernel (fires on 2), and never
+    fires on public, where the detector reports a box of every target class (#137)."""
+    return os.environ.get("MARC_LANDMARK_FALLBACK", "1").strip().lower() not in {
         "", "0", "false", "no", "off",
     }
 

@@ -457,6 +457,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("emergency", result.grounding.situation)
         self.assertEqual("trash_can", result.grounding.landmark)
 
+    @patch.dict(os.environ, {"MARC_LANDMARK_FALLBACK": "0"})  # tests the sentinel path
     def test_umbrella_without_target_submits_dummy(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
@@ -488,6 +489,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("ignored_class_dummy", result.method)
         self.assertEqual("rig_a", result.grounding.camera_id)
 
+    @patch.dict(os.environ, {"MARC_LANDMARK_FALLBACK": "0"})  # tests the sentinel path
     def test_pencilcase_without_target_submits_dummy(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
@@ -805,9 +807,9 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertIsNotNone(result.grounding)
         self.assertEqual("pencilcase", result.grounding.target_type)
         self.assertEqual("picnic_table", result.grounding.landmark)
-        self.assertEqual("ignored_class_dummy", result.method)
-        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
-        self.assertNotEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
+        self.assertEqual("landmark_fallback", result.method)
+        self.assertEqual(result.grounding.anchor_coord, result.grounding.target_coord)
+        self.assertNotEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
 
     def test_landmark_fallback_submits_the_landmark_when_no_target_box_exists(self):
         def detector(client, *, stub_path=None):
