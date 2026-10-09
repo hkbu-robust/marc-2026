@@ -1,6 +1,8 @@
 # 0002: The final Stage 1 system: what was removed, what replaced it, and why
 
-- **Status:** Accepted. Describes `final-system` after #110-#121, #133 (2026-10-08).
+- **Status:** Accepted. Describes `final-system` after #110-#121, #133, #135 (2026-10-08); frozen
+  as tag `final-system-v1` (`60085d9`, on `main`; #126). The landmark fallback (flagged, neutral) and
+  a retrained detector (`generalization-3-detector-it2`, 85.57 in one public run) were tried and not kept.
 - **Issue:** #125 (part of #108). **Partly supersedes:** ADR 0001 (see the end).
 
 ## Context

@@ -106,45 +106,48 @@ weights. Stop it with the same file set and `down`:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml down
 ```
 
-## Frozen submitted system for experiments
+## Frozen systems for experiments
 
 `docker compose up` runs whatever images are currently tagged `marc-agent:local` and
 `marc-qwen-vllm:local`. Those tags are shared by everyone on the machine, and any
 `--build` from any clone replaces them, so they are not a stable experiment baseline.
-Experiments that must use the system exactly as submitted for the qualifier use these
-images instead:
+Experiments use these fixed images instead:
 
-| Service | Frozen image | Contents |
-|---|---|---|
-| `agent` | `marc-agent:qualifier-1450aa9` | Agent built from `1450aa9`, the code of the `qualifier` tag; Stage 1 detector SHA-256 `64296e4b…` |
-| `qwen` | `marc-qwen-vllm:qualifier-b2360c86` | vLLM server with `roBUst-marc-2026/qwen3-vl-8b-stage1-finetuned@b2360c86` |
+| System | Compose override | Agent image | Qwen image |
+|---|---|---|---|
+| **Final Stage 1 system** (tag `final-system-v1`, ADR 0002) | `docker-compose.frozen.yml` | `marc-agent:final-system-v1` | `marc-qwen-vllm:qualifier-b2360c86` |
+| Qualifier submission (`qualifier` tag, code `1450aa9`) | `docker-compose.qualifier.yml` | `marc-agent:qualifier-1450aa9` | `marc-qwen-vllm:qualifier-b2360c86` |
 
-Check that they exist, then start them:
+The Qwen model is unchanged between the two (`roBUst-marc-2026/qwen3-vl-8b-stage1-finetuned@b2360c86`),
+and so is the Stage 1 detector (SHA-256 `64296e4b…`). Check that the images exist, then start one:
 
 ```bash
-docker images | grep qualifier
+docker images | grep -E 'final-system-v1|qualifier'
 docker compose -f docker-compose.yml -f docker-compose.frozen.yml up
 docker compose -f docker-compose.yml -f docker-compose.frozen.yml down
 ```
 
-[`docker-compose.frozen.yml`](docker-compose.frozen.yml) changes only the image names. It
-removes the build sections and disables pulls, so the frozen images are never rebuilt or
-overwritten, even with `--build`. If an image is missing, Compose stops with
-`No such image`. Environment variables are unchanged, so this is the submitted runtime
-configuration.
+The overrides change only the image names. They remove the build sections and disable pulls,
+so the frozen images are never rebuilt or overwritten, even with `--build`. If an image is
+missing, Compose stops with `No such image`. Environment variables are unchanged, so this is
+the submitted runtime configuration. Repeated runs with round dumps use
+`scripts/run_stage1_repeats.py`, which defaults to `marc-agent:final-system-v1`
+(`scripts/README.md`).
 
-On a machine without the frozen images, build them once from the submitted code. The
+On a machine without the frozen images, build them once from a fresh clone of the tag. The
 build needs internet; the Qwen image downloads about 17.5 GB.
 
 ```bash
-git worktree add ../marc-2026-robust-1450aa9 1450aa9
-cd ../marc-2026-robust-1450aa9
+git clone --branch final-system-v1 https://github.com/ahmad-rev0/marc-2026-robust.git
+cd marc-2026-robust
 docker buildx build --load --allow network.host --network host -f demo/Dockerfile \
   --target agent --build-arg MARC_BUILD_MODE=baked --build-arg MARC_QWEN_BACKEND=remote \
-  -t marc-agent:qualifier-1450aa9 .
+  -t marc-agent:final-system-v1 .
 docker buildx build --load --allow network.host --network host -f demo/Dockerfile.vllm \
   --build-arg MARC_BUILD_MODE=baked -t marc-qwen-vllm:qualifier-b2360c86 .
 ```
+
+For the qualifier agent, check out `1450aa9` instead and tag the agent `marc-agent:qualifier-1450aa9`.
 
 ## Local simulation platform
 
@@ -180,7 +183,8 @@ The official requirements are in the
 |---|---|
 | `docker-compose.yml` | Organizer-facing one-command submission entry point |
 | `docker-compose.dev.yml` | Rebuild-free Python development mounts |
-| `docker-compose.frozen.yml` | Runs the frozen qualifier images for experiments |
+| `docker-compose.frozen.yml` | Runs the frozen final system (`final-system-v1`) for experiments |
+| `docker-compose.qualifier.yml` | Runs the qualifier submission images (for comparisons) |
 | `demo/` | Participant entry point, vLLM image, navigation, near-field, and manipulation runtime |
 | `marc_agent/` | Perception, reasoning, navigation, pick, delivery, and runtime policies |
 | `marc_sdk/` | Organizer ROS 2 protocol client |

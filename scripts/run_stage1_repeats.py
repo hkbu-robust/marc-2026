@@ -1,7 +1,7 @@
 """Run the agent N times on a fresh platform and collect each run (#85).
 
     python -m scripts.run_stage1_repeats --out ~/marc-2026-work/experiments/ablations/NN-name \
-        --runs 2 [--scene-cache on] [--agent-image marc-agent:frozen-logging]
+        --runs 2 [--scene-cache on] [--agent-image marc-agent:final-system-v1]
 
 For every run: tear down, start the platform headless, start vLLM (kept between
 runs) and a fresh agent, wait for the platform's FINISHED state, then copy the
@@ -216,7 +216,7 @@ def main(argv=None) -> None:
     parser.add_argument("--first", type=int, default=1, help="number of the first run folder")
     parser.add_argument("--scene-cache", choices=["on", "off"], default="off",
                         help="on reproduces the qualifier submission; off is the final system")
-    parser.add_argument("--agent-image", default="marc-agent:frozen-logging")
+    parser.add_argument("--agent-image", default="marc-agent:final-system-v1")
     parser.add_argument("--qwen-image", default="marc-qwen-vllm:qualifier-b2360c86")
     parser.add_argument("--project", default="marc85")
     parser.add_argument("--ros-domain-id", default="85")

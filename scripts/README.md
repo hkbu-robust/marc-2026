@@ -92,7 +92,7 @@ docker run --rm --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all --network host --
     -e MARC_QWEN_MODEL=qwen3-vl-8b -e HOME=/root \
     -v <worktree>/marc_agent:/agent/marc_agent:ro -v <worktree>/scripts:/agent/scripts:ro \
     -v <sets>:/root/marc-2026-work/experiments/ablations/05-frozen-eval-sets:ro -v <out>:/out \
-    -w /agent marc-agent:frozen-logging python3 -m scripts.heldout_selection run \
+    -w /agent marc-agent:final-system-v1 python3 -m scripts.heldout_selection run \
     --out /out/<arm>.jsonl --env MARC_TILED_REFINE=1
 python -m scripts.heldout_selection summarise --off <off>.jsonl --on <arm>.jsonl --cases odd
 ```

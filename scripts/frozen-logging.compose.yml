@@ -1,5 +1,6 @@
-# Run the frozen qualifier pair with the #85 logging build of the agent, or
-# any agent image built the same way (MARC_AGENT_IMAGE, set by run_stage1_repeats).
+# Run the frozen pair with round dumps on: the final-system-v1 agent by default, or any
+# agent image (MARC_AGENT_IMAGE, set by run_stage1_repeats; marc-agent:frozen-logging is
+# the qualifier system with the #85 logging).
 #   docker compose -f docker-compose.yml -f docker-compose.frozen.yml \
 #     -f scripts/frozen-logging.compose.yml up
 # Experiment runs can share one GPU (scripts/README.md, "Sharing the GPU"):
@@ -20,7 +21,7 @@ services:
         - -c
         - "import os, urllib.request; request = urllib.request.Request('http://127.0.0.1:' + os.environ['VLLM_PORT'] + '/v1/models', headers={'Authorization': 'Bearer ' + os.environ['VLLM_API_KEY']}); urllib.request.urlopen(request, timeout=5)"
   agent:
-    image: ${MARC_AGENT_IMAGE:-marc-agent:frozen-logging}
+    image: ${MARC_AGENT_IMAGE:-marc-agent:final-system-v1}
     environment:
       MARC_QWEN_BASE_URL: "http://127.0.0.1:${MARC_VLLM_PORT:-8004}/v1"
       MARC_ROUND_DUMP: "${MARC_ROUND_DUMP:-1}"
