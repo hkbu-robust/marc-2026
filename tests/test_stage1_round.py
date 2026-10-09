@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from unittest.mock import Mock, patch
 
 from marc_agent.perception.cctv_project import (
@@ -456,6 +457,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("emergency", result.grounding.situation)
         self.assertEqual("trash_can", result.grounding.landmark)
 
+    @patch.dict(os.environ, {"MARC_LANDMARK_FALLBACK": "0"})  # tests the sentinel path
     def test_umbrella_without_target_submits_dummy(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
@@ -487,6 +489,7 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertEqual("ignored_class_dummy", result.method)
         self.assertEqual("rig_a", result.grounding.camera_id)
 
+    @patch.dict(os.environ, {"MARC_LANDMARK_FALLBACK": "0"})  # tests the sentinel path
     def test_pencilcase_without_target_submits_dummy(self):
         def detector(client, *, stub_path=None):
             return CctvDetectionRound(
@@ -804,9 +807,63 @@ class Stage1RoundTests(unittest.TestCase):
         self.assertIsNotNone(result.grounding)
         self.assertEqual("pencilcase", result.grounding.target_type)
         self.assertEqual("picnic_table", result.grounding.landmark)
-        self.assertEqual("ignored_class_dummy", result.method)
-        self.assertEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
-        self.assertNotEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.anchor_coord)
+        self.assertEqual("landmark_fallback", result.method)
+        self.assertEqual(result.grounding.anchor_coord, result.grounding.target_coord)
+        self.assertNotEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
+
+    def test_landmark_fallback_submits_the_landmark_when_no_target_box_exists(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:picnic_table:0", "picnic_table",
+                        (100.0, 200.0, 400.0, 400.0), 0.9, "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:juice:0", "juice",
+                        (420.0, 300.0, 440.0, 330.0), 0.8, "rig_a", (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        with patch.dict(os.environ, {"MARC_LANDMARK_FALLBACK": "1"}):
+            result = run_stage1_round(
+                object(),
+                "Find the pencil case near the picnic table.",
+                detector=detector,
+                projector=_geometry(),
+            )
+        self.assertEqual("landmark_fallback", result.method)
+        self.assertEqual("rig_a", result.grounding.camera_id)
+        self.assertEqual("pencilcase", result.grounding.target_type)
+        self.assertEqual(result.grounding.anchor_coord, result.grounding.target_coord)
+        self.assertNotEqual(list(IGNORED_CLASS_DUMMY_XYZ), result.grounding.target_coord)
+
+    def test_landmark_fallback_never_fires_while_a_target_box_exists(self):
+        def detector(client, *, stub_path=None):
+            return CctvDetectionRound(
+                objects=[
+                    ObjectCandidate(
+                        "rig_a:picnic_table:0", "picnic_table",
+                        (100.0, 200.0, 400.0, 400.0), 0.9, "rig_a", (640, 480),
+                    ),
+                    ObjectCandidate(
+                        "rig_a:pencilcase:0", "pencilcase",
+                        (420.0, 300.0, 440.0, 330.0), 0.1, "rig_a", (640, 480),
+                    ),
+                ],
+                camera_ids=["rig_a"],
+            )
+
+        with patch.dict(os.environ, {"MARC_LANDMARK_FALLBACK": "1"}):
+            result = run_stage1_round(
+                object(),
+                "Find the pencil case near the picnic table.",
+                detector=detector,
+                projector=_geometry(),
+            )
+        self.assertNotEqual("landmark_fallback", result.method)
 
     def test_empty_parking_space_submits_tumbler_with_nearest_car(self):
         def detector(client, *, stub_path=None):
