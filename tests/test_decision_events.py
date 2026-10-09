@@ -501,7 +501,6 @@ class ProjectionTests(unittest.TestCase):
 
 
 class SentinelTests(unittest.TestCase):
-    @patch.dict(os.environ, {"MARC_LANDMARK_FALLBACK": "0"})  # tests the sentinel path
     def test_no_object_pairs(self):
         round_ = CctvDetectionRound(
             objects=[

@@ -981,66 +981,11 @@ def _same_object_pair(left: ObjectSelection, right: ObjectSelection) -> bool:
     )
 
 
-def landmark_fallback_enabled() -> bool:
-    """On: neutral on the 433 held-out cases under the exact kernel (fires on 2), and never
-    fires on public, where the detector reports a box of every target class (#137)."""
-    return os.environ.get("MARC_LANDMARK_FALLBACK", "1").strip().lower() not in {
-        "", "0", "false", "no", "off",
-    }
-
-
-def _landmark_fallback(
-    candidates: Stage1CandidateResult,
-    projector: CctvProjector,
-    parsed: ParsedCommand,
-) -> Optional[Stage1RoundResult]:
-    """The named landmark as the best guess when no box of the target class exists.
-
-    Fires only when the command names a landmark, that landmark is visible, and no
-    camera shows any box of the target class. The landmark's camera and point are
-    then submitted for both the anchor and the target: the command places the target
-    by that landmark and nothing visible says more. Logged as its own method, never as
-    a detection. With several instances, the most confident one is used.
-    """
-    if not landmark_fallback_enabled() or not parsed.landmark:
-        return None
-    objects = candidates.detections.objects
-    if any(item.class_name == parsed.target_type for item in objects):
-        return None
-    matches = [item for item in objects if item.class_name == parsed.landmark]
-    if not matches:
-        return None
-    best = max(matches, key=lambda item: (item.confidence, item.candidate_id))
-    xyz = projector.project_landmark(
-        best.camera_id, best.bbox_xyxy, best.class_name, best.image_size
-    )
-    if xyz is None:
-        return None
-    note_decision(
-        "landmark_fallback", landmark=best.candidate_id, camera_id=best.camera_id,
-        instances=len(matches), target_type=parsed.target_type,
-    )
-    grounding = _grounding_payload(
-        parsed, best.camera_id, xyz, xyz, anchor_class=best.class_name,
-    )
-    log.info(
-        "[stage1] grounding camera=%s method=landmark_fallback landmark=%s "
-        "xyz=(%.3f, %.3f, %.3f)",
-        grounding.camera_id, best.candidate_id, *grounding.target_coord,
-    )
-    return Stage1RoundResult(
-        candidates, grounding, "landmark_fallback", None, None, best.candidate_id,
-    )
-
-
 def _compose_object(
     candidates: Stage1CandidateResult,
     projector: CctvProjector,
 ) -> Stage1RoundResult:
     parsed = candidates.parsed
-    fallback = _landmark_fallback(candidates, projector, parsed)
-    if fallback is not None:
-        return fallback
 
     chosen = candidates.object_selection
     ranked = rank_object_candidates(
