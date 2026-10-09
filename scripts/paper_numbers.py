@@ -46,7 +46,8 @@ import yaml
 
 DEFAULT_ROOT = Path.home() / "marc-2026-work/experiments/ablations/final-system/final-experiments"
 DEFAULT_MAPPING = Path(__file__).resolve().parent / "data" / "paper_numbers.yaml"
-DEFAULT_OUT = DEFAULT_ROOT / "paper-numbers" / "numbers.tex"
+# The paper itself is written elsewhere; the macros live with the paper material in the repo.
+DEFAULT_OUT = Path(__file__).resolve().parent.parent / "docs" / "paper" / "final-submission" / "numbers.tex"
 MISSING = r"\textbf{??}"
 NAME_RE = re.compile(r"^[A-Za-z]+$")
 KINDS = ("json", "csv", "regex", "expr")
