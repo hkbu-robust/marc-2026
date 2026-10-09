@@ -97,5 +97,74 @@ class SummaryTests(unittest.TestCase):
             self.assertIn("| sentinel coordinate | 2 |", (out / "summary.md").read_text())
 
 
+# Decision notes as logged in rounds 8 (lf08) and 20 (sar01) of the #126 smoke run of
+# final-system-v1, plus an OOM skip and the always-submit sentinel.
+_FINAL_ROUNDS = {
+    8: [
+        {"decision": "command_parse", "source": "qwen", "latency_s": 0.9, "fallback": None},
+        {"decision": "ground_model", "camera_id": "rig_7_a", "ground": "applied"},
+        {"decision": "tiled_refine", "added": 1, "candidates": ["rig_7_a:umbrella:0"],
+         "cameras": ["rig_7_a"], "ms": 2600, "target": "umbrella"},
+        {"decision": "implied_anchor", "chosen": "rig_7_a:police_car:0"},
+        {"decision": "selector", "outcome": "geometry_only", "path": "object",
+         "reason": "parking_geometry", "selected": "rig_7_a:umbrella:0"},
+        {"decision": "field_source", "landmark": "inferred", "relation": "default",
+         "target_type": "stated"},
+    ],
+    20: [
+        {"decision": "command_parse", "source": "rules", "latency_s": 6.0},
+        {"decision": "tiled_refine", "added": 0, "candidates": [], "oom_skipped": ["rig_7_a", "rig_1_a"]},
+        {"decision": "situation", "source": "r03", "value": "abnormal"},
+        {"decision": "field_source", "landmark": "stated", "relation": "stated",
+         "situation": "r03", "target_type": "stated"},
+        {"decision": "fallback_anchor", "source": "landmark", "candidate": "rig_7_a:trash_can:0"},
+        {"decision": "sentinel", "reason": "fallback_grounding", "camera_id": "rig_7_a"},
+    ],
+}
+
+
+class FinalSystemColumnTests(unittest.TestCase):
+    def _run(self, tmp):
+        import json
+
+        run_dir = Path(tmp) / "run"
+        run_dir.mkdir()
+        lines = [
+            json.dumps({"event": "stage1.pipeline.completed", "round": number, "decisions": notes})
+            for number, notes in _FINAL_ROUNDS.items()
+        ]
+        (run_dir / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return read_run(run_dir)
+
+    def test_reads_the_final_system_notes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lf08, sar01 = self._run(tmp).rounds
+        self.assertEqual(("qwen", 0.9), (lf08.parse_source, lf08.parse_latency_s))
+        self.assertEqual(("stated", "inferred", "default", None),
+                         (lf08.field_target_type, lf08.field_landmark, lf08.field_relation,
+                          lf08.field_situation))
+        self.assertEqual("applied", lf08.ground_model)
+        self.assertEqual((1, "rig_7_a:umbrella:0", 0),
+                         (lf08.tiled_added, lf08.tiled_candidates, lf08.tiled_oom))
+        self.assertEqual("rig_7_a:police_car:0", lf08.implied_anchor)
+        self.assertEqual("geometry only (no Qwen)", lf08.path)
+        self.assertEqual(("rules", "r03", 2, True, "fallback_grounding"),
+                         (sar01.parse_source, sar01.field_situation, sar01.tiled_oom,
+                          sar01.fallback_anchor, sar01.sentinel))
+        self.assertEqual("sentinel coordinate", sar01.path)
+
+    def test_columns_reach_rounds_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "summary"
+            write([self._run(tmp)], out)
+            with (out / "rounds.csv").open() as stream:
+                rows = list(csv.DictReader(stream))
+        for column in ("parse_source", "parse_latency_s", "field_target_type", "field_landmark",
+                       "field_relation", "field_situation", "ground_model", "tiled_added",
+                       "tiled_candidates", "tiled_oom", "implied_anchor", "fallback_anchor"):
+            self.assertIn(column, rows[0])
+        self.assertEqual("fallback_grounding", rows[1]["sentinel"])
+
+
 if __name__ == "__main__":
     unittest.main()

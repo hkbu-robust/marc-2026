@@ -53,6 +53,19 @@ class Round:
     cache_source_round: Optional[int] = None
     cache_same_pair: Optional[bool] = None
     cache_target_shift_m: Optional[float] = None
+    # Final-system events (#114, #112, #113, #115, #135); empty when not logged.
+    parse_source: Optional[str] = None
+    parse_latency_s: Optional[float] = None
+    field_target_type: Optional[str] = None
+    field_landmark: Optional[str] = None
+    field_relation: Optional[str] = None
+    field_situation: Optional[str] = None
+    ground_model: Optional[str] = None
+    tiled_added: int = 0
+    tiled_candidates: Optional[str] = None
+    tiled_oom: int = 0
+    implied_anchor: Optional[str] = None
+    fallback_anchor: bool = False
 
     @property
     def path(self) -> str:
@@ -167,6 +180,28 @@ def _apply_pipeline(item: Round, event: dict) -> None:
             item.cache_source_round = note.get("source_round")
             item.cache_same_pair = note.get("same_pair")
             item.cache_target_shift_m = note.get("target_shift_m")
+        elif kind == "command_parse":
+            item.parse_source = note.get("source")
+            item.parse_latency_s = note.get("latency_s")
+        elif kind == "field_source":
+            item.field_target_type = note.get("target_type")
+            item.field_landmark = note.get("landmark")
+            item.field_relation = note.get("relation")
+            item.field_situation = note.get("situation") or item.field_situation
+        elif kind == "situation" and item.field_situation is None:
+            item.field_situation = note.get("source")
+        elif kind == "ground_model":
+            item.ground_model = note.get("ground")
+        elif kind == "tiled_refine":
+            added = note.get("candidates") or []
+            item.tiled_added += len(added)
+            if added:
+                item.tiled_candidates = ",".join(filter(None, [item.tiled_candidates, *added]))
+            item.tiled_oom += len(note.get("oom_skipped") or [])
+        elif kind == "implied_anchor":
+            item.implied_anchor = note.get("chosen")
+        elif kind == "fallback_anchor":
+            item.fallback_anchor = True
 
 
 def _mean(values: list[float]) -> Optional[float]:
