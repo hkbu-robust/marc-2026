@@ -98,6 +98,13 @@ docker run --rm --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all --network host --
 python -m scripts.heldout_selection summarise --off <off>.jsonl --on <arm>.jsonl --cases odd
 ```
 
+Selector arms on the frozen #87 sets (#89): `heldout_selection.py frozen --root <87-eval-sets>
+--set heldout|public --arm A|B|C` feeds each case's `candidates_final` and `parsed_final` to
+`run_stage1_round` (no detector, no reader, no refinement), and records the raw selector answer and
+the final answer after guards. Run it in `marc-agent:final-system-v1` with only `scripts/` mounted.
+`selector_arms_report.py RUN_DIR --root <87-eval-sets>` scores the arms: gold-ID exact match,
+exact-kernel credit, cluster bootstrap over scenes and McNemar.
+
 Mount a git worktree pinned at the commit under test, not the working clone, so the
 code cannot change under a running arm. Send one warm-up request first: the first
 vLLM request compiles kernels for about a minute. Held-out cases have one camera, so

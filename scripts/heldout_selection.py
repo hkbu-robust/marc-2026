@@ -12,6 +12,17 @@ detector on the case's stored frames, the query-conditioned refinement, selectio
 the platform is replaced (frames come from disk; no clock budget). One JSON line per
 case: the submission, the selected target box and the distances to the GT target and
 anchor. ``summarise`` turns two such files into a paired comparison.
+
+``frozen`` (#89) runs one selector arm on the frozen #87 cases with no detection and
+no command reading: each case's ``candidates_final`` are the round's candidates and its
+``parsed_final`` is the command reading, so arms differ only in the selector. Per case
+it records the raw selector answer (Qwen's pick before the runtime guards; geometry
+when no Qwen call is made; nothing when the reply is unusable), the final answer
+after guards and fallbacks, gold-ID exact match, and exact-kernel credit
+(``stage1_runs.target_credit``; anchor ``1 - d/5``)::
+
+    python3 -m scripts.heldout_selection frozen --root <87-eval-sets> --set heldout \
+        --arm C --out /out/C.jsonl --env MARC_SAR_DETECTOR=qwen-remote ...
 """
 
 from __future__ import annotations
@@ -154,6 +165,207 @@ def summarise(off: Path, on: Path, sets: Path = SETS, cases: str = "all") -> str
     return "\n".join(lines)
 
 
+ARMS = ("A", "B", "C")
+PERSON_PREFIX = "person_"
+
+
+def frozen_round(case, frames: dict):
+    """The case's frozen final candidates as the round the selector sees (no detector)."""
+    from marc_agent.types import CctvDetectionRound, ObjectCandidate, PersonCandidate
+
+    objects, people = [], []
+    for item in case.candidates:
+        frame = frames[item["camera_id"]]
+        size = (frame.width, frame.height)
+        box = tuple(float(v) for v in item["bbox_xyxy"])
+        if item["class_name"].startswith(PERSON_PREFIX):
+            people.append(PersonCandidate(item["candidate_id"], box, item["class_name"],
+                                          float(item["confidence"]), item["camera_id"], size))
+        else:
+            source = item.get("source") or "detector"
+            objects.append(ObjectCandidate(item["candidate_id"], item["class_name"], box,
+                                           float(item["confidence"]), item["camera_id"], size,
+                                           "detector" if source == "refine" else source))
+    return CctvDetectionRound(objects=objects, people=people, frames=frames,
+                              camera_ids=sorted(frames))
+
+
+def to_parsed(raw: dict):
+    from marc_agent.command_parser import Intent, ParsedCommand, Relation, Situation
+
+    return ParsedCommand(
+        intent=Intent(raw["intent"]), target_type=raw["target_type"],
+        landmark=raw.get("landmark"),
+        relation=Relation(raw["relation"]) if raw.get("relation") else None,
+        situation=Situation(raw["situation"]) if raw.get("situation") else None,
+        scene_hint=raw.get("scene_hint"), place_cues=tuple(raw.get("place_cues") or ()),
+    )
+
+
+def raw_answer(notes: list[dict], pre_anchor: Optional[tuple]) -> dict:
+    """The selector's own answer before the runtime guards, from the decision notes.
+
+    ``qwen_choice``: Qwen's pair as returned by the selector; ``geometry_override``:
+    the pair Qwen gave before a guard replaced it; ``fallback``: none (unusable reply
+    or call failure); ``geometry_only`` / ``occlusion_hypothesis``: the geometry pick
+    (no Qwen call on that route)."""
+    selector = next((n for n in reversed(notes) if n.get("decision") == "selector"), None)
+    override = next((n for n in reversed(notes) if n.get("decision") == "geometry_override"), None)
+    outcome = selector.get("outcome") if selector else None
+    row = {"outcome": outcome, "reason": selector.get("reason") if selector else None,
+           "target_id": None, "anchor_id": None}
+    if outcome == "geometry_override" and override is not None:
+        row.update(target_id=override.get("qwen_target"), anchor_id=override.get("qwen_anchor"))
+    elif outcome == "fallback":
+        pass
+    elif pre_anchor is not None:
+        row.update(target_id=pre_anchor[0], anchor_id=pre_anchor[1])
+    elif selector is not None:
+        row["target_id"] = selector.get("selected")
+    if outcome is None and pre_anchor is not None:  # occlusion hypothesis: no selector note
+        row.update(outcome="occlusion_hypothesis", target_id=pre_anchor[0], anchor_id=pre_anchor[1])
+    return row
+
+
+def run_frozen(root: Path, set_name: str, arm: str, out: Path, kinds: tuple[str, ...],
+               limit: Optional[int] = None, only: Optional[set[str]] = None) -> None:
+    """Run one selector arm on the frozen cases; append one JSON line per case to ``out``."""
+    import contextvars
+
+    from marc_agent.command_llm import Reading
+    from marc_agent.experiment_log import decision_scope
+    from marc_agent.perception import object_selection, stage1_pipeline
+    from marc_agent.perception.cctv_project import CctvProjector, static_lookup
+    from marc_agent.perception.ground_model import default_ground_model
+    from marc_agent.perception.object_selection import ObjectSelection, rank_object_candidates
+    from marc_agent.types import CctvFrame
+    from scripts.frozen_eval.case_store import load_set
+    from scripts.stage1_replay import load_geometry
+
+    if arm not in ARMS:
+        raise ValueError(f"arm {arm!r} not in {ARMS}")
+    if arm == "A":
+        os.environ["MARC_SAR_DETECTOR"] = "fallback"  # no verifier: the geometry selection
+    elif os.environ.get("MARC_SAR_DETECTOR") != "qwen-remote":
+        raise ValueError("arms B and C need MARC_SAR_DETECTOR=qwen-remote and a vLLM URL")
+    current: dict = {}
+    # The frozen reading and candidates replace the reader and the refinement passes.
+    stage1_pipeline.read_command = lambda *a, **k: Reading(
+        current["parsed"], "frozen")
+    stage1_pipeline.refine_detection_round = lambda parsed, detections, **k: detections
+    inner = object_selection._select_object_candidate
+
+    def capture(*args, **kwargs):
+        picked = inner(*args, **kwargs)
+        current["pre_anchor"] = None if picked is None else (
+            picked.target.candidate_id, picked.anchor.candidate_id if picked.anchor else None)
+        return picked
+
+    object_selection._select_object_candidate = capture
+    projector = CctvProjector(static_lookup(load_geometry()), default_ground_model())
+    done = set()
+    if out.exists():
+        done = {json.loads(line)["case_id"] for line in out.read_text().splitlines() if line}
+    cases = [c for c in load_set(root, set_name, version="final")
+             if c.kind in kinds and c.case_id not in done and (only is None or c.case_id in only)]
+    with open(out, "a", encoding="utf-8") as sink:
+        for case in cases[:limit]:
+            frames = {}
+            for camera in sorted(case.frames):
+                rgb = case.frame(camera)
+                frames[camera] = CctvFrame(camera, rgb.shape[1], rgb.shape[0], rgb)
+            round_ = frozen_round(case, frames)
+            parsed = to_parsed(case.parsed_final)
+            current.clear()
+            current["parsed"] = parsed
+            started = time.perf_counter()
+            with decision_scope("frozen") as notes:
+                result = contextvars.copy_context().run(
+                    stage1_pipeline.run_stage1_round, None, case.command,
+                    detector=lambda *a, **k: round_, projector=projector)
+            seconds = time.perf_counter() - started
+            row = _frozen_record(case, result, notes, current.get("pre_anchor"), seconds)
+            row["arm"] = arm
+            if case.kind == "object":
+                board = rank_object_candidates(parsed, round_, projector=projector,
+                                               command_text=case.command, visual_proposals=True)
+                row["board_targets"] = sorted({item.target.candidate_id for item in board})
+                raw = row["raw"]
+                by_id = {item.candidate_id: item for item in round_.objects}
+                if raw["target_id"] in by_id:
+                    projected = stage1_pipeline._project_selection(projector, parsed, ObjectSelection(
+                        by_id[raw["target_id"]], by_id.get(raw["anchor_id"]), 0.0))
+                    if projected is not None:
+                        raw["target_xyz"], raw["anchor_xyz"] = (list(map(float, p)) for p in projected)
+            sink.write(json.dumps(row) + "\n")
+            sink.flush()
+
+
+def _frozen_record(case, result, notes: list[dict], pre_anchor, seconds: float) -> dict:
+    gold = case.gold
+    selection = result.candidates.object_selection
+    sar = result.candidates.sar_selection
+    raw = raw_answer(notes, pre_anchor if case.kind == "object" else None)
+    if sar is not None and raw["target_id"] is None and raw["outcome"] == "qwen_choice":
+        raw["target_id"] = sar.selected.candidate_id if sar.selected else None
+    validated = (sar.raw_output if sar is not None
+                 else selection.raw_output if selection is not None else None)
+    final = {"target_id": result.target_id, "anchor_id": result.anchor_id,
+             "method": result.method, "failure": result.failure_reason}
+    if result.grounding is not None:
+        final.update(target_xyz=list(map(float, result.grounding.target_coord)),
+                     anchor_xyz=list(map(float, result.grounding.anchor_coord)),
+                     camera_id=result.grounding.camera_id,
+                     relation=result.grounding.relation, landmark=result.grounding.landmark)
+    return {
+        "case_id": case.case_id, "kind": case.kind, "seconds": round(seconds, 3),
+        "raw": raw, "final": final, "reply": validated,
+        "decisions": [n for n in notes if n.get("decision") in (
+            "selector", "geometry_override", "class_screen_failed", "projection_fallthrough",
+            "qwen_skipped", "scene_description_failed")],
+        "gold_target_ids": gold.get("target_ids") or [],
+        "gold_anchor_ids": gold.get("anchor_ids") or [],
+        "detector_miss": bool(case.tags.get("detector_miss")),
+    }
+
+
+def exact_match(row: dict, answer: str = "final") -> dict:
+    """Gold-ID match of one answer: target, anchor (objects) and joint."""
+    pick = row[answer]
+    target = pick.get("target_id") in set(row["gold_target_ids"])
+    if row["kind"] != "object":
+        return {"target": target, "anchor": None, "joint": target}
+    anchors = set(row["gold_anchor_ids"])
+    anchor = pick.get("anchor_id") in anchors if anchors else None
+    return {"target": target, "anchor": anchor, "joint": target and anchor is not False}
+
+
+LANDMARK_CLASSES = frozenset({
+    "bench", "bicycle", "hydrant", "kick_scooter", "picnic_table", "postbox",
+    "vending_machine", "trash_can", "police_car", "normal_car_1", "normal_car_2",
+    "sports_car", "sports_car_2", "suv", "taxi"})
+
+
+def gt_distractors(gold: dict, gt_detections: list[dict]) -> list:
+    """World points of every other object or person in the camera (landmarks excluded)."""
+    target_id = (gold.get("target_gt") or {}).get("instance_id")
+    return [d["world_xyz"] for d in gt_detections
+            if d.get("world_xyz") and d["class"] not in LANDMARK_CLASSES
+            and d.get("instance_id") != target_id and d["world_xyz"] != gold["target_xyz"]]
+
+
+def kernel_credit(pick: dict, gold: dict, distractors: list) -> tuple[float, Optional[float]]:
+    """Exact-kernel target credit and anchor credit ``1 - d/5`` of one answer."""
+    from scripts.stage1_runs import target_credit
+
+    if "target_xyz" not in pick:
+        return 0.0, 0.0
+    target = target_credit(pick["target_xyz"], gold["target_xyz"], distractors)
+    anchor = max(0.0, 1.0 - float(np.linalg.norm(
+        np.subtract(pick["anchor_xyz"], gold["anchor_xyz"]))) / 5.0)
+    return target, anchor
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -169,8 +381,23 @@ def main(argv=None) -> None:
     s.add_argument("--on", type=Path, required=True)
     s.add_argument("--sets", type=Path, default=SETS)
     s.add_argument("--cases", choices=["all", "odd", "even"], default="all")
+    f = sub.add_parser("frozen", help="one selector arm on the frozen #87 cases (#89)")
+    f.add_argument("--root", type=Path, required=True, help="the frozen 87-eval-sets folder")
+    f.add_argument("--set", default="heldout", choices=["heldout", "public"])
+    f.add_argument("--arm", required=True, choices=ARMS)
+    f.add_argument("--kinds", nargs="+", default=["object"], choices=["object", "sar"])
+    f.add_argument("--out", type=Path, required=True)
+    f.add_argument("--env", nargs="*", default=[], metavar="KEY=VALUE")
+    f.add_argument("--limit", type=int)
+    f.add_argument("--cases", type=Path, help="file of case IDs, one per line: run only these")
     args = parser.parse_args(argv)
-    if args.cmd == "run":
+    if args.cmd == "frozen":
+        for pair in args.env:
+            key, _, value = pair.partition("=")
+            os.environ[key] = value
+        only = set(args.cases.read_text().split()) if args.cases else None
+        run_frozen(args.root, args.set, args.arm, args.out, tuple(args.kinds), args.limit, only)
+    elif args.cmd == "run":
         for pair in args.env:
             key, _, value = pair.partition("=")
             os.environ[key] = value
