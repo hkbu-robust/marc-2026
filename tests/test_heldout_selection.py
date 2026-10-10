@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from scripts.heldout_selection import exact_match, frozen_round, kernel_credit, raw_answer
+from scripts.selector_arms_report import guard_counts
 
 
 def _row(final, raw=None, kind="object", targets=("c:mug:0",), anchors=("c:bench:0",)):
@@ -81,6 +82,32 @@ class ScoringTest(unittest.TestCase):
         far = {"target_xyz": [3.5, 0.0, 0.0], "anchor_xyz": [0.0, 0.0, 0.0]}
         self.assertTrue(np.isclose(kernel_credit(far, gold, [])[0], 0.5))
         self.assertEqual(kernel_credit({}, gold, []), (0.0, 0.0))
+
+
+class SarPathTest(unittest.TestCase):
+    """The SAR route (``select_sar_candidate``): one person, no anchor pair."""
+
+    def test_sar_guard_keeps_qwens_person_as_the_raw_answer(self):
+        notes = [{"decision": "geometry_override", "path": "sar", "reason": "landmark_geometry_override",
+                  "guards": ["landmark_geometry_override"], "qwen_target": "c:person_prone:1",
+                  "selected": "c:person_prone:0"},
+                 {"decision": "selector", "path": "sar", "outcome": "geometry_override",
+                  "selected": "c:person_prone:0"}]
+        raw = raw_answer(notes, None)
+        self.assertEqual(raw["target_id"], "c:person_prone:1")
+        row = _row({"target_id": "c:person_prone:0"}, raw=raw, kind="sar",
+                   targets=("c:person_prone:0",), anchors=("c:bench:0",))
+        # Person exact match ignores the anchor; raw and final are scored apart.
+        self.assertTrue(exact_match(row, "final")["joint"])
+        self.assertFalse(exact_match(row, "raw")["joint"])
+        self.assertEqual(guard_counts({"decisions": notes}), {"landmark_geometry_override": 1})
+
+    def test_sar_qwen_choice_and_geometry_use_the_selected_person(self):
+        for outcome in ("qwen_choice", "geometry_only"):
+            raw = raw_answer([{"decision": "selector", "path": "sar", "outcome": outcome,
+                               "selected": "c:person_sitting:0"}], None)
+            self.assertEqual((raw["target_id"], raw["anchor_id"]), ("c:person_sitting:0", None))
+        self.assertEqual(guard_counts({"decisions": []}), {})
 
 
 if __name__ == "__main__":

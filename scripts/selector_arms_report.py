@@ -7,17 +7,20 @@ frozen #87 cases (tags, gold, GT camera files) and the manifest's per-case tags:
 
 Exact match: gold-ID joint match (``heldout_selection.exact_match``), detector misses
 excluded. Credit: exact kernel (``heldout_selection.kernel_credit``); anchor credit on
-odd scenes only. Paired differences: cluster bootstrap over generator scenes and an
+odd scenes only. ``--sar`` scores the held-out person cases instead (``sar_report``).
+Paired differences: cluster bootstrap over generator scenes and an
 exact McNemar test on discordant pairs.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import re
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -83,6 +86,7 @@ def case_table(root: Path, case_ids: set[str]) -> dict[str, dict]:
             "distractors": gt_distractors(case.gold, gt["detections"]),
             "command": case.command,
             "kind": case.kind,
+            "recipe": case.gold.get("recipe_id"),
             "degenerate": case.kind == "sar" and _box_area(case.gold) < DEGENERATE_PX2,
         }
     return table
@@ -213,6 +217,90 @@ def report(run_dir: Path, root: Path, arms: list[str], prefixes: list[str]) -> d
     return numbers
 
 
+def guard_counts(row: dict) -> dict[str, int]:
+    """SAR guards that replaced the selector's person in one row, by guard name."""
+    counts: dict[str, int] = {}
+    for note in row.get("decisions") or []:
+        if note.get("decision") == "geometry_override":
+            for guard in note.get("guards") or [note.get("reason")]:
+                counts[guard] = counts.get(guard, 0) + 1
+    return counts
+
+
+def audited_ids(audit_csv: Path, kind: str = "sar") -> set[str]:
+    """Case IDs of ``kind`` that passed every check of the #87 human label audit."""
+    with open(audit_csv, newline="", encoding="utf-8") as handle:
+        return {r["case_id"] for r in csv.DictReader(handle)
+                if r["kind"] == kind and r["label_correct"].strip().lower() == "y"}
+
+
+def sar_report(run_dir: Path, root: Path, arms: list[str], prefix: str = "heldout-sar",
+               audit_csv: Optional[Path] = None) -> dict:
+    """The ``heldout_sar`` block: person exact match per arm, paired differences against C,
+    guard overrides, unusable replies, per-recipe counts and the audited subset.
+
+    Degenerate gold person boxes (< ``DEGENERATE_PX2``) are dropped from every number;
+    detector misses are dropped from exact match only."""
+    rows = load_rows(run_dir, arms, [prefix])
+    table = case_table(root, set(rows))
+    sar = sorted(c for c in rows if table[c]["kind"] == "sar")
+    degenerate = [c for c in sar if table[c]["degenerate"]]
+    ids = [c for c in sar if not table[c]["degenerate"]]
+    metrics = {c: {arm: per_case_metrics(rows[c][arm], table[c]) for arm in arms} for c in ids}
+    hit = [c for c in ids if not table[c]["miss"]]
+    odd = [c for c in ids if table[c]["odd"]]
+    block = {"cases": len(ids), "non_miss_cases": len(hit), "detector_miss": len(ids) - len(hit),
+             "detector_miss_ids": [c for c in ids if table[c]["miss"]], "odd_cases": len(odd),
+             "scenes": len({table[c]["scene"] for c in ids}),
+             "excluded_degenerate_person_boxes": len(degenerate),
+             "excluded_degenerate_ids": degenerate, "arms": {}, "diff": {}}
+    for arm in arms:
+        summary = arm_summary(metrics, table, arm)
+        for key in ("target_credit_raw", "anchor_credit_raw", "credit_odd_raw"):
+            summary[key] = None  # the harness projects raw answers for object cases only
+        guards: dict[str, int] = {}
+        effect = {"fixed": 0, "broke": 0, "neutral": 0}
+        for c in ids:
+            fired = guard_counts(rows[c][arm])
+            for guard, n in fired.items():
+                guards[guard] = guards.get(guard, 0) + n
+            if fired and c in hit:
+                raw, final = metrics[c][arm]["raw"]["joint"], metrics[c][arm]["final"]["joint"]
+                effect["fixed" if final > raw else "broke" if raw > final else "neutral"] += 1
+        summary.update(
+            correct_raw=int(sum(metrics[c][arm]["raw"]["joint"] for c in hit)),
+            correct_guarded=int(sum(metrics[c][arm]["final"]["joint"] for c in hit)),
+            guard_overrides=guards, guard_effect_non_miss=effect,
+            unusable_replies=int(sum(metrics[c][arm]["fallback"] for c in ids)))
+        block["arms"][arm] = summary
+    for other in [a for a in arms if a != "C"] if "C" in arms else []:
+        block["diff"][f"C_minus_{other}"] = {
+            "exact_guarded": paired(metrics, table, hit, "C", other, ("final", "joint")),
+            "exact_raw": paired(metrics, table, hit, "C", other, ("raw", "joint")),
+            "target_credit": paired(metrics, table, ids, "C", other, ("final", "target_credit")),
+            "anchor_credit_odd": paired(metrics, table, odd, "C", other, ("final", "anchor_credit")),
+        }
+    block["recipes"] = {}
+    for recipe in sorted({table[c]["recipe"] for c in hit}, key=str):
+        sub = [c for c in hit if table[c]["recipe"] == recipe]
+        block["recipes"][recipe] = {"n": len(sub), **{
+            arm: int(sum(metrics[c][arm]["final"]["joint"] for c in sub)) for arm in arms}}
+    if audit_csv is not None:
+        sub = [c for c in hit if c in audited_ids(audit_csv)]
+        block["audited_subset"] = {"n": len(sub), "ids": sub, **{
+            arm: int(sum(metrics[c][arm]["final"]["joint"] for c in sub)) for arm in arms}}
+    discordant = [{"case_id": c, "command": table[c]["command"], "recipe": table[c]["recipe"],
+                   "correct": {arm: metrics[c][arm]["final"]["joint"] for arm in arms},
+                   "picks": {arm: [rows[c][arm]["raw"].get("target_id"),
+                                   rows[c][arm]["final"].get("target_id"),
+                                   rows[c][arm]["raw"].get("outcome")] for arm in arms},
+                   "gold": rows[c][arms[0]]["gold_target_ids"]}
+                  for c in hit if len({metrics[c][arm]["final"]["joint"] for arm in arms}) > 1]
+    (run_dir / "discordant.json").write_text(json.dumps(discordant, indent=1))
+    (run_dir / "per_case_metrics.json").write_text(json.dumps(metrics, indent=0))
+    return block
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("run_dir", type=Path)
@@ -221,7 +309,21 @@ def main(argv=None) -> None:
     parser.add_argument("--prefixes", nargs="+", default=["heldout"],
                         help="run files RUN_DIR/<prefix>-<arm>.jsonl, e.g. heldout heldout-sar")
     parser.add_argument("--out", type=Path, help="default RUN_DIR/scored.json")
+    parser.add_argument("--sar", action="store_true",
+                        help="score RUN_DIR/heldout-sar-<arm>.jsonl as the heldout_sar block")
+    parser.add_argument("--audit", type=Path, help="#87 audit_filled.csv (SAR sanity subset)")
+    parser.add_argument("--numbers", type=Path,
+                        help="with --sar: add the block to this numbers.json under heldout_sar")
     args = parser.parse_args(argv)
+    if args.sar:
+        block = sar_report(args.run_dir, args.root, args.arms, audit_csv=args.audit)
+        (args.out or args.run_dir / "scored.json").write_text(json.dumps({"heldout_sar": block}, indent=1))
+        if args.numbers is not None:
+            numbers = json.loads(args.numbers.read_text())
+            numbers["heldout_sar"] = block
+            args.numbers.write_text(json.dumps(numbers, indent=1))
+        print(json.dumps({k: block[k] for k in ("cases", "non_miss_cases", "arms", "diff")}, indent=1))
+        return
     numbers = report(args.run_dir, args.root, args.arms, args.prefixes)
     (args.out or args.run_dir / "scored.json").write_text(json.dumps(numbers, indent=1))
     print(json.dumps(numbers["heldout"]["arms"], indent=1))
