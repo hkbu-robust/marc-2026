@@ -36,6 +36,7 @@ import argparse
 import collections
 import hashlib
 import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -151,8 +152,21 @@ def counts(cases: list[Case]) -> dict:
     }
 
 
-def freeze(root: Path, notes: dict | None = None) -> Path:
-    """Write ``manifest.json`` once: per-file SHA-256 and counts for every set present."""
+def case_tags(case: Case) -> dict:
+    """Tags #89 filters on: on/above relations (a known label artefact) and, for
+    held-out cases, the generator scene's parity (the footprint prior was fitted on even scenes)."""
+    tags = {"on_above": case.gold.get("relation") in ("on", "above")}
+    gt_json = (case.source or {}).get("gt_json")
+    match = re.search(r"scene_(\d+)", gt_json or "")
+    if match:
+        tags["scene_parity"] = "even" if int(match.group(1)) % 2 == 0 else "odd"
+    return tags
+
+
+def freeze(root: Path, notes: dict | None = None, version: str = "final") -> Path:
+    """Write ``manifest.json`` once: per-file SHA-256, counts and per-case tags for every set.
+
+    Counts use ``version`` (the frozen candidate version); v1 counts are kept for reference."""
     path = root / MANIFEST
     if path.exists():
         raise FileExistsError(f"{path} exists; frozen sets must not be re-frozen")
@@ -166,14 +180,21 @@ def freeze(root: Path, notes: dict | None = None) -> Path:
         files = _case_files(root, set_name)
         if not files:
             continue
-        cases = read_cases(root, set_name)
+        cases = read_cases(root, set_name, version)
         unconfirmed = [c.case_id for c in cases
                        if set_name == "public" and not c.gold.get("confirmed_by")]
         if unconfirmed:
-            raise ValueError(f"{len(unconfirmed)} public gold IDs not checked by a person, "
-                             f"e.g. {unconfirmed[:3]} (public.py confirm)")
+            raise ValueError(f"{len(unconfirmed)} public gold IDs unconfirmed, "
+                             f"e.g. {unconfirmed[:3]} (public.py auto-confirm / confirm)")
+        tags = {c.case_id: case_tags(c) for c in cases}
         manifest["sets"][set_name] = {
-            "counts": counts(cases),
+            "version": version,
+            "counts": {**counts(cases),
+                       "on_above": dict(collections.Counter(t["on_above"] for t in tags.values())),
+                       "scene_parity": dict(collections.Counter(
+                           t.get("scene_parity") for t in tags.values()))},
+            "counts_v1": counts(read_cases(root, set_name, "v1")) if version != "v1" else None,
+            "case_tags": tags,
             "files": {str(p.relative_to(root)): _sha256(p) for p in files},
         }
     path.write_text(json.dumps(manifest, indent=1), encoding="utf-8")
@@ -210,10 +231,12 @@ def main(argv=None) -> int:
     parser.add_argument("action", choices=("freeze", "verify"))
     parser.add_argument("root", type=Path)
     parser.add_argument("--notes", type=Path, help="JSON file merged into manifest.notes")
+    parser.add_argument("--version", choices=VERSIONS, default="final",
+                        help="candidate version the manifest counts describe (default final)")
     args = parser.parse_args(argv)
     if args.action == "freeze":
         notes = json.loads(args.notes.read_text()) if args.notes else None
-        print(freeze(args.root, notes))
+        print(freeze(args.root, notes, args.version))
     for set_name in SETS:
         if (args.root / set_name / "cases").is_dir():
             cases = load_set(args.root, set_name)

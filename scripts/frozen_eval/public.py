@@ -1,4 +1,4 @@
-"""Public evaluation set from the declared #88 capture (``cache-on/run-01``) (#87).
+"""Public evaluation set from a declared capture run (#87): #128 run-01 for the final system.
 
     python -m scripts.frozen_eval.public build --run RUN_DIR --geometry sdk_cameras.json \\
         --training-record JSON --root SETS [--review-out DIR]
@@ -17,8 +17,14 @@ and the live run's pick scored target 1.0, that pick is proposed instead
 the SDK geometry: the ray through the box bottom-centre and centre meets the
 plane at the expected height. Each proposal stores its distance, the runner-up
 distance, and whether the live run picked it and scored target 1.0. It is
-**unconfirmed** until a person checks the review image and ``confirm`` records
-the verdict; ``case_store.freeze`` refuses unconfirmed public cases.
+**unconfirmed** until ``auto-confirm`` accepts an unambiguous proposal by rule, or
+a reviewer's verdict is applied with ``confirm``; ``case_store.freeze`` refuses
+unconfirmed public cases. The organisers' expected coordinates stay the ground
+truth; gold IDs only link them to candidates for exact-match metrics.
+
+The capture run is the final system itself, so each case also stores its
+candidates and parse as the ``final`` version (``case_store.load_set(...,
+version="final")``), the same keys the refreshed held-out cases carry.
 """
 
 from __future__ import annotations
@@ -96,8 +102,11 @@ def propose(candidates: list[dict], geometry: dict[str, CameraGeometry], expecte
 def _sources(candidates: list[dict], decisions: list[dict]) -> list[dict]:
     refined = {c for d in decisions if d.get("decision") == "refine_added"
                for c in (d.get("candidates") or []) if isinstance(c, str)}
+    zoomed = {c for d in decisions if d.get("decision") == "tiled_refine"
+              for c in (d.get("candidates") or []) if isinstance(c, str)}
     proxies = {d.get("candidate") for d in decisions if d.get("decision") == "proxy_created"}
     return [{**c, "source": "proxy" if c["candidate_id"] in proxies
+             else "zoom" if c["candidate_id"] in zoomed
              else "refine" if c["candidate_id"] in refined else "detector"} for c in candidates]
 
 
@@ -191,6 +200,11 @@ def build_cases(run_dir: Path, geometry: dict[str, CameraGeometry], record: dict
                 "live_selected_is_gold": sub.get("target_id") in target_ids,
             },
             "source": {"run_dir": str(run_dir), "round": rnd, "artifact_dir": pipe["artifact_dir"]},
+            # The capture run is the final system: its candidates and parse are the final version.
+            "candidates_final": candidates,
+            "parsed_final": pipe["parsed"],
+            "gold_final": {},
+            "tags_final": {},
         }
         out.append((case, frames))
     return out
@@ -261,6 +275,67 @@ def write_review_sheet(cases: list[tuple], geometry: dict[str, CameraGeometry], 
     return path
 
 
+# Rounds whose target no camera shows (#136 visibility check; earlier verdicts in #87).
+HIDDEN_TARGET_PROBLEMS = {"lf03", "lf06", "hf06", "lf07", "hf02"}
+
+
+def ambiguity(case: dict) -> list[str]:
+    """Why the rule's gold proposal needs a visual check; empty means accept by rule."""
+    reasons = []
+    target = case["gold"]["proposal"]["target"]
+    problem = case["tags"]["problem_id"].split("_")[0]
+    if problem in HIDDEN_TARGET_PROBLEMS:
+        reasons.append("hidden-target round")
+    if not case["gold"]["target_ids"]:
+        reasons.append("no proposal within 1 m")
+    if target.get("basis") == "live_target_score_1":
+        reasons.append("live-pick fallback")
+    if target.get("conflict"):
+        reasons.append("live pick disagrees")
+    near = target.get("nearest") or []
+    gold = set(case["gold"]["target_ids"])
+    for item in near:
+        same_cam = [n for n in near if n["camera_id"] == item["camera_id"]]
+        if (item["candidate_id"] in gold and len(same_cam) > 1
+                and same_cam[1]["error_m"] <= case["gold"]["proposal"]["target"]["gold_max_m"]):
+            reasons.append("runner-up within 1 m in the same camera")
+            break
+    if case["gold"].get("anchor_xyz") and case["gold"].get("landmark_class") and not case["gold"]["anchor_ids"]:
+        reasons.append("no anchor proposal within 1 m")
+    return reasons
+
+
+def auto_confirm(root: Path, review_csv: Path) -> int:
+    """Confirm every unambiguous proposal by rule; list the ambiguous ones in the review
+    sheet (``needs_check``) for a visual check applied later with ``confirm``."""
+    rows = list(csv.DictReader(review_csv.open(encoding="utf-8")))
+    by_id = {r["case_id"]: r for r in rows}
+    confirmed = 0
+    for case_dir in sorted((root / "public" / "cases").iterdir()):
+        path = case_dir / "case.json"
+        case = json.loads(path.read_text(encoding="utf-8"))
+        reasons = ambiguity(case)
+        row = by_id.get(case["case_id"])
+        if row is not None:
+            row["needs_check"] = "; ".join(reasons)
+        if reasons or case["gold"].get("confirmed_by"):
+            continue
+        case["gold"]["confirmed_by"] = {
+            "reviewer": "rule", "verdict": "ok",
+            "note": f"unambiguous proposal ({case['gold']['proposal']['target'].get('basis')})",
+        }
+        path.write_text(json.dumps(case, indent=1, default=str), encoding="utf-8")
+        confirmed += 1
+    fields = list(rows[0]) + ([] if "needs_check" in rows[0] else ["needs_check"])
+    with review_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    pending = [r["case_id"] for r in rows if r.get("needs_check")]
+    print(f"{confirmed} confirmed by rule; {len(pending)} need a visual check: {pending}")
+    return 0
+
+
 def confirm(root: Path, review_csv: Path) -> int:
     """Apply a filled review sheet: ``verdict`` ok|corrected, corrected IDs (empty = detector
     miss), optional ``note``, and ``reviewer``. Rows without a verdict and reviewer are skipped."""
@@ -296,11 +371,14 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Build the public evaluation set (#87).")
     sub = parser.add_subparsers(dest="action", required=True)
     p_build = sub.add_parser("build")
-    p_build.add_argument("--run", type=Path, required=True, help="#88 cache-on/run-01")
+    p_build.add_argument("--run", type=Path, required=True, help="the declared capture run (#128 run-01)")
     p_build.add_argument("--geometry", type=Path, required=True, help="capture_sdk_geometry output")
     p_build.add_argument("--training-record", type=Path, required=True)
     p_build.add_argument("--root", type=Path, required=True)
     p_build.add_argument("--review-out", type=Path)
+    p_auto = sub.add_parser("auto-confirm")
+    p_auto.add_argument("--root", type=Path, required=True)
+    p_auto.add_argument("--review", type=Path, required=True)
     p_confirm = sub.add_parser("confirm")
     p_confirm.add_argument("--root", type=Path, required=True)
     p_confirm.add_argument("--review", type=Path, required=True)
@@ -308,6 +386,8 @@ def main(argv=None) -> int:
 
     if args.action == "confirm":
         return confirm(args.root, args.review)
+    if args.action == "auto-confirm":
+        return auto_confirm(args.root, args.review)
     record = json.loads(args.training_record.read_text(encoding="utf-8"))
     geometry = load_geometry(args.geometry)
     cases = build_cases(args.run, geometry, record)

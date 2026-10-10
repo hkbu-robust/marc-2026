@@ -12,6 +12,7 @@ from PIL import Image
 from scripts.frozen_eval import case_store
 from scripts.frozen_eval.geometry import geometry_from_gt, ground_point, project_point
 from scripts.frozen_eval.heldout import assemble_case, stratum, wilson
+from scripts.frozen_eval import public
 from scripts.frozen_eval.public import confirm, propose
 from scripts.frozen_eval.refresh_final import merge_case
 from scripts.frozen_eval.relations import object_choices, relations_between, sar_check
@@ -208,12 +209,12 @@ class CaseStoreTests(unittest.TestCase):
             root = Path(tmp)
             self._write(root, "heldout", "ho-1")
             self._write(root, "public", "pub-1")
-            case_store.freeze(root)
+            case_store.freeze(root, version="v1")
             cases = case_store.load_set(root, "heldout")
             self.assertEqual([c.case_id for c in cases], ["ho-1"])
             self.assertEqual(cases[0].frame("rig_1_a").shape, (4, 4, 3))
             with self.assertRaises(FileExistsError):
-                case_store.freeze(root)
+                case_store.freeze(root, version="v1")
             case_json = root / "heldout" / "cases" / "ho-1" / "case.json"
             raw = json.loads(case_json.read_text())
             raw["gold"]["target_ids"] = ["relabelled"]
@@ -259,6 +260,61 @@ class FinalVersionTests(unittest.TestCase):
         self.assertEqual(new.gold["target_ids"], ["rig_3_b:mug:0"])
         self.assertEqual(new.tags["target_from"], ["zoom"])
         self.assertEqual(old.parsed_final, {"target_type": "mug"})
+
+
+class FreezeFinalTests(unittest.TestCase):
+    def _write(self, root, set_name, case_id, relation, gt_json=None):
+        frame = root / f"{case_id}.png"
+        Image.new("RGB", (4, 4)).save(frame)
+        case_store.write_case(root, set_name, {
+            "case_id": case_id, "kind": "object", "command": "Find the mug.", "parsed": {},
+            "candidates": [], "tags": {"stratum": "seen", "detector_miss": True},
+            "gold": {"target_ids": [], "camera_ids": ["rig_1_a"], "relation": relation,
+                     "confirmed_by": {"reviewer": "rule"}},
+            "candidates_final": [{"candidate_id": "rig_1_a:mug:0"}], "parsed_final": {},
+            "gold_final": {"target_ids": ["rig_1_a:mug:0"]}, "tags_final": {"detector_miss": False},
+            "source": {"gt_json": gt_json} if gt_json else {},
+        }, {"rig_1_a": frame})
+
+    def test_manifest_counts_the_final_version_and_tags_cases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write(root, "heldout", "ho-1", "on", "/x/scene_00004/rig_1_a.json")
+            self._write(root, "heldout", "ho-2", "left", "/x/scene_00007/rig_1_a.json")
+            manifest = json.loads(case_store.freeze(root).read_text())
+        held = manifest["sets"]["heldout"]
+        self.assertEqual("final", held["version"])
+        self.assertEqual({"false": 2}, held["counts"]["detector_miss"])
+        self.assertEqual({"true": 2}, held["counts_v1"]["detector_miss"])
+        self.assertEqual({"on_above": True, "scene_parity": "even"}, held["case_tags"]["ho-1"])
+        self.assertEqual({"on_above": False, "scene_parity": "odd"}, held["case_tags"]["ho-2"])
+
+
+class AutoConfirmTests(unittest.TestCase):
+    @staticmethod
+    def _case(problem, target_ids, nearest, basis="projection", anchor_ids=("rig_1_a:bench:0",)):
+        return {"case_id": f"pub-{problem}", "tags": {"problem_id": problem},
+                "gold": {"target_ids": list(target_ids), "anchor_ids": list(anchor_ids),
+                         "anchor_xyz": [0, 0, 0], "landmark_class": "bench",
+                         "proposal": {"target": {"basis": basis, "conflict": False,
+                                                 "nearest": nearest, "gold_max_m": 1.0}}}}
+
+    def test_unambiguous_proposal_needs_no_check(self):
+        case = self._case("lf01_mug_table", ["rig_1_a:mug:0"],
+                          [{"candidate_id": "rig_1_a:mug:0", "camera_id": "rig_1_a", "error_m": 0.2},
+                           {"candidate_id": "rig_1_a:mug:1", "camera_id": "rig_1_a", "error_m": 3.0}])
+        self.assertEqual([], public.ambiguity(case))
+
+    def test_hidden_close_runner_up_and_fallback_need_a_check(self):
+        hidden = self._case("lf06_umbrella_fallenbike", [], [])
+        self.assertIn("hidden-target round", public.ambiguity(hidden))
+        close = self._case("lf05_umbrella_vending", ["rig_1_a:umbrella:0"],
+                           [{"candidate_id": "rig_1_a:umbrella:0", "camera_id": "rig_1_a", "error_m": 0.2},
+                            {"candidate_id": "rig_1_a:umbrella:1", "camera_id": "rig_1_a", "error_m": 0.8}])
+        self.assertIn("runner-up within 1 m in the same camera", public.ambiguity(close))
+        fallback = self._case("lf02_tumbler_bench", ["rig_1_a:tumbler:0"], [],
+                              basis="live_target_score_1")
+        self.assertIn("live-pick fallback", public.ambiguity(fallback))
 
 
 if __name__ == "__main__":
