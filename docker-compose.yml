@@ -9,7 +9,10 @@ services:
         - network.host
       args:
         MARC_BUILD_MODE: "${MARC_BUILD_MODE:-baked}"
-    image: marc-qwen-vllm:local
+    # Team-specific name, always built from this checkout: a judging machine may still
+    # hold another build under the starter kit's default `:local` names.
+    image: robust-qwen:finals
+    pull_policy: build
     network_mode: host
     runtime: nvidia
     ipc: host
@@ -52,7 +55,8 @@ services:
       args:
         MARC_BUILD_MODE: "${MARC_BUILD_MODE:-baked}"
         MARC_QWEN_BACKEND: remote
-    image: marc-agent:local
+    image: robust-agent:finals
+    pull_policy: build
     network_mode: host
     runtime: nvidia
     environment:

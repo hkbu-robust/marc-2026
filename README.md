@@ -108,9 +108,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml down
 
 ## Frozen systems for experiments
 
-`docker compose up` runs whatever images are currently tagged `marc-agent:local` and
-`marc-qwen-vllm:local`. Those tags are shared by everyone on the machine, and any
-`--build` from any clone replaces them, so they are not a stable experiment baseline.
+`docker compose up` rebuilds `robust-agent:finals` and `robust-qwen:finals` from the current
+checkout (`pull_policy: build`). Those tags are shared by everyone on the machine, and a
+`docker compose up` from any clone replaces them, so they are not a stable experiment baseline.
 Experiments use these fixed images instead:
 
 | System | Compose override | Agent image | Qwen image |
