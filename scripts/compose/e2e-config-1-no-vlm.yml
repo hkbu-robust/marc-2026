@@ -1,0 +1,9 @@
+# #90 configuration 1, "no VLM": geometry selection only and the lenient rule reader.
+# Use with run_stage1_repeats --no-qwen --extra-compose scripts/compose/e2e-config-1-no-vlm.yml
+# Any MARC_SAR_DETECTOR other than qwen/qwen-remote gives no verifier, no scene description
+# and no Qwen warm-up; MARC_COMMAND_PARSER=rules reads commands without Qwen.
+services:
+  agent:
+    environment:
+      MARC_SAR_DETECTOR: "fallback"
+      MARC_COMMAND_PARSER: "rules"

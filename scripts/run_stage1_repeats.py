@@ -97,7 +97,7 @@ def provenance(args, env: dict, agent_project: str) -> dict:
         "commit": out(["git", "rev-parse", "HEAD"]),
         "dirty": bool(out(["git", "status", "--porcelain", "--", "marc_agent", "demo"])),
         "images": images,
-        "served_models": out([
+        "served_models": "none (--no-qwen)" if args.no_qwen else out([
             "docker", "compose", "-p", agent_project, *AGENT_COMPOSE, "exec", "-T", "qwen",
             "python3", "-c",
             "import os, urllib.request; print(urllib.request.urlopen(urllib.request.Request("
@@ -111,6 +111,10 @@ def provenance(args, env: dict, agent_project: str) -> dict:
                 "MARC_STAGE1_SCENE_CACHE", "MARC_ROUND_DUMP", "MARC_AGENT_IMAGE",
                 "MARC_QWEN_IMAGE", "MARC_VLLM_PORT", "MARC_VLLM_GPU_FRACTION",
             )
+        },
+        "extra_compose": {
+            path: (REPO / path if (REPO / path).is_file() else Path(path)).read_text(encoding="utf-8")
+            for path in args.extra_compose
         },
         # Set by `docker build --label org.opencontainers.image.revision=<sha>`.
         "agent_revision": out([
@@ -148,7 +152,7 @@ def one_run(index: int, args, env: dict) -> dict:
     log(f"run {index:02d}: resetting platform and agent")
     # A fresh `docker compose up` starts vLLM cold, and round 1 pays for it.
     # Restart it every run unless --warm-qwen asks to keep it loaded.
-    services = ["agent"] if args.warm_qwen else ["agent", "qwen"]
+    services = ["agent"] if args.warm_qwen or args.no_qwen else ["agent", "qwen"]
     compose(agent, AGENT_COMPOSE, "rm", "-sf", *services, env=env, check=False)
     compose(platform, PLATFORM_COMPOSE, "down", env=env, check=False)
 
@@ -163,7 +167,8 @@ def one_run(index: int, args, env: dict) -> dict:
     compose(platform, PLATFORM_COMPOSE, "up", "-d", "--no-build", "--force-recreate",
             "platform", env=env)
     time.sleep(args.agent_delay_s)
-    compose(agent, AGENT_COMPOSE, "up", "-d", "--no-build", "--wait", "qwen", env=env)
+    if not args.no_qwen:
+        compose(agent, AGENT_COMPOSE, "up", "-d", "--no-build", "--wait", "qwen", env=env)
     compose(agent, AGENT_COMPOSE, "up", "-d", "--no-build", "--no-deps",
             "--force-recreate", "agent", env=env)
     running = compose(agent, AGENT_COMPOSE, "ps", "-q", "agent",
@@ -242,9 +247,18 @@ def main(argv=None) -> None:
     parser.add_argument("--vllm-gpu-fraction", default="0.37",
                         help="share of the physical GPU vLLM reserves (0.37 of 96 GB = ~36 GB, "
                              "as on the 48 GB judging card); empty = the entrypoint's 0.75")
+    parser.add_argument("--extra-compose", action="append", default=[], metavar="FILE",
+                        help="extra agent compose override, after the frozen pair (repeatable; "
+                             "#90 configurations live in scripts/compose/)")
+    parser.add_argument("--no-qwen", action="store_true",
+                        help="do not start vLLM (configurations that make no Qwen call)")
     parser.add_argument("--warm-qwen", action="store_true",
                         help="keep vLLM loaded between runs instead of a cold start each run")
     args = parser.parse_args(argv)
+    for path in args.extra_compose:
+        if not (REPO / path).is_file() and not Path(path).is_file():
+            raise SystemExit(f"--extra-compose {path}: no such file")
+        AGENT_COMPOSE.extend(["-f", path])
     args.out = args.out.expanduser().resolve()
     args.out.mkdir(parents=True, exist_ok=True)
 
