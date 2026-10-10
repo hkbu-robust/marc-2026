@@ -147,7 +147,7 @@ python -m scripts.run_stage1_repeats ... --project fs-b --ros-domain-id 89 --vll
   1 within `R_ACQUIRE` falling linearly to 0 at `R_MISS` (`stage1_runs.target_credit`).
   The constants and the distractor margin are `MARC_SCORING_*` and private at competition
   time, so never tune to the defaults; `stage1_sensitivity.py` replays a grid of them.
-  A replayed target credited further out than anything the platform credited for that
+  A replayed target given credit further out than anything the platform credited for that
   round is counted as uncertain in the summary.
 
 ## Camera geometry

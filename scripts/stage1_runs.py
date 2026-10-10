@@ -14,32 +14,38 @@ A moved target uses the organisers' kernel: it must be strictly nearer the GT
 target than every other object or person in that camera, then 1 within
 ``R_ACQUIRE`` (2 m) falling linearly to 0 at ``R_MISS`` (5 m). Those constants
 and the distractor margin are ``MARC_SCORING_*`` and private at competition
-time. An unmoved target keeps the platform's logged credit. A recomputed
-target further from the expected point than both ``TARGET_CERTAIN_M`` and the
-distance the platform credited is flagged uncertain.
+time. The other objects and people per problem are not in the platform's
+score file; they come from ``data/public_distractors.json``, derived from the
+organisers' public scenario with ``python -m scripts.stage1_runs --scenario
+marc2026_chungmu.yaml`` (analysis input only, never read at runtime). An
+unmoved target keeps the platform's logged credit. A recomputed target given
+credit further from the expected point than both ``TARGET_CERTAIN_M`` and the
+distance the platform credited is flagged uncertain: its credit rests on the
+public R_ACQUIRE/R_MISS defaults.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from functools import lru_cache
 from typing import Optional
 
+import yaml
 from PIL import Image
 
 COMPONENTS = ("camera", "object_type", "landmark", "relation", "anchor", "target")
 ANCHOR_ZERO_M = 5.0
-TARGET_CREDITED_M = 1.854  # largest distance credited in the #88 rounds
-TARGET_UNCREDITED_M = 1.976  # smallest distance not credited
-TARGET_RADIUS_M = (TARGET_CREDITED_M + TARGET_UNCREDITED_M) / 2.0
 TARGET_CERTAIN_M = 0.5
 UNMOVED_M = 1e-3  # a replayed target this close to the logged one keeps its logged credit
 # Public defaults from the organisers' scorer. Competition values are MARC_SCORING_*.
 R_ACQUIRE_M = 2.0
 R_MISS_M = 5.0
+PUBLIC_DISTRACTORS = Path(__file__).resolve().parent / "data" / "public_distractors.json"
 
 
 @dataclass(frozen=True)
@@ -212,6 +218,62 @@ def target_credit(
     return 1.0 - (d_target - r_acquire) / (r_miss - r_acquire)
 
 
+def distractors_by_problem(scenario: Path) -> dict[str, dict]:
+    """problem id -> target, anchor, and the other instances in that camera.
+
+    Landmarks are not distractors. ``scenario`` is the organisers' public scenario YAML.
+    """
+    doc = yaml.safe_load(Path(scenario).read_text(encoding="utf-8"))
+    missions = {mission["id"]: mission for mission in doc["missions"]}
+    out = {}
+    for problem in doc["challenge_problems"]:
+        expected = problem["expected"]
+        mission = missions[expected["camera_id"]]
+        _camera, rest = expected["target_object_id"].split("/", 1)
+        type_name, index_text = rest.rsplit("_", 1)
+        index = int(index_text)
+        target = None
+        others = []
+        for obj in mission.get("objects") or []:
+            for inst_index, inst in enumerate(obj["resolved"]["instances"]):
+                point = inst["position"][:3]
+                if obj["type"] == type_name and inst_index == index:
+                    target = point
+                else:
+                    others.append(point)
+        anchor = next(
+            landmark["resolved"]["position"][:3]
+            for landmark in mission["landmarks"]
+            if landmark["name"] == expected["landmark_name"]
+        )
+        out[problem["id"]] = {
+            "target_coord": target,
+            "anchor_coord": anchor,
+            "distractor_coords": others,
+        }
+    return out
+
+
+@lru_cache(maxsize=1)
+def public_distractors() -> dict[str, list]:
+    """problem id -> other object/person positions in the expected camera (public scenario)."""
+    problems = json.loads(PUBLIC_DISTRACTORS.read_text(encoding="utf-8"))
+    return {problem_id: item["distractor_coords"] for problem_id, item in problems.items()}
+
+
+def _distractors(round_: LoggedRound) -> list:
+    coords = round_.expected.get("distractor_coords")
+    if coords is not None:
+        return coords
+    try:
+        return public_distractors()[round_.problem_id]
+    except KeyError:
+        raise KeyError(
+            f"{round_.problem_id}: no distractors in {PUBLIC_DISTRACTORS.name}; "
+            "regenerate it from the scenario that defines this problem"
+        ) from None
+
+
 def score(round_: LoggedRound, submission: dict) -> RoundScore:
     """Score a (replayed) submission with the organisers' kernel.
 
@@ -234,7 +296,7 @@ def score(round_: LoggedRound, submission: dict) -> RoundScore:
         target = target_credit(
             submission["target_coord"],
             expected["target_coord"],
-            expected.get("distractor_coords"),
+            _distractors(round_),
             r_acquire=params["r_acquire"],
             r_miss=params["r_miss"],
             margin=params["margin"],
@@ -263,5 +325,19 @@ def score(round_: LoggedRound, submission: dict) -> RoundScore:
         total=total,
         target_m=target_m,
         anchor_m=anchor_m,
-        target_uncertain=not unmoved and credited_m < target_m < TARGET_UNCREDITED_M,
+        target_uncertain=not unmoved and target > 0.0 and credited_m < target_m,
     )
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description=f"Write {PUBLIC_DISTRACTORS.name} from a scenario.")
+    parser.add_argument("--scenario", type=Path, required=True)
+    parser.add_argument("--out", type=Path, default=PUBLIC_DISTRACTORS)
+    args = parser.parse_args(argv)
+    problems = distractors_by_problem(args.scenario)
+    args.out.write_text(json.dumps(problems, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"{len(problems)} problems -> {args.out}")
+
+
+if __name__ == "__main__":
+    main()

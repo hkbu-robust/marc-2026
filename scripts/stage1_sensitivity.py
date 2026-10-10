@@ -17,42 +17,7 @@ import csv
 import itertools
 from pathlib import Path
 
-import yaml
-
-from scripts.stage1_runs import read_run, target_credit
-
-
-def distractors_by_problem(scenario: Path) -> dict[str, dict]:
-    """problem id -> target, anchor, and the other instances in that camera."""
-    doc = yaml.safe_load(Path(scenario).read_text(encoding="utf-8"))
-    missions = {mission["id"]: mission for mission in doc["missions"]}
-    out = {}
-    for problem in doc["challenge_problems"]:
-        expected = problem["expected"]
-        mission = missions[expected["camera_id"]]
-        _camera, rest = expected["target_object_id"].split("/", 1)
-        type_name, index_text = rest.rsplit("_", 1)
-        index = int(index_text)
-        target = None
-        others = []
-        for obj in mission.get("objects") or []:
-            for inst_index, inst in enumerate(obj["resolved"]["instances"]):
-                point = inst["position"][:3]
-                if obj["type"] == type_name and inst_index == index:
-                    target = point
-                else:
-                    others.append(point)
-        anchor = next(
-            landmark["resolved"]["position"][:3]
-            for landmark in mission["landmarks"]
-            if landmark["name"] == expected["landmark_name"]
-        )
-        out[problem["id"]] = {
-            "target_coord": target,
-            "anchor_coord": anchor,
-            "distractor_coords": others,
-        }
-    return out
+from scripts.stage1_runs import distractors_by_problem, read_run, target_credit
 
 
 def main(argv=None) -> None:

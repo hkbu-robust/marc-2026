@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import math
@@ -21,7 +22,7 @@ from scripts.stage1_replay import (
     replay_run,
     replay_targets,
 )
-from scripts.stage1_runs import read_run, score, target_credit
+from scripts.stage1_runs import LoggedRound, read_run, score, target_credit
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "stage1_replay" / "run-01"
 FROZEN_FLAGS = {"MARC_GROUND_CALIBRATION": "0", "MARC_LANDMARK_FOOTPRINT": "0"}
@@ -69,9 +70,10 @@ class ReplayTests(unittest.TestCase):
 
     def test_a_moved_target_is_rescored_by_distance(self):
         round_ = self.run.rounds[0]
-        expected = round_.expected["target_coord"]
-        near = {**round_.detail["submission"], "target_coord": [expected[0] + 1.0, *expected[1:]]}
-        far = {**round_.detail["submission"], "target_coord": [expected[0] + 3.0, *expected[1:]]}
+        x, y, z = round_.expected["target_coord"]
+        # Moved in -y, away from lf06's other objects, so attribution still holds.
+        near = {**round_.detail["submission"], "target_coord": [x, y - 1.0, z]}
+        far = {**round_.detail["submission"], "target_coord": [x, y - 3.0, z]}
         self.assertEqual(score(round_, near).components["target"], 1.0)
         self.assertTrue(score(round_, near).target_uncertain)
         # 3 m is inside the miss radius and outside the acquire radius: linear partial credit.
@@ -88,6 +90,34 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(
             target_credit((0.4, 0.0, 0.0), gt, [near_distractor], margin=0.15), 0.0
         )
+
+    def test_score_attributes_against_the_public_scenario_distractors(self):
+        # #128 run-08 lf03: the platform's expected block has no distractors, the point is
+        # 1.284 m from the GT tumbler but 0.909 m from another object, and it logged 0.
+        gt = [-36.07784, 128.70259, 16.84848]
+        point = [-34.79452935730926, 128.71649787863436, 16.795886928727008]
+        round_ = LoggedRound(
+            number=1,
+            problem_id="lf03_tumbler_hydrant",
+            detail={
+                "expected": {
+                    "camera_id": "rig_7_a", "target_kind": "object", "target_type": "tumbler",
+                    "landmark_prefix": "hydrant", "relation": "near",
+                    "anchor_coord": [-33.8053, 130.52874, 16.85787], "target_coord": gt,
+                },
+                "submission": {"target_coord": gt},  # logged elsewhere, so the point is rescored
+                "weights": {name: 1.0 for name in ("camera", "object_type", "landmark",
+                                                   "relation", "anchor", "target")},
+                "target": 1.0,
+            },
+            pipeline=None, submission=None, sim_s=None, time_limit_s=None,
+        )
+        submission = {"anchor_coord": [-33.8053, 130.52874, 16.85787], "target_coord": point}
+        self.assertLess(math.dist(point, gt), 2.0)
+        self.assertEqual(score(round_, submission).components["target"], 0.0)
+        unknown = dataclasses.replace(round_, problem_id="not_a_public_problem")
+        with self.assertRaises(KeyError):
+            score(unknown, submission)
 
     def test_a_round_without_a_parse_keeps_its_logged_score(self):
         with tempfile.TemporaryDirectory() as tmp:
