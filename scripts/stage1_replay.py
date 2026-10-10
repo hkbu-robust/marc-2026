@@ -11,13 +11,15 @@ returns is rescored with ``scripts.stage1_runs.score``. ``--env`` sets runtime
 flags for the replay only, e.g. a new mechanism's flag set to ``0``.
 
 ``--cases`` takes a frozen-case set folder (``<set>/cases/<id>/case.json``, #87
-schema 1) and scores the runtime anchor projection (``project_anchor``) of each
-case's gold anchor box against its GT ``anchor_xyz``.
+schema 1; the final candidate version when present) and scores the runtime anchor
+projection (``project_anchor``) of each case's gold anchor box against its GT
+``anchor_xyz``, and the ground contact point of each detected gold object target
+against its GT ``target_xyz``.
 
 Selection is held fixed: a change that would make the ranking or Qwen pick another
 pair shows up only in a GPU run (``scripts.stage1_regress``).
 
-Writes ``rounds.csv``, ``runs.csv``, ``cases.csv`` (with ``--cases``) and
+Writes ``rounds.csv``, ``runs.csv``, ``cases.csv`` and ``targets.csv`` (with ``--cases``) and
 ``summary.md`` to OUT_DIR.
 """
 
@@ -278,6 +280,23 @@ def _scene_parity(case: dict) -> Optional[int]:
     return int(Path(gt).parent.name.split("_")[-1]) % 2
 
 
+def _set_cases(set_dir: Path, scenes: str):
+    """(path, case, candidates by ID, gold IDs) of each kept case.
+
+    A frozen #87 case carries the final system's candidates (``candidates_final``,
+    ``gold_final``); those are used when present, else version 1 (``candidates``,
+    ``gold``). GT coordinates are in ``gold`` either way.
+    """
+    for path in sorted(Path(set_dir).glob("cases/*/case.json")):
+        case = json.loads(path.read_text(encoding="utf-8"))
+        if scenes != "all" and _scene_parity(case) != (0 if scenes == "even" else 1):
+            continue
+        final = "candidates_final" in case
+        candidates = case["candidates_final"] if final else case["candidates"]
+        ids = case["gold_final"] if final else case["gold"]
+        yield path, case, {item["candidate_id"]: item for item in candidates}, ids
+
+
 def replay_cases(
     set_dir: Path, projector: CctvProjector, scenes: str = "all"
 ) -> tuple[list[AnchorCase], int]:
@@ -287,13 +306,9 @@ def replay_cases(
     footprint prior is fitted on even scenes, #112).
     """
     rows, skipped = [], 0
-    for path in sorted(Path(set_dir).glob("cases/*/case.json")):
-        case = json.loads(path.read_text(encoding="utf-8"))
-        if scenes != "all" and _scene_parity(case) != (0 if scenes == "even" else 1):
-            continue
+    for path, case, candidates, ids in _set_cases(set_dir, scenes):
         gold = case["gold"]
-        candidates = {item["candidate_id"]: item for item in case["candidates"]}
-        anchors = [candidates[cid] for cid in gold.get("anchor_ids") or [] if cid in candidates]
+        anchors = [candidates[cid] for cid in ids.get("anchor_ids") or [] if cid in candidates]
         if not anchors or not gold.get("anchor_xyz"):
             skipped += 1
             continue
@@ -311,6 +326,44 @@ def replay_cases(
             error_m=None if xyz is None else math.dist(xyz, gold["anchor_xyz"]),
         ))
     return rows, skipped
+
+
+@dataclass(frozen=True)
+class TargetCase:
+    case_id: str
+    target_class: str
+    camera_id: str
+    error_m: Optional[float]  # None when the target box does not project
+
+
+def replay_targets(
+    set_dir: Path, projector: CctvProjector, scenes: str = "all"
+) -> list[TargetCase]:
+    """3-D error of the ground-contact contact point of each detected gold object target.
+
+    Object cases with a detected gold target and a ground relation; ``on`` / ``above``
+    targets sit on a raised plane that stays flat by design (#112). Same population
+    as #112's ``heldout_targets.py``.
+    """
+    rows = []
+    for _, case, candidates, ids in _set_cases(set_dir, scenes):
+        gold = case["gold"]
+        if case["kind"] != "object" or not gold.get("target_xyz"):
+            continue
+        if gold.get("relation") in ("on", "above"):
+            continue
+        targets = [candidates[cid] for cid in ids.get("target_ids") or [] if cid in candidates]
+        if not targets:
+            continue
+        target = max(targets, key=lambda item: (item["confidence"], item["candidate_id"]))
+        xyz = projector.project_contact(target["camera_id"], tuple(target["bbox_xyxy"]))
+        rows.append(TargetCase(
+            case_id=case["case_id"],
+            target_class=target["class_name"],
+            camera_id=target["camera_id"],
+            error_m=None if xyz is None else math.dist(xyz, gold["target_xyz"]),
+        ))
+    return rows
 
 
 def _mean_sd(values: list[float]) -> str:
@@ -385,6 +438,7 @@ def summary(
     runs: list[LoggedRun],
     replayed: list[ReplayedRound],
     cases: dict[str, tuple[list[AnchorCase], int]],
+    targets: dict[str, list[TargetCase]],
     env: dict[str, str],
     geometry: Path,
     seconds: float,
@@ -474,6 +528,19 @@ def summary(
                 f"{statistics.fmean(r.credit for r in items):.4f} |"
             )
         lines.append("")
+    for set_dir, rows in targets.items():
+        errors = [row.error_m for row in rows if row.error_m is not None]
+        lines += [
+            f"## Target replay on `{set_dir}`",
+            "",
+            f"- Ground-contact object targets with a detected gold target: {len(rows)} "
+            f"(not projected: {len(rows) - len(errors)})",
+            f"- Median 3-D target error: {statistics.median(errors):.3f} m "
+            f"(mean {statistics.fmean(errors):.3f} m; within 0.5 m "
+            f"{sum(e < 0.5 for e in errors) / len(errors):.3f})" if errors
+            else "- No projected targets",
+            "",
+        ]
     return "\n".join(lines)
 
 
@@ -535,6 +602,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         cases = {
             str(path): replay_cases(path, projector, args.case_scenes) for path in args.cases
         }
+        targets = {
+            str(path): replay_targets(path, projector, args.case_scenes) for path in args.cases
+        }
     seconds = time.perf_counter() - started
     args.out.mkdir(parents=True, exist_ok=True)
     _write_csv(args.out / "rounds.csv", round_rows(replayed))
@@ -547,7 +617,13 @@ def main(argv: Optional[list[str]] = None) -> None:
         for name, (rows, _) in cases.items() for r in rows
     ]
     _write_csv(args.out / "cases.csv", case_rows)
-    text = summary(runs, replayed, cases, env, args.geometry, seconds)
+    _write_csv(args.out / "targets.csv", [
+        {"set": name, "case_id": r.case_id, "target_class": r.target_class,
+         "camera_id": r.camera_id,
+         "error_m": None if r.error_m is None else round(r.error_m, 4)}
+        for name, rows in targets.items() for r in rows
+    ])
+    text = summary(runs, replayed, cases, targets, env, args.geometry, seconds)
     (args.out / "summary.md").write_text(text + "\n", encoding="utf-8")
     print(text)
 

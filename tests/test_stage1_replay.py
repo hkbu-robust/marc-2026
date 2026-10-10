@@ -14,7 +14,13 @@ from pathlib import Path
 from unittest import mock
 
 from marc_agent.perception.stage1_pipeline import project_anchor
-from scripts.stage1_replay import main, projector_for, replay_cases, replay_run
+from scripts.stage1_replay import (
+    main,
+    projector_for,
+    replay_cases,
+    replay_run,
+    replay_targets,
+)
 from scripts.stage1_runs import read_run, score, target_credit
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "stage1_replay" / "run-01"
@@ -127,6 +133,35 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(skipped, 1)
         self.assertAlmostEqual(rows[0].error_m, 1.0, places=6)
         self.assertAlmostEqual(rows[0].credit, 0.8, places=6)
+
+    def test_cases_read_the_final_candidate_version_and_score_targets(self):
+        anchor_box, target_box = [500.0, 300.0, 560.0, 380.0], [700.0, 400.0, 720.0, 430.0]
+        projector = projector_for()
+        anchor_gt = project_anchor(projector, "rig_1_a", tuple(anchor_box))
+        target_gt = projector.project_contact("rig_1_a", tuple(target_box))
+        final = [
+            {"candidate_id": "rig_1_a:bench:0", "camera_id": "rig_1_a",
+             "class_name": "bench", "confidence": 0.9, "bbox_xyxy": anchor_box},
+            {"candidate_id": "rig_1_a:mug:0", "camera_id": "rig_1_a",
+             "class_name": "mug", "confidence": 0.8, "bbox_xyxy": target_box},
+        ]
+        case = {
+            "case_id": "c1", "kind": "object", "candidates": [],
+            "gold": {"anchor_ids": [], "target_ids": [], "relation": "near",
+                     "anchor_xyz": list(anchor_gt),
+                     "target_xyz": [target_gt[0] + 0.5, target_gt[1], target_gt[2]]},
+            "candidates_final": final,
+            "gold_final": {"anchor_ids": ["rig_1_a:bench:0"], "target_ids": ["rig_1_a:mug:0"]},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "cases" / "c1"
+            folder.mkdir(parents=True)
+            (folder / "case.json").write_text(json.dumps(case))
+            rows, skipped = replay_cases(Path(tmp), projector)
+            targets = replay_targets(Path(tmp), projector)
+        self.assertEqual((len(rows), skipped), (1, 0))
+        self.assertAlmostEqual(rows[0].error_m, 0.0, places=6)
+        self.assertAlmostEqual(targets[0].error_m, 0.5, places=6)
 
 
 if __name__ == "__main__":
