@@ -89,6 +89,22 @@ NVIDIA GPU layouts.
 
 The latest full Chungmu Stage 1 rehearsal completed all 33 rounds with a **95.9578** average.
 
+### Stage 1 in the MetaCom 2026 presentation
+
+![Six simulator CCTV views showing candidate objects and people](docs/assets/metacom-2026/cctv-views.jpg)
+
+*Stage 1 searches across six CCTV views for the object or person described in the command.*
+
+![CCTV close-up of a detected object on a picnic table](docs/assets/metacom-2026/cctv-target-detection.jpg)
+
+*The detector proposes candidates, and the vision-language model selects from those candidates.*
+
+![Camera ray intersecting the calibrated ground surface](docs/assets/metacom-2026/ground-calibration.jpg)
+
+*Camera calibration projects the selected target from image pixels into world coordinates.*
+
+Images from slides 2 and 6 of the MetaCom 2026 slide deck.
+
 ## Fast local Python iteration
 
 After the baked images have been built once, reuse their dependencies and weights while
