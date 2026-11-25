@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026, IoT Convergence & Open Sharing System (IoTCOSS)
+# Copyright (c) 2026, Team roBUst (Hong Kong Baptist University) — MIT License
 #
 # Persist each detection's world xyz in dataset-gen GT JSON so a Qwen2-VL
 # converter can supervise GroundingResult.target_coord / anchor_coord.

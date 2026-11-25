@@ -1,7 +1,7 @@
 # Paper numbers (#130): macro -> source file (relative to final-experiments/) -> value -> format.
 # Read by `python -m scripts.paper_numbers`; see that module for the extraction kinds.
 #
-# Every source is under ~/marc-2026-work/experiments/ablations/final-system/final-experiments/.
+# Every source is under ./work/experiments/ablations/final-system/final-experiments/.
 # Never point a macro at the frozen-system outputs (04-repeated-runs/, 05-frozen-eval-sets/,
 # 09-pipeline-review/) or at development folders elsewhere under final-system/.
 #

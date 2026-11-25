@@ -1,8 +1,8 @@
 """Build the calibrated ground model shipped with the agent (#112).
 
     python -m scripts.build_ground_model \
-        --gt '~/marc-2026-work/datasets/raw/stage1-tiny-*-20260831/marc2026_chungmu/scene_*/rig_*.json' \
-        [--check '~/marc-2026-work/experiments/ablations/05-frozen-eval-sets/heldout-*/gt/marc2026_chungmu/scene_*/rig_*.json'] \
+        --gt './work/datasets/raw/stage1-tiny-*-20260831/marc2026_chungmu/scene_*/rig_*.json' \
+        [--check './work/experiments/ablations/05-frozen-eval-sets/heldout-*/gt/marc2026_chungmu/scene_*/rig_*.json'] \
         [--out marc_agent/perception/data/ground_model.npz]
 
 Ground points are the GT world positions of every mission object (small items lie

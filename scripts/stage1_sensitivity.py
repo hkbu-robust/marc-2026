@@ -1,9 +1,9 @@
 """Rescore logged Stage 1 rounds under the exact kernel on a constant grid.
 
     python -m scripts.stage1_sensitivity \
-        --run ~/marc-2026-work/experiments/ablations/final-system/review-improvements/baseline-repeats/run-01 \
-        --scenario ~/marc-2026-work/experiments/ablations/final-system/review-improvements/scenario/marc2026_chungmu.yaml \
-        --out ~/marc-2026-work/experiments/ablations/final-system/135-good-faith/sensitivity
+        --run ./work/experiments/ablations/final-system/review-improvements/baseline-repeats/run-01 \
+        --scenario ./work/experiments/ablations/final-system/review-improvements/scenario/marc2026_chungmu.yaml \
+        --out ./work/experiments/ablations/final-system/135-good-faith/sensitivity
 
 The grid is margin 0–0.3 m, acquire radius 1–2 m, miss radius 3–5 m. It does not
 tune those constants. A round is listed when its target credit falls to 0 at a

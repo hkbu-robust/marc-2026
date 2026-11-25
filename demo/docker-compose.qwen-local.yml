@@ -1,6 +1,6 @@
 # Practice override: load Qwen inside the participant container from a host snapshot.
 # Usage:
-#   MARC_QWEN_HOST_MODEL_DIR=~/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct \
+#   MARC_QWEN_HOST_MODEL_DIR=/path/to/Qwen3-VL-8B-Instruct \
 #   docker compose -f demo/docker-compose.yml \
 #     -f demo/docker-compose.qwen-local.yml up --build agent
 services:

@@ -1,5 +1,5 @@
 ### model
-model_name_or_path: /home/marc2026/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct
+model_name_or_path: Qwen/Qwen3-VL-8B-Instruct  # or override with local path via MARC_QWEN_MODEL_DIR
 adapter_name_or_path: /tmp/marc-qwen-800/final-adapter
 template: qwen3_vl_nothink
 trust_remote_code: true

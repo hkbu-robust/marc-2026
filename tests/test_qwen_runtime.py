@@ -60,8 +60,14 @@ class QwenRuntimeTests(unittest.TestCase):
             QwenRemoteConfig.load(environ=common).base_url,
         )
         self.assertEqual(
-            "http://10.0.0.200:8004/v1",
-            QwenRemoteConfig.load(environ={**common, "STREAM": "true"}).base_url,
+            "http://198.51.100.10:8004/v1",
+            QwenRemoteConfig.load(
+                environ={
+                    **common,
+                    "STREAM": "true",
+                    "MARC_QWEN_STREAM_URL": "http://198.51.100.10:8004/v1",
+                }
+            ).base_url,
         )
         with self.assertRaisesRegex(QwenConfigurationError, "API_KEY"):
             QwenRemoteConfig.load(environ={})
@@ -73,24 +79,24 @@ class QwenRuntimeTests(unittest.TestCase):
     def test_remote_config_builds_chat_endpoint(self):
         config = QwenRemoteConfig.load(
             environ={
-                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1/",
+                "MARC_QWEN_BASE_URL": "http://198.51.100.2:8000/v1/",
                 "MARC_QWEN_API_KEY": "secret",
                 "MARC_QWEN_MODEL": "qwen-test",
                 "MARC_QWEN_TIMEOUT_S": "4.5",
             }
         )
         self.assertEqual(
-            "http://10.0.0.2:8000/v1/chat/completions",
+            "http://198.51.100.2:8000/v1/chat/completions",
             config.chat_completions_url,
         )
-        self.assertEqual("http://10.0.0.2:8000/v1/models", config.models_url)
+        self.assertEqual("http://198.51.100.2:8000/v1/models", config.models_url)
         self.assertEqual("qwen-test", config.model_name)
         self.assertEqual(4.5, config.timeout_s)
 
     def test_remote_timeout_defaults_to_ninety_seconds(self):
         config = QwenRemoteConfig.load(
             environ={
-                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1",
+                "MARC_QWEN_BASE_URL": "http://198.51.100.2:8000/v1",
                 "MARC_QWEN_API_KEY": "secret",
             }
         )
@@ -100,7 +106,7 @@ class QwenRuntimeTests(unittest.TestCase):
     def test_remote_wall_timeout_is_configurable(self):
         config = QwenRemoteConfig.load(
             environ={
-                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1",
+                "MARC_QWEN_BASE_URL": "http://198.51.100.2:8000/v1",
                 "MARC_QWEN_API_KEY": "secret",
                 "MARC_QWEN_WALL_TIMEOUT_S": "8.5",
             }
@@ -110,7 +116,7 @@ class QwenRuntimeTests(unittest.TestCase):
     def test_remote_generation_defaults_to_forty_eight_tokens(self):
         config = QwenRemoteConfig.load(
             environ={
-                "MARC_QWEN_BASE_URL": "http://10.0.0.2:8000/v1",
+                "MARC_QWEN_BASE_URL": "http://198.51.100.2:8000/v1",
                 "MARC_QWEN_API_KEY": "secret",
             }
         )

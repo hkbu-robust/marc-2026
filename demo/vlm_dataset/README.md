@@ -73,7 +73,7 @@ Start LoRA training from the repo root (the optional argument is the dataset fol
 training/train_qwen_lora.sh trainer_output/qwen3vl_lora
 ```
 
-The script defaults to the local model used by `useful-commands/vllm launch`.
+The script defaults to `${MARC_PRETRAINED_ROOT:-./pretrained}/Qwen3-VL-8B-Instruct`.
 Override it with `MARC_QWEN_MODEL_DIR` and the output with
 `QWEN_LORA_OUTPUT_DIR`.
 

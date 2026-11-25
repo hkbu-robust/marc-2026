@@ -26,6 +26,8 @@ makes the exit code 1 when anything is missing).
 
 from __future__ import annotations
 
+import os
+
 import argparse
 import ast
 import csv
@@ -44,7 +46,7 @@ from typing import Optional, Union
 
 import yaml
 
-DEFAULT_ROOT = Path.home() / "marc-2026-work/experiments/ablations/final-system/final-experiments"
+DEFAULT_ROOT = Path(os.environ.get("MARC_WORK_DIR", "./work")) / "experiments/ablations/final-system/final-experiments"
 DEFAULT_MAPPING = Path(__file__).resolve().parent / "data" / "paper_numbers.yaml"
 # The paper itself is written elsewhere; the macros live with the paper material in the repo.
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "docs" / "paper" / "final-submission" / "numbers.tex"

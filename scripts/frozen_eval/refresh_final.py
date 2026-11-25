@@ -146,7 +146,7 @@ def main(argv=None) -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--parses", type=Path, required=True)
     parser.add_argument("--detections", type=Path, required=True)
-    parser.add_argument("--image", default="marc-agent:final-system-v1")
+    parser.add_argument("--image", default="robust-agent:finals")
     parser.add_argument("--image-id", required=True)
     args = parser.parse_args(argv)
 

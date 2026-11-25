@@ -1,8 +1,7 @@
 # Run the frozen pair with round dumps on: the final-system-v1 agent by default, or any
 # agent image (MARC_AGENT_IMAGE, set by run_stage1_repeats; marc-agent:frozen-logging is
 # the qualifier system with the #85 logging).
-#   docker compose -f docker-compose.yml -f docker-compose.frozen.yml \
-#     -f scripts/frozen-logging.compose.yml up
+#   docker compose -f docker-compose.yml -f scripts/frozen-logging.compose.yml up
 # Experiment runs can share one GPU (scripts/README.md, "Sharing the GPU"):
 # MARC_VLLM_PORT moves vLLM off 8004; MARC_VLLM_GPU_FRACTION is the share of the
 # physical card vLLM reserves (0.37 of 96 GB = ~36 GB, what it gets on the 48 GB
@@ -10,7 +9,7 @@
 # uses it to choose a fraction, which vLLM then applies to the physical card.
 services:
   qwen:
-    image: ${MARC_QWEN_IMAGE:-marc-qwen-vllm:qualifier-b2360c86}
+    image: ${MARC_QWEN_IMAGE:-robust-qwen:finals}
     environment:
       VLLM_PORT: "${MARC_VLLM_PORT:-8004}"
       VLLM_GPU_MEMORY_UTILIZATION: "${MARC_VLLM_GPU_FRACTION:-}"
@@ -21,7 +20,7 @@ services:
         - -c
         - "import os, urllib.request; request = urllib.request.Request('http://127.0.0.1:' + os.environ['VLLM_PORT'] + '/v1/models', headers={'Authorization': 'Bearer ' + os.environ['VLLM_API_KEY']}); urllib.request.urlopen(request, timeout=5)"
   agent:
-    image: ${MARC_AGENT_IMAGE:-marc-agent:final-system-v1}
+    image: ${MARC_AGENT_IMAGE:-robust-agent:finals}
     environment:
       MARC_QWEN_BASE_URL: "http://127.0.0.1:${MARC_VLLM_PORT:-8004}/v1"
       MARC_ROUND_DUMP: "${MARC_ROUND_DUMP:-1}"

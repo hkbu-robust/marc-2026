@@ -1,7 +1,7 @@
 """Fit the landmark footprint prior (#112) on held-out generator GT, even scenes only.
 
     python -m scripts.fit_landmark_footprint \
-        --gt '~/marc-2026-work/experiments/ablations/05-frozen-eval-sets/heldout-*/gt/marc2026_chungmu/scene_*/rig_*.json'
+        --gt './work/experiments/ablations/05-frozen-eval-sets/heldout-*/gt/marc2026_chungmu/scene_*/rig_*.json'
 
 For every fully visible landmark box, the prim origin (the point the scorer uses
 as the anchor) is projected at its ground height into the image and expressed as

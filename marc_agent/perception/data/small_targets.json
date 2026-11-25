@@ -13,7 +13,7 @@
   "tumbler",
   "umbrella"
  ],
- "dataset": "/home/marc2026/marc-2026-work/datasets/processed/robust-stage1-yolo34-ceccc62/data.yaml",
+ "dataset": "<WORK_ROOT>/datasets/processed/robust-stage1-yolo34-ceccc62/data.yaml",
  "dataset_sha256": "957cd863ac5ecb9d991b434021e2182329c67c55924ae4851d5272bcee9f8e74",
  "checkpoint_sha256": "64296e4b479855ed23b280ab3ce118e5adc7347e0241a21d6f365f8fe8d28cf2",
  "median_area_frac": {

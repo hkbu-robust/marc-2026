@@ -1,6 +1,6 @@
 """Frozen held-out and public evaluation sets for the selector comparison (#87).
 
-Pipeline, all outputs under ``~/marc-2026-work/experiments/ablations/05-frozen-eval-sets/``:
+Pipeline, all outputs under ``./work/experiments/ablations/05-frozen-eval-sets/``:
 
 1. ``training_record``: what the deployed Qwen adapter was trained on, read once
    from the text-only Arrow caches (strata counts, leakage index).

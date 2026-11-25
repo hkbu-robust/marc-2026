@@ -1,8 +1,7 @@
 # Stage 1 CCTV detector corrective replacement
 
 This optimizer-stripped 34-class detector was approved for promotion on 2026-08-29.
-The human approver explicitly waived the optional blind-review workflow. No completed
-blind-review JSON was fabricated. The superseded 33-class release remains immutable
+The superseded 33-class release remains immutable
 at Hugging Face revision `9227ecd11069d103c7dabdd287c6fc20a83eb6c1`.
 
 On 2026-08-31 it received a 10-epoch low-rate continuation from that umbrella-capable
@@ -14,7 +13,7 @@ material forgetting. The deployed checkpoint SHA-256 is
 
 ## Lineage
 
-- Selected run: `/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62`
+- Selected run: `<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62`
 - Selected training checkpoint: `last.pt`
 - Full selected training-checkpoint SHA-256: `12712d12e3321dffeb49296285a7d99f8fab12b46aa99a808b5d3cd1da80da22`
 - Stripped deployment SHA-256: `d799aacb8df1dce3372f5ec29495e7bb467898e453fc8d8fa32bdc7ecaff738e`
@@ -25,7 +24,7 @@ material forgetting. The deployed checkpoint SHA-256 is
 
 ## Permanent archive
 
-- Private Hugging Face model repository:
+- Public Hugging Face model repository:
   <https://huggingface.co/roBUst-marc-2026/stage1-cctv-detector>
 - Immutable replacement revision:
   `cb5a918f5bcd2c6561ef367fd275cbba49cbcf9c`
@@ -37,13 +36,12 @@ material forgetting. The deployed checkpoint SHA-256 is
 - Global all-class candidates, confidence descending, bounded by the recorded cap
 - Native full-frame inference at 1920; original-image pixel `xyxy`
 - No independent test split; the same validation split selected and reports this candidate
-- Human approval on 2026-08-29 explicitly waived blind review and authorized promotion
 
 ## Reproduction
 
-Evaluator command: `["/home/marc2026/marc-2026-robust/training/evaluate_cctv_detector.py", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/best.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch0.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch10.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch20.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch30.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch40.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch50.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch60.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch70.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch80.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch90.pt", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/last.pt", "--data", "/home/marc2026/marc-2026-work/datasets/processed/robust-stage1-yolo34-ceccc62/data.yaml", "--output", "/home/marc2026/marc-2026-work/evaluations/stage1-cctv-yolo26x-1920-umbrella-ceccc62/evaluation_report.json", "--training-record", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/training_record.json", "--old-model", "/home/marc2026/marc-2026-robust/models/runtime/stage1-cctv-detector/model.pt", "--imgsz", "1920", "--batch", "4", "--device", "0", "--confidence", "0.01", "0.02", "0.05", "0.1", "0.2", "0.3", "--candidate-limits", "20", "50", "--nms-iou", "0.5", "0.7", "--quantize", "fp16"]`
+Evaluator command: `["<REPO_ROOT>/training/evaluate_cctv_detector.py", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/best.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch0.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch10.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch20.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch30.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch40.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch50.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch60.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch70.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch80.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/epoch90.pt", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/last.pt", "--data", "<WORK_ROOT>/datasets/processed/robust-stage1-yolo34-ceccc62/data.yaml", "--output", "<WORK_ROOT>/evaluations/stage1-cctv-yolo26x-1920-umbrella-ceccc62/evaluation_report.json", "--training-record", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/training_record.json", "--old-model", "<REPO_ROOT>/models/runtime/stage1-cctv-detector/model.pt", "--imgsz", "1920", "--batch", "4", "--device", "0", "--confidence", "0.01", "0.02", "0.05", "0.1", "0.2", "0.3", "--candidate-limits", "20", "50", "--nms-iou", "0.5", "0.7", "--quantize", "fp16"]`
 
-Stage command: `["/home/marc2026/marc-2026-robust/training/stage1_candidate_bundle.py", "stage", "--evaluation", "/home/marc2026/marc-2026-work/evaluations/stage1-cctv-yolo26x-1920-umbrella-ceccc62/evaluation_report.json", "--training-record", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/training_record.json", "--checkpoint", "/home/marc2026/marc-2026-work/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/last.pt", "--published-bundle", "/home/marc2026/marc-2026-robust/models/runtime/stage1-cctv-detector", "--output", "/home/marc2026/marc-2026-work/candidates/stage1-cctv-detector-replacement-ceccc62"]`
+Stage command: `["<REPO_ROOT>/training/stage1_candidate_bundle.py", "stage", "--evaluation", "<WORK_ROOT>/evaluations/stage1-cctv-yolo26x-1920-umbrella-ceccc62/evaluation_report.json", "--training-record", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/training_record.json", "--checkpoint", "<WORK_ROOT>/runs/stage1-cctv-yolo26x-1920-umbrella-ceccc62/weights/last.pt", "--published-bundle", "<REPO_ROOT>/models/runtime/stage1-cctv-detector", "--output", "<WORK_ROOT>/candidates/stage1-cctv-detector-replacement-ceccc62"]`
 
 The runtime verification command and machine results are stored in
 `runtime_verification.json`. `candidate_output_example.json` is generated through

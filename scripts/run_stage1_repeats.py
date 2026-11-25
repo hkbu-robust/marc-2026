@@ -1,7 +1,7 @@
 """Run the agent N times on a fresh platform and collect each run (#85).
 
-    python -m scripts.run_stage1_repeats --out ~/marc-2026-work/experiments/ablations/NN-name \
-        --runs 2 [--scene-cache on] [--agent-image marc-agent:final-system-v1]
+    python -m scripts.run_stage1_repeats --out ./experiments/repeats \
+        --runs 2 [--scene-cache on] [--agent-image robust-agent:finals]
 
 For every run: tear down, start the platform headless, start vLLM (kept between
 runs) and a fresh agent, wait for the platform's FINISHED state, then copy the
@@ -31,7 +31,6 @@ REPO = Path(__file__).resolve().parent.parent
 PLATFORM_COMPOSE = ["-f", "simulation-platform/docker-compose.yml", "--profile", "platform"]
 AGENT_COMPOSE = [
     "-f", "docker-compose.yml",
-    "-f", "docker-compose.frozen.yml",
     "-f", "scripts/frozen-logging.compose.yml",
 ]
 FINISHED = re.compile(r"State: \S+ → FINISHED")
@@ -234,8 +233,8 @@ def main(argv=None) -> None:
     parser.add_argument("--first", type=int, default=1, help="number of the first run folder")
     parser.add_argument("--scene-cache", choices=["on", "off"], default="off",
                         help="on reproduces the qualifier submission; off is the final system")
-    parser.add_argument("--agent-image", default="marc-agent:final-system-v1")
-    parser.add_argument("--qwen-image", default="marc-qwen-vllm:qualifier-b2360c86")
+    parser.add_argument("--agent-image", default="robust-agent:finals")
+    parser.add_argument("--qwen-image", default="robust-qwen:finals")
     parser.add_argument("--project", default="marc85")
     parser.add_argument("--ros-domain-id", default="85")
     parser.add_argument("--agent-delay-s", type=float, default=20.0)

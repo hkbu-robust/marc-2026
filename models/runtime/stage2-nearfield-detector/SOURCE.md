@@ -1,9 +1,7 @@
 # Stage 2 near-field detector
 
 This bundle is the selected provisional ten-class robot-view exact-target
-detector for the MARC 2026 near-field acquisition path. Human review remains
-pending; this bundle does not close issue #16 or establish final challenge
-readiness.
+detector for the MARC 2026 near-field acquisition path. Provisional Stage 2 near-field detector bundle (not evaluated in the Stage 1 IEEE MetaCom 2026 paper).
 
 ## Artifact
 
@@ -71,7 +69,6 @@ local `model.pt` path and include the pinned runtime dependencies in the image.
 - The same validation split is used for model selection and readiness reporting.
 - Empty-label intent metadata is absent; intentional negatives cannot be separated from unknown empties.
 - Human blind review is pending.
-- This ten-class replacement candidate does not close issue #16 or establish final challenge readiness.
 
 ## Licensing note
 

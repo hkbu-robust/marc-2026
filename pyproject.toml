@@ -1,0 +1,25 @@
+[project]
+name = "hkbu-robust-marc-2026"
+version = "1.0.0"
+description = "Grounding Vision-Language Models for Target Localization (IEEE MetaCom 2026 · MARC Challenge)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "scipy>=1.11",
+    "pillow>=10.0",
+    "opencv-python-headless>=4.8",
+    "matplotlib>=3.8",
+    "h5py>=3.10",
+    "placo>=0.9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "demo"]
+addopts = "-ra"

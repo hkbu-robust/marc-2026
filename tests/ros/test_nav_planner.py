@@ -7,6 +7,9 @@ Run from repo root or demo/:
 
 from __future__ import annotations
 
+import pytest
+pytest.importorskip('rclpy')
+
 import math
 import sys
 

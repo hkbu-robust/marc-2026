@@ -307,6 +307,8 @@ class GripperCloseTests(unittest.TestCase):
         np.testing.assert_allclose(limited / limited[0], delta / delta[0])
 
     def test_coordinated_fold_uses_one_eased_twenty_hz_joint_path(self):
+        import pytest
+        pytest.importorskip('sensor_msgs')
         client = _CommandFollowingClient()
         arm = object.__new__(ArmTeleop)
         arm._client = client

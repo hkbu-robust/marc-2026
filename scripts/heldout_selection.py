@@ -38,7 +38,7 @@ from typing import Optional
 
 import numpy as np
 
-SETS = Path.home() / "marc-2026-work/experiments/ablations/05-frozen-eval-sets"
+SETS = Path(os.environ.get("MARC_WORK_DIR", "./work")) / "experiments/ablations/05-frozen-eval-sets"
 TARGET_CREDIT_M = 1.0  # well inside the ~1.85 m the scorer credited in #88 (#91 caveat)
 MATCH_IOU = 0.5
 

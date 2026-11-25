@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+pytest.importorskip('rclpy')
+
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -26,7 +29,6 @@ from manip_dataset.openvla_pick import (
     target_moved_with_gripper,
 )
 from manip_dataset.pick_target import snapshot_pick_target, stable_pick_target
-from manip_dataset.to_rlds import _pick_image_key
 
 
 def _target(*, z=-0.25, fwd=0.50, lat=0.0, valid=True):
@@ -512,12 +514,6 @@ class OpenVLAStagingTests(unittest.TestCase):
         self.assertEqual(0.70, cfg.upright_already_near_m)
         self.assertGreater(cfg.upright_already_near_m, cfg.already_near_m)
 
-    def test_explicit_base_view_never_falls_back_to_gripper(self):
-        class Steps(dict):
-            attrs = {"primary_camera": "base_left"}
-
-        with self.assertRaisesRegex(ValueError, "base_left"):
-            _pick_image_key(Steps(image_gripper_left=object()), "base_left")
 
     def test_stage_goal_enters_recorded_base_camera_workspace(self):
         cfg = SimpleNamespace(

@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dataset_dir="${1:-$repo_dir/trainer_output/qwen3vl_lora}"
-model_dir="${MARC_QWEN_MODEL_DIR:-/home/marc2026/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct}"
+model_dir="${MARC_QWEN_MODEL_DIR:-${MARC_PRETRAINED_ROOT:-./pretrained}/Qwen3-VL-8B-Instruct}"
 output_dir="${QWEN_LORA_OUTPUT_DIR:-$repo_dir/saves/qwen3-vl-8b/lora/marc}"
 config="$repo_dir/training/configs/qwen3vl-8b-lora-sft.yaml"
 

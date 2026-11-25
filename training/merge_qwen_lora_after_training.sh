@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work_dir="${QWEN_PIPELINE_WORK_DIR:-/tmp/marc-qwen-800}"
-model_dir="${MARC_QWEN_MODEL_DIR:-/home/marc2026/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct}"
+model_dir="${MARC_QWEN_MODEL_DIR:-${MARC_PRETRAINED_ROOT:-./pretrained}/Qwen3-VL-8B-Instruct}"
 merged_dir="${QWEN_MERGED_MODEL_DIR:-$work_dir/merged-model}"
 config="$repo_dir/training/configs/qwen3vl-8b-lora-merge.yaml"
 poll_seconds="${QWEN_MERGE_POLL_SECONDS:-30}"

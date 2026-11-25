@@ -126,7 +126,7 @@ args=(
   --host "${VLLM_HOST:-127.0.0.1}"
   --port "${VLLM_PORT:-8004}"
   --served-model-name "${VLLM_MODEL_NAME:-qwen3-vl-8b}"
-  --api-key "${VLLM_API_KEY:-marc-qwen-secret}"
+  --api-key "${VLLM_API_KEY:-local-vllm-key}"
   --dtype "$dtype"
   --tensor-parallel-size "$tensor_parallel"
   --gpu-memory-utilization "$utilization"

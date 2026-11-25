@@ -1,0 +1,49 @@
+cff-version: 1.2.0
+title: "Grounding Vision–Language Models for Target Localization"
+message: "If you use this code or reference our MARC 2026 system, please cite our IEEE MetaCom 2026 paper."
+type: software
+repository-code: "https://github.com/hkbu-robust/marc-2026"
+license: MIT
+authors:
+  - family-names: Nadeem
+    given-names: Muhammad Ahmad
+    affiliation: "Hong Kong Baptist University"
+  - family-names: Turmanidze
+    given-names: Luka
+    affiliation: "Hong Kong Baptist University"
+  - family-names: Kumar
+    given-names: Bhawish
+    affiliation: "Hong Kong Baptist University"
+  - family-names: Bashar
+    given-names: Habibul
+    affiliation: "Hong Kong Baptist University"
+  - family-names: Choy
+    given-names: Martin M. T.
+    affiliation: "Hong Kong Baptist University"
+  - family-names: Cheng
+    given-names: Kam Kong
+    affiliation: "Hong Kong Baptist University"
+preferred-citation:
+  type: conference-paper
+  title: "Grounding Vision–Language Models for Target Localization"
+  authors:
+    - family-names: Nadeem
+      given-names: Muhammad Ahmad
+      affiliation: "Hong Kong Baptist University"
+    - family-names: Turmanidze
+      given-names: Luka
+      affiliation: "Hong Kong Baptist University"
+    - family-names: Kumar
+      given-names: Bhawish
+      affiliation: "Hong Kong Baptist University"
+    - family-names: Bashar
+      given-names: Habibul
+      affiliation: "Hong Kong Baptist University"
+    - family-names: Choy
+      given-names: Martin M. T.
+      affiliation: "Hong Kong Baptist University"
+    - family-names: Cheng
+      given-names: Kam Kong
+      affiliation: "Hong Kong Baptist University"
+  collection-title: "Proceedings of the IEEE International Conference on Metaverse Computing, Networking and Applications (MetaCom)"
+  year: 2026

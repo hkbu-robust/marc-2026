@@ -6,7 +6,7 @@
 # it is marc-agent:frozen-logging; built from a final-system branch it is that
 # branch's smoke-run image (scripts/README.md).
 #   docker build -f scripts/frozen_logging.Dockerfile -t marc-agent:frozen-logging .
-ARG BASE=marc-agent:final-system-v1
+ARG BASE=robust-agent:finals
 FROM ${BASE}
 COPY marc_agent /agent/marc_agent
 COPY demo /agent/demo

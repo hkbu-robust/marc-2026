@@ -16,7 +16,7 @@
     "validation_map50_95": 0.88334
   },
   "dataset": {
-    "path": "/home/marc2026/marc-2026-work/datasets/processed/robust-stage1-yolo34-ceccc62/data.yaml",
+    "path": "<WORK_ROOT>/datasets/processed/robust-stage1-yolo34-ceccc62/data.yaml",
     "sha256": "957cd863ac5ecb9d991b434021e2182329c67c55924ae4851d5272bcee9f8e74",
     "source_revision": "ceccc62d27e7fc186fd186e66632da38aeac6668",
     "source_data_yaml_sha256": "a9277d45dfaeefa3aaec34f6cf82218c4b362dd7b19c06271f8dc6ff417b1f9a"

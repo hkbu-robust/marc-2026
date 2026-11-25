@@ -18,7 +18,7 @@ services:
     ipc: host
     environment:
       MARC_BUILD_MODE: "${MARC_BUILD_MODE:-baked}"
-      VLLM_API_KEY: "marc-qwen-secret"
+      VLLM_API_KEY: "${VLLM_API_KEY:-local-vllm-key}"
       VLLM_MODEL_NAME: "qwen3-vl-8b"
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
@@ -61,7 +61,7 @@ services:
     runtime: nvidia
     environment:
       MARC_TEAM_ID: "${MARC_TEAM_ID:-robust}"
-      MARC_TOKEN: "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
+      MARC_TOKEN: "${MARC_TOKEN:-}"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent:/agent/demo"
@@ -71,7 +71,7 @@ services:
       MARC_SAR_DETECTOR: "qwen-remote"
       MARC_QWEN_BACKEND: "remote"
       MARC_QWEN_BASE_URL: "http://127.0.0.1:8004/v1"
-      MARC_QWEN_API_KEY: "marc-qwen-secret"
+      MARC_QWEN_API_KEY: "${MARC_QWEN_API_KEY:-local-vllm-key}"
       MARC_QWEN_MODEL: "qwen3-vl-8b"
       MARC_QWEN_WALL_TIMEOUT_S: "${MARC_QWEN_WALL_TIMEOUT_S:-90}"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"

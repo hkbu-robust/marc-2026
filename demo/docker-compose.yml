@@ -38,17 +38,17 @@ services:
       # For the private-repo submission use (2) so the organizer just runs `docker compose up`.
       # The team ID and token are issued by the organizers (not defaulted or derived locally).
       MARC_TEAM_ID:  "${MARC_TEAM_ID:-robust}"                     # <- your assigned team ID
-      MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"    # <- your assigned token
+      MARC_TOKEN:    "${MARC_TOKEN:-}"    # <- your assigned token
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"                     # same value as the platform machine
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent:/agent/demo"
       PYTHONUNBUFFERED: "1"
-      # Local host by default; STREAM=true selects http://10.0.0.200:8004/v1.
+      # Local host by default; STREAM=true selects MARC_QWEN_STREAM_URL (or MARC_QWEN_BASE_URL).
       MARC_SAR_DETECTOR: "qwen-remote"
       MARC_QWEN_BACKEND: "remote"
       STREAM: "${STREAM:-false}"
       MARC_QWEN_BASE_URL: "http://127.0.0.1:8004/v1"
-      MARC_QWEN_API_KEY: "marc-qwen-secret"
+      MARC_QWEN_API_KEY: "${MARC_QWEN_API_KEY:-local-vllm-key}"
       MARC_QWEN_MODEL: "qwen3-vl-8b"
       MARC_QWEN_MAX_CROPS: "${MARC_QWEN_MAX_CROPS:-12}"
       MARC_CCTV_DISCOVERY_TIMEOUT_S: "${MARC_CCTV_DISCOVERY_TIMEOUT_S:-10}"
@@ -104,10 +104,11 @@ services:
     # Loads demo/.env into the container (compose only auto-reads it for ${} interpolation,
     # not as container env, unless listed here). Put MARC_READY_J5/J6/UP overrides in demo/.env.
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       MARC_TEAM_ID:  "${MARC_TEAM_ID:-u1}"
-      MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
+      MARC_TOKEN:    "${MARC_TOKEN:-}"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       # Match manip-trainer: UDP-only Fast DDS (no SHM) so host-network DDS discovery works
@@ -148,10 +149,11 @@ services:
     stdin_open: true
     tty: true
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       MARC_TEAM_ID:  "${MARC_TEAM_ID:-u1}"
-      MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
+      MARC_TOKEN:    "${MARC_TOKEN:-}"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       FASTRTPS_DEFAULT_PROFILES_FILE: "/agent/demo/fastdds.xml"
@@ -159,7 +161,7 @@ services:
       PYTHONUNBUFFERED: "1"
       MARC_PICK_POLICY: graspgenx
       MARC_GRIP_CLOSE: "${MARC_GRIP_CLOSE:-0.68}"
-      MARC_OPENVLA_BASE_URL: "${MARC_OPENVLA_BASE_URL:-http://10.0.0.200:8003/v1}"
+      MARC_OPENVLA_BASE_URL: "${MARC_OPENVLA_BASE_URL:-http://127.0.0.1:8003/v1}"
       MARC_OPENVLA_API_KEY: "${MARC_OPENVLA_API_KEY:-marc-openvla-secret}"
       MARC_OPENVLA_MODEL: "${MARC_OPENVLA_MODEL:-openvla-7b}"
       MARC_OPENVLA_TICKS: "${MARC_OPENVLA_TICKS:-20}"
@@ -201,7 +203,7 @@ services:
     working_dir: /agent/demo
     environment:
       MARC_TEAM_ID:  "${MARC_TEAM_ID:-robust}"
-      MARC_TOKEN:    "${MARC_TOKEN:-PASTE_YOUR_TOKEN_HERE}"
+      MARC_TOKEN:    "${MARC_TOKEN:-}"
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
       RMW_IMPLEMENTATION: "rmw_fastrtps_cpp"
       PYTHONPATH: "/agent:/agent/demo"

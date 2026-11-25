@@ -1,9 +1,9 @@
 {
   "verified": true,
   "offline": true,
-  "weights": "/home/marc2026/marc-2026-work/candidates/stage2-nearfield-detector-umbrella-e52c3156/model.pt",
+  "weights": "<WORK_ROOT>/candidates/stage2-nearfield-detector-umbrella-e52c3156/model.pt",
   "weights_sha256": "ff8e156b65ee556e2eae31a5fee94f8a3056d9dc92c771c1be48762cea7f6cc7",
-  "image": "/home/marc2026/ahmad-marc-robust/datasets/processed/robust-nearfield-yolo10-e52c3156/images/val/00450.png",
+  "image": "<REPO_ROOT>/datasets/processed/robust-nearfield-yolo10-e52c3156/images/val/00450.png",
   "target": "tumbler",
   "runtime_path": "YoloDetector -> YoloTracker.detect_candidates -> NearFieldAcquire candidate/radius selection",
   "ordered_classes": [

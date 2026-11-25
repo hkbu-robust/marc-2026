@@ -5,7 +5,7 @@ with ``MARC_COMMAND_PARSER=qwen`` and the deployed Qwen served by vLLM::
 
     docker run --rm --network host --entrypoint python3 \\
       -e MARC_COMMAND_PARSER=qwen -e MARC_QWEN_BACKEND=remote \\
-      -e MARC_QWEN_BASE_URL=http://127.0.0.1:8024/v1 -e MARC_QWEN_API_KEY=marc-qwen-secret \\
+      -e MARC_QWEN_BASE_URL=http://127.0.0.1:8024/v1 -e MARC_QWEN_API_KEY=local-vllm-key \\
       -e MARC_QWEN_MODEL=qwen3-vl-8b \\
       -v $REPO/scripts/frozen_eval:/work/frozen_eval:ro -v $ROOT:$ROOT \\
       marc-agent:final-system-v1 /work/frozen_eval/parse_final.py $ROOT heldout $OUT.jsonl

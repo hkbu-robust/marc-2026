@@ -3,7 +3,7 @@
 Run in the frozen agent image against a live platform, with the agent's ROS
 environment (``MARC_TEAM_ID``/``MARC_TOKEN``, host network, ``ROS_DOMAIN_ID``)::
 
-    docker compose -p eval87-agent -f docker-compose.yml -f docker-compose.frozen.yml \\
+    docker compose -p eval-agent -f docker-compose.yml \\
       -f scripts/frozen-logging.compose.yml run --rm --no-deps \\
       -v $REPO/scripts/frozen_eval:/work/frozen_eval:ro -v $OUT_DIR:/out \\
       --entrypoint python3 agent /work/frozen_eval/capture_sdk_geometry.py /out/sdk_cameras.json

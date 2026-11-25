@@ -106,7 +106,7 @@ class OpenVLAPolicyTests(unittest.TestCase):
         ))
         self.assertEqual((ACTION_DIM,), action.shape)
         self.assertEqual(
-            "http://10.0.0.200:8003/v1/chat/completions", seen["url"],
+            "http://127.0.0.1:8003/v1/chat/completions", seen["url"],
         )
         self.assertEqual(ACTION_DIM, seen["payload"]["max_tokens"])
         self.assertTrue(seen["payload"]["return_token_ids"])

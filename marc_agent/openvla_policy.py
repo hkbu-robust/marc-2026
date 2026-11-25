@@ -51,7 +51,7 @@ _WEIGHT_FILES = (
     "openvla.pt",
 )
 
-DEFAULT_REMOTE_BASE_URL = "http://10.0.0.200:8003/v1"
+DEFAULT_REMOTE_BASE_URL = "http://127.0.0.1:8003/v1"
 DEFAULT_REMOTE_API_KEY = "marc-openvla-secret"
 DEFAULT_REMOTE_MODEL = "openvla-7b"
 BRIDGE_ORIG_Q01 = (

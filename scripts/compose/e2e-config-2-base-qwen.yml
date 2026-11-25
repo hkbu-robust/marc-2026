@@ -8,4 +8,4 @@ services:
       MARC_BUILD_MODE: development
       VLLM_MODEL_DIR: /models-dev/qwen
     volumes:
-      - ${MARC_BASE_QWEN_DIR:-/home/marc2026/marc-2026-work/pretrained/Qwen3-VL-8B-Instruct}:/models-dev/qwen:ro
+      - ${MARC_BASE_QWEN_DIR:?Set MARC_BASE_QWEN_DIR to local Qwen3-VL-8B-Instruct snapshot directory}:/models-dev/qwen:ro

@@ -34,7 +34,7 @@ REPO = Path(__file__).resolve().parents[1]
 TEST = REPO / "tests/fixtures/parser_test_set.json"
 ADJ = REPO / "tests/fixtures/parser_test_adjudication.json"
 DEV = REPO / "tests/fixtures/command_cases.yaml"
-PUBLIC_RUN = Path.home() / "marc-2026-work/experiments/ablations/04-repeated-runs/cache-off/run-01"
+PUBLIC_RUN = Path(os.environ.get("MARC_WORK_DIR", "./work")) / "experiments/ablations/04-repeated-runs/cache-off/run-01"
 FIELDS = ("target_type", "landmark", "relation", "scene_hint", "situation")  # Stage 1 is always find
 CONVENTION_RE = re.compile(r"\bnext\s+to\b|\bleaning\s+against\b|\bby\b", re.I)
 
@@ -151,7 +151,7 @@ def readers(qwen_url: str | None):
     }
     if qwen_url:
         os.environ.update({"MARC_QWEN_BACKEND": "remote", "MARC_QWEN_BASE_URL": qwen_url,
-                           "MARC_QWEN_API_KEY": os.environ.get("MARC_QWEN_API_KEY", "marc-qwen-secret"),
+                           "MARC_QWEN_API_KEY": os.environ.get("MARC_QWEN_API_KEY", "local-vllm-key"),
                            "MARC_QWEN_MODEL": "qwen3-vl-8b", "MARC_COMMAND_PARSER": "qwen"})
         complete = command_llm.qwen_complete()
         out["qwen"] = lambda t: as_dict(command_llm.read_command(

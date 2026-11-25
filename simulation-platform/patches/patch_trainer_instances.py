@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026, IoT Convergence & Open Sharing System (IoTCOSS)
+# Copyright (c) 2026, Team roBUst (Hong Kong Baptist University) — MIT License
 #
 # MARC 2026 - source patch: per-scene instance counts for dataset-gen
 # ---------------------------------------------------------------------------

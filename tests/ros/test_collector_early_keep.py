@@ -1,5 +1,8 @@
 """Placement-time episode acceptance tests."""
 
+
+import pytest
+pytest.importorskip('rclpy')
 import time
 import unittest
 from types import SimpleNamespace

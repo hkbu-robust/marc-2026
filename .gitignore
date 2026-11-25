@@ -41,8 +41,17 @@ simulation-platform/.env
 /.env
 /.cache/
 
-# luka: workstation specific & personal
-docs/luka/
+# Local editor / OS / runtime files
 .DS_Store
 .Xauthority
 .vscode/
+
+# Secrets & local runtime logs (never commit)
+demo/.env
+demo/tokens.env
+demo/artifacts/
+demo/weights/Ultralytics/
+
+# Allow paper figures & video posters under docs/assets/
+!docs/assets/**/*.png
+.venv/
