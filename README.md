@@ -26,12 +26,11 @@
 </p>
 
 <p>
-  <a href="paper/MARC2026_Grounding_VLMs.pdf"><img src="https://img.shields.io/badge/Paper-PDF-B31B1B?style=flat&logo=adobeacrobatreader&logoColor=white" alt="Paper PDF"></a>
+  <a href="paper/MARC2026_Grounding_VLMs.pdf"><img src="https://img.shields.io/badge/Paper-PDF-B31B1B?style=flat&logo=readthedocs&logoColor=white" alt="Paper PDF"></a>
   <a href="#results"><img src="https://img.shields.io/badge/Venue-IEEE%20MetaCom%202026-00629B?style=flat&logo=ieee&logoColor=white" alt="IEEE MetaCom 2026"></a>
-  <a href="#results"><img src="https://img.shields.io/badge/MARC%202026-Excellence%20Award%20(2nd)%20%7C%201st%20in%20Stage%201-D97706?style=flat" alt="MARC 2026 Award"></a>
-  <a href="https://huggingface.co/roBUst-marc-2026"><img src="https://img.shields.io/badge/Models-Hugging%20Face-FFD21E?style=flat&logo=huggingface&logoColor=black" alt="Hugging Face Models"></a>
-  <a href="https://github.com/hkbu-robust/marc-2026/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/hkbu-robust/marc-2026/ci.yml?branch=main&label=tests&style=flat" alt="CPU Tests"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT%20(code)-2EA44F?style=flat" alt="License"></a>
+  <a href="#results"><img src="https://img.shields.io/badge/MARC%202026-Excellence%20Award%20(2nd)-D97706?style=flat" alt="MARC 2026 Excellence Award"></a>
+  <a href="https://huggingface.co/roBUst-marc-2026"><img src="https://img.shields.io/badge/Hugging%20Face-Models-FFD21E?style=flat&logo=huggingface&logoColor=FFD21E" alt="Hugging Face Models"></a>
+  <a href="#demo-videos"><img src="https://img.shields.io/badge/Demo-YouTube-FF0000?style=flat&logo=youtube&logoColor=white" alt="Demo Videos"></a>
 </p>
 
 </div>
