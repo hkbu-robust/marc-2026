@@ -30,7 +30,7 @@
   <a href="#results"><img src="https://img.shields.io/badge/Venue-IEEE%20MetaCom%202026-00629B?style=flat&logo=ieee&logoColor=white" alt="IEEE MetaCom 2026"></a>
   <a href="#results"><img src="https://img.shields.io/badge/MARC%202026-Excellence%20Award%20(2nd)-D97706?style=flat" alt="MARC 2026 Excellence Award"></a>
   <a href="https://huggingface.co/roBUst-marc-2026"><img src="https://img.shields.io/badge/Hugging%20Face-Models-FFD21E?style=flat&logo=huggingface&logoColor=FFD21E" alt="Hugging Face Models"></a>
-  <a href="#demo-videos"><img src="https://img.shields.io/badge/Demo-Videos-FF0000?style=flat&logo=youtube&logoColor=white" alt="Demo Videos"></a>
+  <a href="#demo-videos"><img src="https://img.shields.io/badge/Demo-Videos-FF0000?style=flat" alt="Demo Videos"></a>
 </p>
 
 </div>
