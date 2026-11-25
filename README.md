@@ -30,14 +30,14 @@
   <a href="#results"><img src="https://img.shields.io/badge/Venue-IEEE%20MetaCom%202026-00629B?style=flat&logo=ieee&logoColor=white" alt="IEEE MetaCom 2026"></a>
   <a href="#results"><img src="https://img.shields.io/badge/MARC%202026-Excellence%20Award%20(2nd)-D97706?style=flat" alt="MARC 2026 Excellence Award"></a>
   <a href="https://huggingface.co/roBUst-marc-2026"><img src="https://img.shields.io/badge/Hugging%20Face-Models-FFD21E?style=flat&logo=huggingface&logoColor=FFD21E" alt="Hugging Face Models"></a>
-  <a href="#demo-videos"><img src="https://img.shields.io/badge/Demo-YouTube-FF0000?style=flat&logo=youtube&logoColor=white" alt="Demo Videos"></a>
+  <a href="#demo-videos"><img src="https://img.shields.io/badge/Demo-Videos-2563EB?style=flat" alt="Demo Videos"></a>
 </p>
 
 </div>
 
-- **Paper:** *Grounding Vision–Language Models for Target Localization* ([Read PDF](paper/MARC2026_Grounding_VLMs.pdf) · [Release `v1.0`](https://github.com/hkbu-robust/marc-2026/releases/tag/v1.0) · IEEE MetaCom 2026, in press)
+- **Paper:** *Grounding Vision–Language Models for Target Localization* ([Read PDF](paper/MARC2026_Grounding_VLMs.pdf) · IEEE MetaCom 2026, in press)
 - **Models:** [Stage 1 YOLO26x (34-class)](https://huggingface.co/roBUst-marc-2026/stage1-cctv-detector) · [LoRA Qwen3-VL-8B Selector](https://huggingface.co/roBUst-marc-2026/qwen3-vl-8b-stage1-finetuned)
-- **Videos:** [System Showcase (2:49, YouTube)](https://youtu.be/TyJUwv-Pvrw) · [End-to-End Walkthrough `hf03` (2:43, YouTube)](https://youtu.be/v5tg7OzJa_A) · [Downloads (Release `v1.0`)](#demo-videos)
+- **Videos:** [System Showcase (2:49)](#system-showcase-249) · [Single-Round Walkthrough `hf03` (2:43)](#single-round-walkthrough-hf03-243)
 - **Code Freeze:** Tag [`final-system-v1`](https://github.com/hkbu-robust/marc-2026/tree/final-system-v1) matches the cleaned system evaluated in the paper and final competition submission.
 
 <p align="center">
@@ -108,12 +108,19 @@ Across **10 cold starts** of the 33 public practice rounds (`marc2026_chungmu`),
 
 ## Demo Videos
 
-Both 1080p films are rendered directly from the real run logs, calibrated cameras, and ground model of the frozen `final-system-v1` submission (`87.54` run). Click either thumbnail to stream on YouTube, or download the archival MP4s from [Release `v1.0`](https://github.com/hkbu-robust/marc-2026/releases/tag/v1.0).
+Both films are rendered directly from the real run logs, calibrated cameras, and ground model of the frozen `final-system-v1` submission (`87.54` run).
 
-| System Showcase (2:49) | Single-Round Walkthrough `hf03` (2:43) |
-| :---: | :---: |
-| [![System Showcase](docs/assets/video-posters/showcase.jpg)](https://youtu.be/TyJUwv-Pvrw) | [![Round hf03 Walkthrough](docs/assets/video-posters/walkthrough.jpg)](https://youtu.be/v5tg7OzJa_A) |
-| Full pipeline overview, 3D calibrated six-camera ray projection, SAR rounds, and quantitative results ([YouTube](https://youtu.be/TyJUwv-Pvrw) · [MP4, 37 MB](https://github.com/hkbu-robust/marc-2026/releases/download/v1.0/showcase-1080p30.mp4)). | Step-by-step trace of round `hf03` (*"left my mug there"*) from raw frames and YOLO boxes to Qwen3-VL candidate board selection and 3D submission ([YouTube](https://youtu.be/v5tg7OzJa_A) · [MP4, 27 MB](https://github.com/hkbu-robust/marc-2026/releases/download/v1.0/walkthrough-1080p30.mp4)). |
+### System Showcase (2:49)
+
+Full pipeline overview, 3D calibrated six-camera ray projection, SAR rounds, and quantitative results.
+
+https://github.com/user-attachments/assets/8c56338c-5093-463e-9761-91163366ed36
+
+### Single-Round Walkthrough `hf03` (2:43)
+
+Step-by-step trace of round `hf03` (*"left my mug there"*) from raw frames and YOLO boxes to Qwen3-VL candidate board selection and 3D submission.
+
+https://github.com/user-attachments/assets/563d18ea-0039-424c-9abc-14f48b4028f4
 
 ---
 
