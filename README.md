@@ -47,13 +47,10 @@
   <em><strong>Figure 1.</strong> Stage 1 runtime path. YOLO26x proposes 34-class instances across all six CCTV views; LoRA-adapted Qwen3-VL-8B parses the command under a JSON schema and selects one listed identifier from a geometry-ranked candidate board; deterministic guards verify or override the pick before metric ray projection onto a pose-gated calibrated ground surface.</em>
 </p>
 
-<!-- INLINE VIDEO SLOT: After making the repo public, drag-and-drop locate-hero-720p.mp4 into the GitHub README web editor here to replace the clickable preview below with a native inline <video> player. -->
+https://github.com/user-attachments/assets/3ad78b6e-e77d-4df2-b94e-8dde11efc0d4
+
 <p align="center">
-  <a href="https://github.com/hkbu-robust/marc-2026/releases/download/v1.0/locate-hero-720p.mp4">
-    <img src="docs/assets/video-posters/showcase.jpg" alt="Calibrated 3D ray-ground localization preview (04 · LOCATE)" width="82%">
-  </a>
-  <br>
-  <em><strong>3D Localization Preview (18 s, 720p):</strong> Calibrated camera rays from six fixed CCTV rigs intersecting the learned ground surface and landmark support plane on round <code>hf03</code> (logged <code>final-system-v1</code> run). <a href="https://github.com/hkbu-robust/marc-2026/releases/download/v1.0/locate-hero-720p.mp4">Watch clip (2.6 MB MP4)</a>.</em>
+  <em><strong>3D Localization Preview (18 s, 720p):</strong> Calibrated camera rays from six fixed CCTV rigs intersecting the learned ground surface and landmark support plane on round <code>hf03</code> (logged <code>final-system-v1</code> run).</em>
 </p>
 
 ---
