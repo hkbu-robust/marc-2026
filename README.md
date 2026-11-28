@@ -187,7 +187,6 @@ If you find this code, evaluation harness, or paper useful, please cite:
 ---
 
 ## License & Acknowledgements
-
 - **Code license:** Original Team roBUst source code is licensed under the **[MIT License](LICENSE)**. Running the combined system with Ultralytics and the fine-tuned YOLO26x weights (`models/runtime/stage1-cctv-detector/LICENSE`) forms a combined work subject to **GNU AGPL-3.0**. Third-party licenses, organizer starter-kit attributions, and 3D asset credits are detailed in **[NOTICES.md](NOTICES.md)**.
 - **IEEE manuscript notice:** *© 2026 IEEE. Personal use of this material is permitted. Permission from IEEE must be obtained for all other uses, in any current or future media, including reprinting/republishing this material for advertising or promotional purposes, creating new collective works, for resale or redistribution to servers or lists, or reuse of any copyrighted component of this work in other works.*
 - **Acknowledgements:** We thank the **Meta-Sejong AI Robotics Challenge (MARC) 2026** organizers (Sejong University / IoTCOSS) for the Isaac Sim digital twin, ROS 2 SDK, and evaluation benchmark, and the **Department of Computer Science, Hong Kong Baptist University** for compute support. Built on `Ultralytics YOLO26`, `Qwen3-VL`, `vLLM`, and `ROS 2 Humble`.
